@@ -1,0 +1,11 @@
+{
+  "id": "whiteboard-experience",
+  "type": "module",
+  "title": "Whiteboard Experience",
+  "description": "Now tokens layer gives you whiteboard experience",
+  "version": "1.0.0",
+  "compatibility": { "minimum": "13", "verified": "13" },
+  "authors": [{ "name": "rokunin" }],
+  "esmodules": ["scripts/main.mjs"],
+  "socket": true
+}

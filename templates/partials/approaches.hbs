@@ -1,0 +1,14 @@
+<div class="ftc-approaches">
+  {{#each approaches}}
+    <div class="ftc-approach" data-key="{{this.label}}">
+      <span class="ftc-approach-name">{{this.label}}</span>
+      <span class="ftc-approach-value" data-sign="{{#if (gte this.value 0)}}+{{/if}}">
+        <span class="ftc-approach-display">{{#if (gte this.value 0)}}+{{/if}}{{this.value}}</span>
+        <div class="ftc-approach-edit" style="display: none;">
+          <input type="text" class="ftc-approach-name-input" value="{{this.label}}" placeholder="Название подхода"/>
+          <input type="number" class="ftc-approach-value-input" value="{{this.value}}" step="1" min="-3" max="5" placeholder="0"/>
+        </div>
+      </span>
+    </div>
+  {{/each}}
+</div>

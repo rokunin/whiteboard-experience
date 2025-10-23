@@ -1,0 +1,85 @@
+<div class="ftc-card">
+  <div class="ftc-header">
+    <div class="ftc-title">FATE CARD</div>
+    <span class="ftc-name-display">{{name}}</span>
+    <input class="ftc-name" type="text" value="{{name}}" placeholder="Имя персонажа"/>
+    
+    <div class="ftc-menu-wrapper">
+      <button class="ftc-menu-button" title="Меню карточки">
+        <i class="fas fa-bars"></i>
+      </button>
+      <div class="ftc-menu-dropdown">
+        <div class="ftc-menu-item ftc-menu-edit">
+          <i class="fas fa-edit"></i> Редактировать карточку
+        </div>
+        <div class="ftc-menu-item ftc-menu-scale">
+          <i class="fas fa-search-plus"></i> Масштабировать
+        </div>
+        <div class="ftc-menu-item ftc-menu-delete">
+          <i class="fas fa-trash"></i> Удалить карточку
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ftc-body">
+    <div class="ftc-left">
+      <div class="ftc-portrait" style="{{#if portrait}}background-image:url({{portrait}}){{/if}}"></div>
+      <input class="ftc-portrait-url" type="text" placeholder="URL портрета" value="{{portrait}}"/>
+
+      <div class="ftc-stress-consequences">
+        <div class="ftc-stress-block">
+          <div class="ftc-stress-boxes">
+            <div class="ftc-stress-box {{#if (lookup stress "1")}}active{{/if}}" data-value="1">1</div>
+            <div class="ftc-stress-box {{#if (lookup stress "2")}}active{{/if}}" data-value="2">2</div>
+            <div class="ftc-stress-box {{#if (lookup stress "3")}}active{{/if}}" data-value="3">3</div>
+          </div>
+        </div>
+
+        <div class="ftc-consequences-block">
+          <div class="ftc-consequences-boxes">
+            <div class="ftc-consequence-box {{#if (lookup consequences "2")}}active{{/if}}" data-value="2">2</div>
+            <div class="ftc-consequence-box {{#if (lookup consequences "4")}}active{{/if}}" data-value="4">4</div>
+            <div class="ftc-consequence-box {{#if (lookup consequences "6")}}active{{/if}}" data-value="6">6</div>
+          </div>
+          <textarea class="ftc-consequences-text" placeholder="Последствия">{{consequencesText}}</textarea>
+        </div>
+      </div>
+    </div>
+
+    <div class="ftc-mid">
+      <div class="ftc-top-row">
+        <div class="ftc-block ftc-approaches-block">
+          {{> "modules/whiteboard-experience/templates/partials/approaches.hbs" approaches=approaches}}
+        </div>
+
+        <div class="ftc-block ftc-aspects-block">
+          <div class="ftc-aspects">
+            {{#each aspectsOrder as |aspectKey|}}
+              <div class="ftc-aspect-item">
+                <input type="text" class="ftc-aspect-input" 
+                       placeholder="{{#if (eq aspectKey 'concept')}}Концепт{{else if (eq aspectKey 'problem')}}Проблема{{else if (eq aspectKey 'aspect1')}}Аспект 1{{else}}Новый аспект{{/if}}" 
+                       value="{{lookup ../aspects aspectKey}}"
+                       {{#unless (or (eq aspectKey 'concept') (eq aspectKey 'problem') (eq aspectKey 'aspect1'))}}data-aspect-key="{{aspectKey}}"{{/unless}}/>
+                <div class="ftc-aspect-controls">
+                  <button class="ftc-aspect-add" title="Добавить аспект">+</button>
+                  <button class="ftc-aspect-remove" title="Удалить аспект">-</button>
+                </div>
+              </div>
+            {{/each}}
+          </div>
+        </div>
+      </div>
+
+      <div class="ftc-bottom-row">
+        <div class="ftc-block ftc-stunts-block">
+          <textarea class="ftc-stunts" placeholder="Трюки">{{stunts}}</textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <div class="ftc-resize-handle" title="Тяните для масштабирования">
+    <i class="fas fa-arrows-alt"></i>
+  </div>
+</div>
