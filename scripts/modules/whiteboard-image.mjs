@@ -311,7 +311,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       width: ${overlayWidth}px;
       height: ${overlayHeight}px;
       background: rgba(128, 0, 128, 0.1);
-      border: 3px solid rgba(128, 0, 255, 0.8);
+      border: 1px solid rgba(128, 0, 255, 0.8);
       border-radius: ${borderRadius};
       pointer-events: none;
       z-index: 1010;
@@ -778,7 +778,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       position: absolute;
       left: 0;
       top: 0;
-      border: 2px solid #4a9eff;
+      border: 1px solid #4a9eff;
       pointer-events: none;
       display: none;
       z-index: 1002;
@@ -858,6 +858,35 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       transform-origin: center center;
     `;
     container.appendChild(resizeHandle);
+    
+    // Border toggle button for selected mode
+    const borderToggleBtn = document.createElement("div");
+    borderToggleBtn.className = "wbe-border-toggle-btn";
+    borderToggleBtn.innerHTML = '<i class="fas fa-square"></i>';
+    borderToggleBtn.title = "Показать/скрыть серую рамку";
+    borderToggleBtn.style.cssText = `
+      position: absolute;
+      top: -35px;
+      right: 0;
+      width: 28px;
+      height: 28px;
+      background: #4a9eff;
+      border: 2px solid white;
+      border-radius: 4px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: white;
+      font-size: 14px;
+      z-index: 1002;
+      pointer-events: auto;
+    `;
+    borderToggleBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleGrayBorder();
+    });
+    container.appendChild(borderToggleBtn);
     
     // Функция для обновления позиции handle
     function updateHandlePosition() {
@@ -966,13 +995,28 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     // UI переключатели типа маски
     let maskTypeToggle = null;
-    let rectBtn = null;
-    let circleBtn = null;
+      let rectBtn = null;
+      let circleBtn = null;
     
     function updateMaskToggleButtons() {
       if (rectBtn && circleBtn) {
         rectBtn.style.background = currentMaskType === 'rect' ? '#4a9eff' : '#333';
         circleBtn.style.background = currentMaskType === 'circle' ? '#4a9eff' : '#333';
+      }
+    }
+    
+    function toggleGrayBorder() {
+      const permanentBorder = container.querySelector(".wbe-image-permanent-border");
+      if (permanentBorder) {
+        const isVisible = permanentBorder.style.display !== "none";
+        permanentBorder.style.display = isVisible ? "none" : "block";
+        
+        // Update button appearance
+        const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
+        if (borderToggleBtn) {
+          borderToggleBtn.style.background = isVisible ? "#333" : "#4a9eff";
+          borderToggleBtn.title = isVisible ? "Показать серую рамку" : "Скрыть серую рамку";
+        }
       }
     }
     
@@ -1387,6 +1431,13 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           updateCircleResizeHandlePosition();
           updateSelectionBorderSize(); // Обновляем синюю рамку
           
+          // ✨ CRITICAL: Update purple border during crop mode with current circle data
+          if (isCropping && selectionBorder) {
+            const cropData = getImageCropData(imageElement);
+            // Use the current circleRadius that's being updated, not the old one from cropData
+            updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, circleRadius, cropData.scale);
+          }
+          
         }
         
         function onMouseUp() {
@@ -1580,9 +1631,10 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           const scaleMatch = transform.match(/scale\(([\d.]+)\)/);
           const currentScale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
           
-          // Рассчитываем новые offset'ы
-          let newOffsetX = startOffsetX + deltaX / currentScale;
-          let newOffsetY = startOffsetY + deltaY / currentScale;
+          // Рассчитываем новые offset'ы с чувствительностью
+          const sensitivity = 0.5; // 50% чувствительность для более плавного движения
+          let newOffsetX = startOffsetX + (deltaX / currentScale) * sensitivity;
+          let newOffsetY = startOffsetY + (deltaY / currentScale) * sensitivity;
           
           // 🔒 ОГРАНИЧИВАЕМ ПЕРЕМЕЩЕНИЕ ГРАНИЦАМИ КАРТИНКИ
           const width = imageElement.offsetWidth;
@@ -1592,13 +1644,16 @@ function applyImageLockVisual(container, lockerId, lockerName) {
             // Используем текущий радиус круга (может быть изменен гизмочкой)
             const currentRadius = circleRadius !== null ? circleRadius : Math.min(width, height) / 2;
             
-            // Максимальные смещения (чтобы круг не выходил за границы)
-            const maxOffsetX = (width / 2) - currentRadius;
-            const maxOffsetY = (height / 2) - currentRadius;
+            // Максимальные смещения (чтобы круг не выходил за границы изображения)
+            // Круг может двигаться так, чтобы его край не выходил за границы изображения
+            const maxOffsetX = (width / 2) - currentRadius;   // Максимальное смещение вправо
+            const minOffsetX = -(width / 2) + currentRadius;  // Максимальное смещение влево
+            const maxOffsetY = (height / 2) - currentRadius;  // Максимальное смещение вниз
+            const minOffsetY = -(height / 2) + currentRadius; // Максимальное смещение вверх
             
-            // Ограничиваем смещения
-            circleOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, newOffsetX));
-            circleOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, newOffsetY));
+            // Ограничиваем смещения в пределах границ изображения
+            circleOffsetX = Math.max(minOffsetX, Math.min(maxOffsetX, newOffsetX));
+            circleOffsetY = Math.max(minOffsetY, Math.min(maxOffsetY, newOffsetY));
             
           } else {
             // Если размеры еще не известны, используем старые значения
@@ -1612,6 +1667,13 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           updateClipPath();
           updateSelectionBorderSize(); // ✨ Обновляем рамки при перемещении круга!
           updateCircleResizeHandlePosition(); // ✨ Обновляем позицию гизмочки при перемещении круга!
+          
+          // ✨ CRITICAL: Ensure purple border updates during crop mode circle drag
+          if (isCropping && selectionBorder) {
+            const cropData = getImageCropData(imageElement);
+            // Use the current circleOffset that's being updated, not the old one from cropData
+            updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, { x: circleOffsetX, y: circleOffsetY }, cropData.circleRadius, cropData.scale);
+          }
         }
         
         function onMouseUp() {
@@ -1624,7 +1686,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         document.addEventListener("mouseup", onMouseUp);
       };
       
-      imageElement.addEventListener("mousedown", dragHandler);
+      // Attach to container instead of imageElement to avoid pointer-events issues
+      container.addEventListener("mousedown", dragHandler);
       
       // Сохраняем ссылку для cleanup
       circleDragListeners = { dragHandler };
@@ -1632,7 +1695,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     function cleanupCircleDrag() {
       if (circleDragListeners) {
-        imageElement.removeEventListener("mousedown", circleDragListeners.dragHandler);
+        container.removeEventListener("mousedown", circleDragListeners.dragHandler);
         circleDragListeners = null;
       }
       circleDragActive = false;
@@ -1694,6 +1757,16 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       resizeHandle.style.display = "flex";
       
+      // Show border toggle button in selected mode
+      const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
+      if (borderToggleBtn) {
+        borderToggleBtn.style.display = "flex";
+        // Update button state based on current border visibility
+        const isVisible = permanentBorder && permanentBorder.style.display !== "none";
+        borderToggleBtn.style.background = isVisible ? "#4a9eff" : "#333";
+        borderToggleBtn.title = isVisible ? "Скрыть серую рамку" : "Показать серую рамку";
+      }
+      
       // Update resize handle with current crop data
       updateImageResizeHandle(resizeHandle, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
@@ -1738,6 +1811,10 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       }
       
       resizeHandle.style.display = "none";
+      
+      // Hide border toggle button when deselected
+      const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
+      if (borderToggleBtn) borderToggleBtn.style.display = "none";
       
       console.log(`[WB-E] Image ${id} deselected, pointer-events: ${container.style.pointerEvents}`);
     }
@@ -2254,10 +2331,20 @@ function updateImageElement(existing, imageData) {
     }
     
     if (isSelected) {
-      // Выделена - показываем синюю рамку, прячем серую, показываем resize handle
+      // Выделена - показываем синюю рамку, прячем серую, показываем resize handle и border toggle
       if (permanentBorder) permanentBorder.style.display = "none";
       if (selectionBorder) selectionBorder.style.display = "block";
       if (resizeHandle) resizeHandle.style.display = "flex";
+      
+      // Show border toggle button in selected mode
+      const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
+      if (borderToggleBtn) {
+        borderToggleBtn.style.display = "flex";
+        // Update button state based on current border visibility
+        const isVisible = permanentBorder && permanentBorder.style.display !== "none";
+        borderToggleBtn.style.background = isVisible ? "#4a9eff" : "#333";
+        borderToggleBtn.title = isVisible ? "Скрыть серую рамку" : "Показать серую рамку";
+      }
       
       // Enable click target pointer events when selected
       if (clickTarget) {
@@ -2272,10 +2359,19 @@ function updateImageElement(existing, imageData) {
       // }
       container.dataset.selected = "true";
     } else {
-      // Не выделена - показываем серую рамку, прячем синюю, прячем resize handle
-      if (permanentBorder) permanentBorder.style.display = "block";
+      // Не выделена - показываем серую рамку только если она не скрыта кнопкой, прячем синюю, прячем resize handle
+      if (permanentBorder) {
+        // Check if gray border is hidden by toggle button
+        const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
+        const isHiddenByToggle = borderToggleBtn && borderToggleBtn.style.background === "#333";
+        permanentBorder.style.display = isHiddenByToggle ? "none" : "block";
+      }
       if (selectionBorder) selectionBorder.style.display = "none";
       if (resizeHandle) resizeHandle.style.display = "none";
+      
+      // Hide border toggle button when not selected
+      const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
+      if (borderToggleBtn) borderToggleBtn.style.display = "none";
       
       // Disable click target pointer events when not selected to allow canvas drag/pan
       if (clickTarget) {
@@ -2421,8 +2517,8 @@ function updateImageElement(existing, imageData) {
     const maskTypeToggle = container.querySelector(".wbe-mask-type-toggle");
     if (!maskTypeToggle) return;
     
-    const rectBtn = maskTypeToggle.querySelector(".wbe-mask-btn");
-    const circleBtn = maskTypeToggle.querySelector(".wbe-mask-btn:last-child");
+    const rectBtn = maskTypeToggle.querySelector(".wbe-mask-rect-btn");
+    const circleBtn = maskTypeToggle.querySelector(".wbe-mask-circle-btn");
     
     if (rectBtn && circleBtn) {
       if (maskType === 'rect') {
@@ -2436,10 +2532,8 @@ function updateImageElement(existing, imageData) {
         rectBtn.style.backgroundColor = "#333";
         rectBtn.style.color = "white";
       }
-      
-  
     }
-}
+  }
 
 
 // Функция для обновления рамок картинки

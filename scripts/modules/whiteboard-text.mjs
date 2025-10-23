@@ -90,7 +90,7 @@ function enterTextMode() {
     textModeCursor = null;
   };
   
-  ui.notifications.info("Text mode: Click to create text (Right-click to exit)");
+  ui.notifications.info("Text mode: Click to create text (Press T again or Right-click to exit)");
 }
 
 function exitTextMode() {
@@ -103,7 +103,7 @@ function exitTextMode() {
   }
   
   textModeCursor = null;
-  ui.notifications.info("Exited text mode");
+  ui.notifications.info("Text mode disabled (Press T to re-enable)");
 }
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -229,7 +229,7 @@ async function getAvailableFonts() {
       return fontList;
     }
   } catch (error) {
-    console.warn("[FATE-TC] Could not detect fonts:", error);
+    console.warn("[WB-E] Could not detect fonts:", error);
   }
   
   // Fallback to common web-safe fonts
@@ -357,7 +357,7 @@ async function showColorPicker() {
   if (!selectedTextId) return;
 
   const container = document.getElementById(selectedTextId);
-  const textElement = container?.querySelector(".fate-canvas-text");
+  const textElement = container?.querySelector(".wbe-canvas-text");
   if (!textElement) return;
 
   killColorPanel();
@@ -381,7 +381,7 @@ async function showColorPicker() {
   );
 
   const panel = document.createElement("div");
-  panel.className = "fate-color-picker-panel";
+  panel.className = "wbe-color-picker-panel";
   panel.style.cssText = `
     position: fixed;
     background: white;
@@ -428,7 +428,7 @@ async function showColorPicker() {
   const makeToolbarButton = (label, iconClass) => {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "fate-color-toolbar-btn";
+    btn.className = "wbe-color-toolbar-btn";
     btn.style.cssText = `
       display: flex;
       align-items: center;
@@ -553,7 +553,7 @@ async function showColorPicker() {
 
   const buildTextSubpanel = () => {
     const sub = document.createElement("div");
-    sub.className = "fate-color-subpanel";
+    sub.className = "wbe-color-subpanel";
     sub.style.cssText = `
       position: absolute;
       background: white;
@@ -771,7 +771,7 @@ async function showColorPicker() {
 
   const buildBackgroundSubpanel = () => {
     const sub = document.createElement("div");
-    sub.className = "fate-color-subpanel";
+    sub.className = "wbe-color-subpanel";
     sub.style.cssText = `
       position: absolute;
       background: white;
@@ -822,7 +822,7 @@ async function showColorPicker() {
 
   const buildBorderSubpanel = () => {
     const sub = document.createElement("div");
-    sub.className = "fate-color-subpanel";
+    sub.className = "wbe-color-subpanel";
     sub.style.cssText = `
       position: absolute;
       background: white;
@@ -1036,7 +1036,7 @@ function installGlobalPanHooks() {
   // Start pan on ANY right-button down; close panel immediately
   document.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
-    if (e.target.closest(".fate-canvas-text-container")) {
+    if (e.target.closest(".wbe-canvas-text-container")) {
       // If you want to keep the panel when RMB starts ON the text, comment this line:
       killColorPanel();
     } else {
@@ -1076,11 +1076,16 @@ function installTextModeKeys() {
   if (textModeKeyHandler) return;
   
   textModeKeyHandler = (e) => {
-    // T key to enter text mode
-    if (e.key === "t" || e.key === "T") {
+    // T key to toggle text mode - use keyCode for international support
+    if (e.keyCode === 84) { // KeyCode 84 is 'T' in any language
       if (e.ctrlKey || e.metaKey || e.altKey) return; // Don't interfere with shortcuts
       e.preventDefault();
-      enterTextMode();
+      
+      if (isTextMode) {
+        exitTextMode();
+      } else {
+        enterTextMode();
+      }
     }
   };
   
@@ -1149,8 +1154,8 @@ function installCanvasTextModeHandler() {
     if (e.button !== 0) return;
     
     // Don't create text if clicking on existing elements
-    if (e.target.closest(".fate-canvas-text-container") || 
-        e.target.closest(".fate-color-picker-panel")) {
+    if (e.target.closest(".wbe-canvas-text-container") || 
+        e.target.closest(".wbe-color-picker-panel")) {
       return;
     }
     
@@ -1178,7 +1183,7 @@ async function globalPasteText() {
     const { lastMouseX, lastMouseY } = getSharedVars();
     const worldPos = screenToWorld(lastMouseX, lastMouseY);
     
-    const newTextId = `fate-text-${Date.now()}`;
+    const newTextId = `wbe-text-${Date.now()}`;
     const container = createTextElement(
       newTextId,
       copiedTextData.text,
@@ -1197,7 +1202,7 @@ async function globalPasteText() {
       copiedTextData.width || null
     );
     if (!container) return;
-    const textEl = container.querySelector(".fate-canvas-text");
+    const textEl = container.querySelector(".wbe-canvas-text");
     if (!textEl) return;
     await persistTextState(newTextId, textEl, container);
     
@@ -1216,10 +1221,10 @@ async function handleTextPasteFromClipboard(text) {
     
     
     // Создаем новый текстовый элемент
-    const textId = `fate-text-${Date.now()}`;
+    const textId = `wbe-text-${Date.now()}`;
     const container = createTextElement(textId, text, worldPos.x, worldPos.y, DEFAULT_TEXT_SCALE, DEFAULT_TEXT_COLOR, DEFAULT_BACKGROUND_COLOR, null, DEFAULT_BORDER_WIDTH, DEFAULT_FONT_WEIGHT, DEFAULT_FONT_STYLE, DEFAULT_TEXT_ALIGN, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, null);
     if (!container) return;
-    const textEl = container.querySelector(".fate-canvas-text");
+    const textEl = container.querySelector(".wbe-canvas-text");
     if (!textEl) return;
     await persistTextState(textId, textEl, container);
     
@@ -1228,7 +1233,7 @@ async function handleTextPasteFromClipboard(text) {
     
     ui.notifications.info("Текст добавлен");
   } catch (err) {
-    console.error("[FATE-TC] Ошибка при вставке текста:", err);
+    console.error("[WB-E] Ошибка при вставке текста:", err);
     ui.notifications.error("Ошибка при вставке текста");
   }
 }
@@ -1244,7 +1249,7 @@ async function injectTextTool() {
   
     if (!group) return;
   
-    const toolName = "fate-text-tool";
+    const toolName = "wbe-text-tool";
     const tool = {
       name: toolName,
       title: "Добавить текст на стол",
@@ -1304,7 +1309,7 @@ function createTextElement(
     // Контейнер для позиционирования (БЕЗ translate)
     const container = document.createElement("div");
     container.id = id;
-    container.className = "fate-canvas-text-container";
+    container.className = "wbe-canvas-text-container";
     container.style.cssText = `
       position: absolute;
       left: ${left}px;
@@ -1314,7 +1319,7 @@ function createTextElement(
     
     // Внутренний элемент для контента + масштабирование
     const textElement = document.createElement("div");
-    textElement.className = "fate-canvas-text";
+    textElement.className = "wbe-canvas-text";
     textElement.contentEditable = "false";
     textElement.textContent = text;
     textElement.style.cssText = `
@@ -1359,7 +1364,7 @@ function createTextElement(
     
     // Resize handle (круглая точка) - в контейнере, позиционируется относительно textElement
     const resizeHandle = document.createElement("div");
-    resizeHandle.className = "fate-text-resize-handle";
+    resizeHandle.className = "wbe-text-resize-handle";
     resizeHandle.style.cssText = `
       position: absolute;
       left: 0;
@@ -1514,7 +1519,7 @@ function createTextElement(
       
       
       // Создаём новый текст
-      const newTextId = `fate-text-${Date.now()}`;
+      const newTextId = `wbe-text-${Date.now()}`;
       const container = createTextElement(
         newTextId,
         copiedTextData.text,
@@ -1534,7 +1539,7 @@ function createTextElement(
       );
       
       if (container) {
-        const textEl = container.querySelector(".fate-canvas-text");
+        const textEl = container.querySelector(".wbe-canvas-text");
         if (textEl) await persistTextState(newTextId, textEl, container);
         
         // Update container dimensions after paste
@@ -1595,7 +1600,7 @@ function createTextElement(
       persistTextState(id, textElement, container);
 
       // Add marker to clipboard so paste handler knows this is a FATE text copy
-      if (e.clipboardData) e.clipboardData.setData("text/plain", `[FATE-TEXT-COPY:${id}]\n${textElement.textContent}`);
+      if (e.clipboardData) e.clipboardData.setData("text/plain", `[wbe-TEXT-COPY:${id}]\n${textElement.textContent}`);
       ui.notifications.info("Текст скопирован (Ctrl+V для вставки)");
     };
 
@@ -2049,10 +2054,10 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
     const worldPos = screenToWorld(screenX, screenY);
     
     // Создаем новый текст в world coordinates
-    const textId = `fate-text-${Date.now()}`;
+    const textId = `wbe-text-${Date.now()}`;
     const container = createTextElement(textId, autoEdit ? "" : "Двойной клик для редактирования", worldPos.x, worldPos.y, DEFAULT_TEXT_SCALE, DEFAULT_TEXT_COLOR, DEFAULT_BACKGROUND_COLOR, null, DEFAULT_BORDER_WIDTH, DEFAULT_FONT_WEIGHT, DEFAULT_FONT_STYLE, DEFAULT_TEXT_ALIGN, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, null);
     if (!container) return;
-    const textEl = container.querySelector(".fate-canvas-text");
+    const textEl = container.querySelector(".wbe-canvas-text");
     if (!textEl) return;
     await persistTextState(textId, textEl, container);
     
@@ -2089,7 +2094,7 @@ async function getAllTexts() {
   try {
     return await canvas.scene?.getFlag(FLAG_SCOPE, FLAG_KEY_TEXTS) || {};
   } catch (e) {
-    console.error("[FATE-TC] getAllTexts error:", e);
+    console.error("[WB-E] getAllTexts error:", e);
     return {};
   }
 }
@@ -2111,7 +2116,7 @@ async function setAllTexts(texts) {
         const layer = getOrCreateLayer();
         if (layer) {
           // Получаем все существующие текстовые элементы
-          const existingElements = layer.querySelectorAll(".fate-canvas-text-container");
+          const existingElements = layer.querySelectorAll(".wbe-canvas-text-container");
           const existingIds = new Set();
           
           // Обновляем существующие и создаем новые тексты локально
@@ -2120,7 +2125,7 @@ async function setAllTexts(texts) {
             const existing = document.getElementById(id);
             if (existing) {
               // Обновляем существующий элемент
-              const textElement = existing.querySelector(".fate-canvas-text");
+              const textElement = existing.querySelector(".wbe-canvas-text");
               if (textElement) {
                 textElement.textContent = textData.text;
                 existing.style.left = `${textData.left}px`;
@@ -2182,7 +2187,7 @@ async function setAllTexts(texts) {
               );
               
               if (createdContainer) {
-                const textElement = createdContainer.querySelector(".fate-canvas-text");
+                const textElement = createdContainer.querySelector(".wbe-canvas-text");
                 if (textElement) {
                   textElement.style.color = textData.color || DEFAULT_TEXT_COLOR;
                   textElement.style.backgroundColor = textData.backgroundColor || DEFAULT_BACKGROUND_COLOR;
@@ -2218,7 +2223,7 @@ async function setAllTexts(texts) {
         }
       }
     } catch (e) {
-      console.error("[FATE-TC] setAllTexts error:", e);
+      console.error("[WB-E] setAllTexts error:", e);
     }
 }
 
@@ -2229,8 +2234,8 @@ function getTextScale(textEl) {
 
 function updateTextResizeHandlePosition(container) {
   if (!container) return;
-  const textEl = container.querySelector(".fate-canvas-text");
-  const handle = container.querySelector(".fate-text-resize-handle");
+  const textEl = container.querySelector(".wbe-canvas-text");
+  const handle = container.querySelector(".wbe-text-resize-handle");
   if (!textEl || !handle) return;
 
   const scale = getTextScale(textEl);
