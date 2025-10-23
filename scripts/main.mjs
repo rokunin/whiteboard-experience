@@ -13,9 +13,9 @@ import { ImageTools } from "./modules/whiteboard-image.mjs";
 import { FateTableCardApp, CARD_CSS } from './modules/fate-card.mjs';
 
 // Inject CSS globally for all users as early as possible
-if (!document.getElementById("fate-table-card-style")) {
+if (!document.getElementById("wbe-table-card-style")) {
   const style = document.createElement("style");
-  style.id = "fate-table-card-style";
+  style.id = "wbe-table-card-style";
   style.textContent = CARD_CSS;
   document.head.appendChild(style);
   console.log("[WB-E] CSS injected globally");
@@ -155,7 +155,7 @@ Hooks.once("ready", async () => {
         const layer = getOrCreateLayer();
         if (layer) {
           // Получаем все существующие текстовые элементы
-          const existingElements = layer.querySelectorAll(".fate-canvas-text-container");
+          const existingElements = layer.querySelectorAll(".wbe-canvas-text-container");
           const existingIds = new Set();
           
           // Обновляем существующие и создаем новые тексты локально у GM
@@ -164,7 +164,7 @@ Hooks.once("ready", async () => {
             const existing = document.getElementById(id);
             if (existing) {
               // Обновляем существующий элемент
-              const textElement = existing.querySelector(".fate-canvas-text");
+              const textElement = existing.querySelector(".wbe-canvas-text");
               if (textElement) {
                 textElement.textContent = textData.text;
                 existing.style.left = `${textData.left}px`;
@@ -204,7 +204,7 @@ Hooks.once("ready", async () => {
             // Apply color and background to newly created element
             const created = createdContainer || document.getElementById(id);
             if (created) {
-              const textElement = created.querySelector(".fate-canvas-text");
+              const textElement = created.querySelector(".wbe-canvas-text");
               if (textElement) {
                 textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR;
                 textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
@@ -223,7 +223,7 @@ Hooks.once("ready", async () => {
           existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
             // Clean up color pickers before removing element
-            document.querySelectorAll(".fate-color-picker-panel").forEach(d => d.remove());
+            document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
             element.remove();
           }
           });
@@ -240,7 +240,7 @@ Hooks.once("ready", async () => {
       const layer = getOrCreateLayer();
       if (layer) {
         // Получаем все существующие текстовые элементы
-        const existingElements = layer.querySelectorAll(".fate-canvas-text-container");
+        const existingElements = layer.querySelectorAll(".wbe-canvas-text-container");
         const existingIds = new Set();
         
         // Обновляем существующие и создаем новые тексты
@@ -249,7 +249,7 @@ Hooks.once("ready", async () => {
           const existing = document.getElementById(id);
           if (existing) {
             // Обновляем существующий элемент
-            const textElement = existing.querySelector(".fate-canvas-text");
+            const textElement = existing.querySelector(".wbe-canvas-text");
             if (textElement) {
               textElement.textContent = textData.text;
               existing.style.left = `${textData.left}px`;
@@ -296,7 +296,7 @@ Hooks.once("ready", async () => {
           // Apply color and background to newly created element
           const created = createdContainer || document.getElementById(id);
           if (created) {
-            const textElement = created.querySelector(".fate-canvas-text");
+            const textElement = created.querySelector(".wbe-canvas-text");
             if (textElement) {
               textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR;
               textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
@@ -315,7 +315,7 @@ Hooks.once("ready", async () => {
         existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
             // Clean up color pickers before removing element
-            document.querySelectorAll(".fate-color-picker-panel").forEach(d => d.remove());
+            document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
             element.remove();
           }
         });
@@ -333,7 +333,7 @@ Hooks.once("ready", async () => {
         const layer = getOrCreateLayer();
         if (layer) {
           // Получаем все существующие картинки
-          const existingElements = layer.querySelectorAll(".fate-canvas-image-container");
+          const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
           const existingIds = new Set();
           
           // Обновляем существующие и создаем новые картинки локально у GM
@@ -383,7 +383,7 @@ Hooks.once("ready", async () => {
       const layer = getOrCreateLayer();
       if (layer) {
         // Получаем все существующие картинки
-        const existingElements = layer.querySelectorAll(".fate-canvas-image-container");
+        const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
         const existingIds = new Set();
         
         // Обновляем существующие и создаем новые картинки
@@ -551,14 +551,14 @@ Hooks.once("ready", async () => {
       // Найти все canvas изображения с base64 путем и заменить на файл
       const layer = getOrCreateLayer();
       if (layer) {
-        const imageElements = layer.querySelectorAll(".fate-canvas-image");
+        const imageElements = layer.querySelectorAll(".wbe-canvas-image");
         imageElements.forEach(img => {
           if (img.src === data.base64Path || img.src.includes(data.fileName)) {
             console.log("[WB-E] Replacing canvas image source:", img.src, "->", data.filePath);
             img.src = data.filePath;
             
             // Обновить данные в хранилище через ImageTools
-            const container = img.closest(".fate-canvas-image-container");
+            const container = img.closest(".wbe-canvas-image-container");
             if (container) {
               const imageId = container.id;
               console.log("[WB-E] Updating image data for:", imageId);
@@ -742,7 +742,7 @@ async function injectFateCardTool() {
 
   if (!group) return;
 
-  const toolName = "fate-table-card";
+  const toolName = "wbe-table-card";
   const tool = {
     name: toolName,
     title: "Добавить FATE Card",
@@ -811,11 +811,11 @@ export function setLastClickY(value) {
 function deselectAllElements(exceptId = null) {
   
   // Снимаем выделение со всех текстов
-  document.querySelectorAll(".fate-canvas-text-container").forEach(container => {
+  document.querySelectorAll(".wbe-canvas-text-container").forEach(container => {
     if (exceptId && container.id === exceptId) return; // Пропускаем текущий
     
-    const textElement = container.querySelector(".fate-canvas-text");
-    const resizeHandle = container.querySelector(".fate-text-resize-handle");
+    const textElement = container.querySelector(".wbe-canvas-text");
+    const resizeHandle = container.querySelector(".wbe-text-resize-handle");
     if (textElement && resizeHandle) {
       delete container.dataset.selected; // Убираем метку
       container.style.removeProperty("pointer-events");
@@ -828,14 +828,14 @@ function deselectAllElements(exceptId = null) {
   });
   
   // Снимаем выделение со всех картинок
-  document.querySelectorAll(".fate-canvas-image-container").forEach(container => {
+  document.querySelectorAll(".wbe-canvas-image-container").forEach(container => {
     if (exceptId && container.id === exceptId) {
       return; // Пропускаем текущий
     }
     
-    const imageElement = container.querySelector(".fate-canvas-image");
-    const resizeHandle = container.querySelector(".fate-image-resize-handle");
-    const selectionBorder = container.querySelector(".fate-image-selection-border");
+    const imageElement = container.querySelector(".wbe-canvas-image");
+    const resizeHandle = container.querySelector(".wbe-image-resize-handle");
+    const selectionBorder = container.querySelector(".wbe-image-selection-border");
     if (imageElement && resizeHandle) {
       delete container.dataset.selected; // Убираем метку
       container.style.removeProperty("pointer-events");
@@ -937,7 +937,7 @@ function setupGlobalPasteHandler() {
       const text = clipboardData.getData("text/plain");
       if (text && text.trim()) {
         // Проверяем - это маркер нашей картинки?
-        if (text.startsWith("[FATE-IMAGE-COPY:") && ImageTools.copiedImageData) {
+        if (text.startsWith("[wbe-IMAGE-COPY:") && ImageTools.copiedImageData) {
           e.preventDefault();
           e.stopPropagation();
           await ImageTools.globalPasteImage();
@@ -945,7 +945,7 @@ function setupGlobalPasteHandler() {
         }
         
         // Проверяем - это маркер нашего текста с форматированием?
-        if (text.startsWith("[FATE-TEXT-COPY:") && TextTools.copiedTextData) {
+        if (text.startsWith("[wbe-TEXT-COPY:") && TextTools.copiedTextData) {
           e.preventDefault();
           e.stopPropagation();
           await TextTools.globalPasteText();
@@ -1144,7 +1144,7 @@ async function deleteCardState(id, broadcast = true) {
   if (broadcast) game.socket.emit(`module.${MODID}`, { type: "delete", id });
 }
 
-// Export utilities for fate-card.mjs
+// Export utilities for wbe-card.mjs
 export { 
   MODID, 
   FLAG_SCOPE, 
@@ -1161,12 +1161,12 @@ export {
 /* ----------------------- CSS ---------------------------- */
 const OTHER_CSS = `
 /* Canvas Text and Image Elements */
-.fate-canvas-text-container {
+.wbe-canvas-text-container {
   pointer-events: none;
   cursor: default;
 }
 
-.fate-canvas-text {
+.wbe-canvas-text {
   background: transparent;
   color: white;
   padding: 8px 12px;
@@ -1182,12 +1182,12 @@ const OTHER_CSS = `
   overflow: hidden;
 }
 
-.fate-canvas-text:hover {
+.wbe-canvas-text:hover {
   border-color: rgba(255, 255, 255, 0.9);
   background: rgba(0, 0, 0, 0.9);
 }
 
-.fate-canvas-text[contenteditable="true"] {
+.wbe-canvas-text[contenteditable="true"] {
   outline: 2px solid #4a9eff;
   outline-offset: 2px;
   user-select: text;
@@ -1196,12 +1196,17 @@ const OTHER_CSS = `
   pointer-events: none;
 }
 
-.fate-canvas-image-container {
+.wbe-canvas-image-container {
   pointer-events: none;
   cursor: default;
 }
 
-.fate-canvas-image {
+.wbe-canvas-image {
+  pointer-events: none !important;              /* make the image itself transparent to pointer hit-testing */
+  -webkit-user-drag: none !important;           /* Chrome/Safari: disable native image drag */
+  user-drag: none !important;                   /* spec-ish fallback */
+  user-select: none !important;                 /* no selection handles on long-press */
+  touch-action: none !important;
   max-width: 200px;
   max-height: 200px;
   display: block;
@@ -1225,12 +1230,12 @@ window.FateTableCard = {
     // Удаляем из DOM
     const layer = getOrCreateLayer();
     if (layer) {
-      const texts = layer.querySelectorAll(".fate-canvas-text-container");
-      const images = layer.querySelectorAll(".fate-canvas-image-container");
+      const texts = layer.querySelectorAll(".wbe-canvas-text-container");
+      const images = layer.querySelectorAll(".wbe-canvas-image-container");
       
       
       // Clean up color pickers before removing elements
-      document.querySelectorAll(".fate-color-picker-panel").forEach(d => d.remove());
+      document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
       
       texts.forEach(el => el.remove());
       images.forEach(el => el.remove());

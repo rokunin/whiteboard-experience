@@ -96,7 +96,7 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("copy", (e) => {
   if (!selectedImageId) return;
   const container = document.getElementById(selectedImageId);
-  const imageElement = container?.querySelector(".fate-canvas-image");
+  const imageElement = container?.querySelector(".wbe-canvas-image");
   if (!imageElement) return;
   
   e.preventDefault();
@@ -114,7 +114,7 @@ document.addEventListener("copy", (e) => {
     circleRadius
   };
   
-  e.clipboardData?.setData("text/plain", `[FATE-IMAGE-COPY:${selectedImageId}]`);
+  e.clipboardData?.setData("text/plain", `[wbe-IMAGE-COPY:${selectedImageId}]`);
   ui.notifications.info("Картинка скопирована (Ctrl+V для вставки)");
 });
 
@@ -125,12 +125,12 @@ function clearImageCaches(id) {
     // Clear from global data
     delete globalImageData[id];
     delete imageLocalVars[id];
-    console.log(`[FATE-TC] Cleared caches for image ${id}`);
+    console.log(`[WB-E] Cleared caches for image ${id}`);
   }
 
 /**
  * Get ALL crop/mask data from an image element (CSS/Dataset = source of truth)
- * @param {HTMLElement} imageElement - The .fate-canvas-image element
+ * @param {HTMLElement} imageElement - The .wbe-canvas-image element
  * @returns {Object} Complete crop data
  */
 function getImageCropData(imageElement) {
@@ -165,7 +165,7 @@ function getImageCropData(imageElement) {
 
 /**
  * Set crop/mask data on an image element (updates CSS/Dataset)
- * @param {HTMLElement} imageElement - The .fate-canvas-image element
+ * @param {HTMLElement} imageElement - The .wbe-canvas-image element
  * @param {Object} data - Crop data to set
  */
 function setImageCropData(imageElement, data) {
@@ -200,7 +200,7 @@ function setImageCropData(imageElement, data) {
  * Update click target overlay to match visible (cropped) area
  * This prevents clicking/dragging invisible cropped parts
  * @param {HTMLElement} clickTarget - The click target overlay element
- * @param {HTMLElement} imageElement - The .fate-canvas-image element  
+ * @param {HTMLElement} imageElement - The .wbe-canvas-image element  
  * @param {string} maskType - 'rect' or 'circle'
  * @param {Object} crop - Crop values {top, right, bottom, left}
  * @param {Object} circleOffset - Circle offset {x, y}
@@ -251,7 +251,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     // This prevents stale selection UI when lock is removed
     const wasSelected = container.dataset.selected === "true";
     if (wasSelected) {
-      console.log(`[FATE-TC] Auto-deselecting ${container.id} because it was locked by ${lockerName}`);
+      console.log(`[WB-E] Auto-deselecting ${container.id} because it was locked by ${lockerName}`);
       const imageData = imageRegistry.get(container.id);
       if (imageData && imageData.deselectFn) {
         imageData.deselectFn();
@@ -262,7 +262,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     container.dataset.lockedBy = lockerId;
     container.style.pointerEvents = "none";
     
-    const imageElement = container.querySelector(".fate-canvas-image");
+    const imageElement = container.querySelector(".wbe-canvas-image");
     if (!imageElement) return;
     
     // ✨ NEW ARCHITECTURE: Get current crop/scale data to size overlay correctly
@@ -293,13 +293,13 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       borderRadius = "50%";
     }
     
-    console.log(`[FATE-TC] Lock overlay for ${container.id}: ${overlayWidth}x${overlayHeight}, crop:`, cropData.crop);
+    console.log(`[WB-E] Lock overlay for ${container.id}: ${overlayWidth}x${overlayHeight}, crop:`, cropData.crop);
     
     // Создаём overlay с фиолетовой рамкой и opacity
-    let lockOverlay = container.querySelector(".fate-image-lock-overlay");
+    let lockOverlay = container.querySelector(".wbe-image-lock-overlay");
     if (!lockOverlay) {
       lockOverlay = document.createElement("div");
-      lockOverlay.className = "fate-image-lock-overlay";
+      lockOverlay.className = "wbe-image-lock-overlay";
       container.appendChild(lockOverlay);
     }
     
@@ -321,10 +321,10 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     `;
     
     // Add lock icon if not exists
-    let lockIcon = lockOverlay.querySelector(".fate-lock-icon");
+    let lockIcon = lockOverlay.querySelector(".wbe-lock-icon");
     if (!lockIcon) {
       lockIcon = document.createElement("div");
-      lockIcon.className = "fate-lock-icon";
+      lockIcon.className = "wbe-lock-icon";
       lockIcon.innerHTML = `
         <i class="fas fa-crop-alt" style="font-size: 32px; color: rgba(128, 0, 255, 0.9); text-shadow: 0 0 8px rgba(0,0,0,0.8);"></i>
         <div style="
@@ -353,32 +353,32 @@ function applyImageLockVisual(container, lockerId, lockerName) {
   }
   
   function removeImageLockVisual(container) {
-    console.log(`[FATE-TC] Removing lock from ${container.id}, wasSelected: ${container.dataset.selected}`);
+    console.log(`[WB-E] Removing lock from ${container.id}, wasSelected: ${container.dataset.selected}`);
     
     // Убираем блокировку
     delete container.dataset.lockedBy;
     
     // Удаляем overlay
-    const lockOverlay = container.querySelector(".fate-image-lock-overlay");
+    const lockOverlay = container.querySelector(".wbe-image-lock-overlay");
     if (lockOverlay) {
       lockOverlay.remove();
     }
     
     // Возвращаем opacity
-    const imageElement = container.querySelector(".fate-canvas-image");
+    const imageElement = container.querySelector(".wbe-canvas-image");
     if (imageElement) {
       imageElement.style.opacity = "1";
     }
     
     // Восстанавливаем UI в зависимости от состояния выделения
     const wasSelected = container.dataset.selected === "true";
-    const permanentBorder = container.querySelector(".fate-image-permanent-border");
-    const selectionBorder = container.querySelector(".fate-image-selection-border");
-    const resizeHandle = container.querySelector(".fate-image-resize-handle");
+    const permanentBorder = container.querySelector(".wbe-image-permanent-border");
+    const selectionBorder = container.querySelector(".wbe-image-selection-border");
+    const resizeHandle = container.querySelector(".wbe-image-resize-handle");
     
     if (wasSelected) {
       // Было выделено - восстанавливаем полный UI выделения
-      console.log(`[FATE-TC] Restoring selected state for ${container.id}`);
+      console.log(`[WB-E] Restoring selected state for ${container.id}`);
       // Don't set pointer-events on container - let click target handle interactions
       // container.style.setProperty("pointer-events", "auto", "important");
       // container.style.setProperty("cursor", "move", "important");
@@ -390,11 +390,11 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       }
       if (resizeHandle) {
         resizeHandle.style.display = "flex";
-        console.log(`[FATE-TC] Restored resize handle for ${container.id}`);
+        console.log(`[WB-E] Restored resize handle for ${container.id}`);
       }
     } else {
       // Не было выделено - возвращаем в базовое состояние
-      console.log(`[FATE-TC] Restoring unselected state for ${container.id}`);
+      console.log(`[WB-E] Restoring unselected state for ${container.id}`);
       container.style.removeProperty("pointer-events");
       container.style.removeProperty("cursor");
       
@@ -405,11 +405,11 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       // ✨ NEW ARCHITECTURE: Update permanent border with current crop data
       if (permanentBorder && imageElement) {
         const cropData = getImageCropData(imageElement);
-        console.log(`[FATE-TC] Updating permanent border after unlock, crop:`, cropData.crop);
+        console.log(`[WB-E] Updating permanent border after unlock, crop:`, cropData.crop);
         updateImageBorder(permanentBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
         
         // Update click target to match visible area
-        const clickTarget = container.querySelector(".fate-image-click-target");
+        const clickTarget = container.querySelector(".wbe-image-click-target");
         updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
         
         // Set move cursor on click target when restoring selected state
@@ -423,7 +423,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
   function installGlobalImageSelectionHandler() {
     if (globalImageSelectionHandlerInstalled) return;
     
-    console.log("[FATE-TC] Installing global image selection handler");
+    console.log("[WB-E] Installing global image selection handler");
     
     document.addEventListener("mousedown", async (e) => {
       if (e.button !== 0) return; // Only left click
@@ -450,13 +450,22 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         if (clickedOnThis) {
           clickedImageId = id;
           clickedImageData = imageData;
-          console.log(`[FATE-TC] Clicked on image ${id}`);
+          console.log(`[WB-E] Clicked on image ${id}`);
           // If this image is in crop mode for THIS user, keep pointer-events enabled
           const inCropModeForMe = container.dataset.lockedBy === game.user.id;
           if (!inCropModeForMe) {
             container.style.setProperty("pointer-events", "none", "important");
+            // Enable click target for selected image
+            const clickTarget = container.querySelector(".wbe-image-click-target");
+            if (clickTarget) {
+              clickTarget.style.setProperty("pointer-events", "auto", "important");
+            }
           } else {
             container.style.setProperty("pointer-events", "auto", "important");
+            const clickTarget = container.querySelector(".wbe-image-click-target");
+            if (clickTarget) {
+              clickTarget.style.setProperty("pointer-events", "auto", "important");
+            }
           }
           break;
         } else {
@@ -464,8 +473,17 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           const inCropModeForMe = container.dataset.lockedBy === game.user.id;
           if (!inCropModeForMe) {
             container.style.setProperty("pointer-events", "none", "important");
+            // Disable click target for non-selected images
+            const clickTarget = container.querySelector(".wbe-image-click-target");
+            if (clickTarget) {
+              clickTarget.style.setProperty("pointer-events", "none", "important");
+            }
           } else {
             container.style.setProperty("pointer-events", "auto", "important");
+            const clickTarget = container.querySelector(".wbe-image-click-target");
+            if (clickTarget) {
+              clickTarget.style.setProperty("pointer-events", "auto", "important");
+            }
           }
         }
       }
@@ -476,14 +494,14 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         const isSelected = clickedImageData.container.dataset.selected === "true";
         
         if (!isSelected) {
-          console.log(`[FATE-TC] Selecting image ${clickedImageId}`);
+          console.log(`[WB-E] Selecting image ${clickedImageId}`);
           e.preventDefault();
           e.stopPropagation();
           
           // Deselect all others first
           for (const [otherId, otherData] of imageRegistry) {
             if (otherId !== clickedImageId && otherData.container.dataset.selected === "true") {
-              console.log(`[FATE-TC] Deselecting other image ${otherId}`);
+              console.log(`[WB-E] Deselecting other image ${otherId}`);
               await otherData.deselectFn(); // Await async deselect
             }
           }
@@ -493,10 +511,10 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         }
       } else {
         // Clicked elsewhere - deselect all selected images
-        console.log(`[FATE-TC] Clicked outside all images, deselecting all`);
+        console.log(`[WB-E] Clicked outside all images, deselecting all`);
         for (const [id, imageData] of imageRegistry) {
           if (imageData.container.dataset.selected === "true") {
-            console.log(`[FATE-TC] Deselecting image ${id}`);
+            console.log(`[WB-E] Deselecting image ${id}`);
             await imageData.deselectFn(); // Await async deselect
           }
         }
@@ -532,7 +550,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     // Контейнер для позиционирования (БЕЗ translate)
     const container = document.createElement("div");
     container.id = id;
-    container.className = "fate-canvas-image-container";
+    container.className = "wbe-canvas-image-container";
     container.style.cssText = `
       position: absolute;
       left: ${left}px;
@@ -543,7 +561,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     // Внутренний элемент для контента + масштабирование
     const imageElement = document.createElement("img");
-    imageElement.className = "fate-canvas-image";
+    imageElement.className = "wbe-canvas-image";
     imageElement.src = src;
     imageElement.style.cssText = `
       transform: scale(${scale});
@@ -640,25 +658,25 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           `;
           if (needTop) {
             cropHandles.top = document.createElement("div");
-            cropHandles.top.className = "fate-crop-handle-top";
+            cropHandles.top.className = "wbe-crop-handle-top";
             cropHandles.top.style.cssText = baseStyle + `cursor: ns-resize;`;
             container.appendChild(cropHandles.top);
           }
           if (needRight) {
             cropHandles.right = document.createElement("div");
-            cropHandles.right.className = "fate-crop-handle-right";
+            cropHandles.right.className = "wbe-crop-handle-right";
             cropHandles.right.style.cssText = baseStyle + `cursor: ew-resize;`;
             container.appendChild(cropHandles.right);
           }
           if (needBottom) {
             cropHandles.bottom = document.createElement("div");
-            cropHandles.bottom.className = "fate-crop-handle-bottom";
+            cropHandles.bottom.className = "wbe-crop-handle-bottom";
             cropHandles.bottom.style.cssText = baseStyle + `cursor: ns-resize;`;
             container.appendChild(cropHandles.bottom);
           }
           if (needLeft) {
             cropHandles.left = document.createElement("div");
-            cropHandles.left.className = "fate-crop-handle-left";
+            cropHandles.left.className = "wbe-crop-handle-left";
             cropHandles.left.style.cssText = baseStyle + `cursor: ew-resize;`;
             container.appendChild(cropHandles.left);
           }
@@ -697,7 +715,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
             pointer-events: auto;
           `;
           cropHandles.circleResize = document.createElement("div");
-          cropHandles.circleResize.className = "fate-crop-handle-circle-resize";
+          cropHandles.circleResize.className = "wbe-crop-handle-circle-resize";
           cropHandles.circleResize.style.cssText = baseStyle + `cursor: nw-resize;`;
           container.appendChild(cropHandles.circleResize);
           setupCircleResizeHandleDrag();
@@ -729,7 +747,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       // 4) Refresh permanent border and click target from current DOM data
       const dataNow = getImageCropData(imageElement);
       updateImageBorder(permanentBorder, imageElement, dataNow.maskType, dataNow.crop, dataNow.circleOffset, dataNow.circleRadius, dataNow.scale);
-      const clickTarget = container.querySelector(".fate-image-click-target");
+      const clickTarget = container.querySelector(".wbe-image-click-target");
       if (clickTarget) {
         updateClickTarget(clickTarget, imageElement, dataNow.maskType, dataNow.crop, dataNow.circleOffset, dataNow.circleRadius, dataNow.scale);
       }
@@ -741,7 +759,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     // Permanent border (серая рамка, показывается только когда НЕ выделена)
     const permanentBorder = document.createElement("div");
-    permanentBorder.className = "fate-image-permanent-border";
+    permanentBorder.className = "wbe-image-permanent-border";
     permanentBorder.style.cssText = `
       position: absolute;
       left: 0;
@@ -755,7 +773,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     // Selection border overlay (синяя рамка при выделении)
     const selectionBorder = document.createElement("div");
-    selectionBorder.className = "fate-image-selection-border";
+    selectionBorder.className = "wbe-image-selection-border";
     selectionBorder.style.cssText = `
       position: absolute;
       left: 0;
@@ -771,13 +789,13 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     // This prevents clicking/dragging by invisible cropped parts
     // Positioned exactly where the visible image is
     const clickTarget = document.createElement("div");
-    clickTarget.className = "fate-image-click-target";
+    clickTarget.className = "wbe-image-click-target";
     clickTarget.style.cssText = `
       position: absolute;
       left: 0;
       top: 0;
       background: transparent;
-      pointer-events: auto;
+      pointer-events: none;
       z-index: 998;
     `;
     container.appendChild(clickTarget);
@@ -816,13 +834,13 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       // Update click target on load
       const cropData = getImageCropData(imageElement);
-      const clickTarget = container.querySelector(".fate-image-click-target");
+      const clickTarget = container.querySelector(".wbe-image-click-target");
       updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
     });
     
     // Resize handle (круглая точка)
     const resizeHandle = document.createElement("div");
-    resizeHandle.className = "fate-image-resize-handle";
+    resizeHandle.className = "wbe-image-resize-handle";
     resizeHandle.style.cssText = `
       position: absolute;
       left: 0;
@@ -977,7 +995,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       circleOffsetY = cropData.circleOffset.y;
       circleRadius = cropData.circleRadius;
       
-      console.log(`[FATE-TC] enterCropMode - synced closure from CSS:`, cropData);
+      console.log(`[WB-E] enterCropMode - synced closure from CSS:`, cropData);
       
       isCropping = true;
       
@@ -1003,7 +1021,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       permanentBorder.style.display = "none"; // ✨ Ensure gray border is hidden during crop
       
       // Disable click target during crop mode to allow deselection
-      const clickTarget = container.querySelector(".fate-image-click-target");
+      const clickTarget = container.querySelector(".wbe-image-click-target");
       if (clickTarget) {
         clickTarget.style.pointerEvents = "none";
       }
@@ -1016,7 +1034,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       selectionBorder.style.borderColor = "rgba(128, 0, 255, 0.9)"; // Фиолетовый для crop mode
       
       // ✨ NEW ARCHITECTURE: Update border using synced data
-      console.log(`[FATE-TC] enterCropMode - updating border with synced crop:`, cropData);
+      console.log(`[WB-E] enterCropMode - updating border with synced crop:`, cropData);
       updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       ui.notifications.info("Crop mode activated (image locked)");
@@ -1024,7 +1042,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       // Создаем UI переключатели типа маски (квадрат/круг)
       if (!maskTypeToggle) {
         maskTypeToggle = document.createElement("div");
-        maskTypeToggle.className = "fate-mask-type-toggle";
+        maskTypeToggle.className = "wbe-mask-type-toggle";
         maskTypeToggle.style.cssText = `
           position: absolute;
           top: -35px;
@@ -1037,7 +1055,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         
         // Кнопка "Квадрат"
         rectBtn = document.createElement("div");
-        rectBtn.className = "fate-mask-btn fate-mask-rect-btn";
+        rectBtn.className = "wbe-mask-btn wbe-mask-rect-btn";
         rectBtn.innerHTML = '<i class="fas fa-square"></i>';
         rectBtn.title = "Прямоугольная маска";
         rectBtn.style.cssText = `
@@ -1065,7 +1083,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         
         // Кнопка "Круг"
         circleBtn = document.createElement("div");
-        circleBtn.className = "fate-mask-btn fate-mask-circle-btn";
+        circleBtn.className = "wbe-mask-btn wbe-mask-circle-btn";
         circleBtn.innerHTML = '<i class="fas fa-circle"></i>';
         circleBtn.title = "Круговая маска";
         circleBtn.style.cssText = `
@@ -1118,25 +1136,25 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         
         // Top handle
         cropHandles.top = document.createElement("div");
-        cropHandles.top.className = "fate-crop-handle-top";
+        cropHandles.top.className = "wbe-crop-handle-top";
         cropHandles.top.style.cssText = handleStyle + `cursor: ns-resize;`;
         container.appendChild(cropHandles.top);
         
         // Right handle
         cropHandles.right = document.createElement("div");
-        cropHandles.right.className = "fate-crop-handle-right";
+        cropHandles.right.className = "wbe-crop-handle-right";
         cropHandles.right.style.cssText = handleStyle + `cursor: ew-resize;`;
         container.appendChild(cropHandles.right);
         
         // Bottom handle
         cropHandles.bottom = document.createElement("div");
-        cropHandles.bottom.className = "fate-crop-handle-bottom";
+        cropHandles.bottom.className = "wbe-crop-handle-bottom";
         cropHandles.bottom.style.cssText = handleStyle + `cursor: ns-resize;`;
         container.appendChild(cropHandles.bottom);
         
         // Left handle
         cropHandles.left = document.createElement("div");
-        cropHandles.left.className = "fate-crop-handle-left";
+        cropHandles.left.className = "wbe-crop-handle-left";
         cropHandles.left.style.cssText = handleStyle + `cursor: ew-resize;`;
         container.appendChild(cropHandles.left);
         
@@ -1162,7 +1180,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         
         // Создаем гизмочку для изменения размера круга
         cropHandles.circleResize = document.createElement("div");
-        cropHandles.circleResize.className = "fate-crop-handle-circle-resize";
+        cropHandles.circleResize.className = "wbe-crop-handle-circle-resize";
         cropHandles.circleResize.style.cssText = handleStyle + `cursor: nw-resize;`;
         container.appendChild(cropHandles.circleResize);
         
@@ -1181,14 +1199,14 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     }
     
     async function exitCropMode() {
-      console.log(`[FATE-TC] Exiting crop mode for ${id}`);
+      console.log(`[WB-E] Exiting crop mode for ${id}`);
       
       isCropping = false;
       
       // ✨ CRITICAL: Write closure modifications back to CSS/Dataset (source of truth)
       // During crop mode, we only modified closures for performance
       // Now sync everything before broadcasting/reading
-      console.log(`[FATE-TC] Syncing closure changes to CSS/Dataset:`, { crop, maskType: currentMaskType });
+      console.log(`[WB-E] Syncing closure changes to CSS/Dataset:`, { crop, maskType: currentMaskType });
       setImageCropData(imageElement, {
         crop: { ...crop },
         maskType: currentMaskType,
@@ -1197,7 +1215,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       });
       
       // ✨ FINAL SAVE - Now broadcast all crop changes to everyone
-      console.log(`[FATE-TC] Broadcasting final crop state for ${id}`);
+      console.log(`[WB-E] Broadcasting final crop state for ${id}`);
       await saveImageState(true); // Force broadcast
       
       // Broadcast unlock to all users
@@ -1230,11 +1248,11 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       // ✨ NEW ARCHITECTURE: Update permanent border to reflect NEW crop state
       const cropData = getImageCropData(imageElement);
-      console.log(`[FATE-TC] exitCropMode - updating permanent border with crop:`, cropData.crop);
+      console.log(`[WB-E] exitCropMode - updating permanent border with crop:`, cropData.crop);
       updateImageBorder(permanentBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       // Update click target to match NEW visible area and re-enable it
-      const clickTarget = container.querySelector(".fate-image-click-target");
+      const clickTarget = container.querySelector(".wbe-image-click-target");
       updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       // Re-enable click target after crop mode
@@ -1632,11 +1650,11 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     function selectImage() {
       // Нельзя выделить заблокированную картинку
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
-        console.log(`[FATE-TC] Cannot select ${id} - locked by ${container.dataset.lockedBy}`);
+        console.log(`[WB-E] Cannot select ${id} - locked by ${container.dataset.lockedBy}`);
         return;
       }
       
-      console.log(`[FATE-TC] Selecting image ${id}`);
+      console.log(`[WB-E] Selecting image ${id}`);
       isSelected = true;
       selectedImageId = id; // Устанавливаем глобальный ID
       
@@ -1660,13 +1678,13 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       // ✨ NEW ARCHITECTURE: Single source of truth
       const cropData = getImageCropData(imageElement);
-      console.log(`[FATE-TC] selectImage ${id} - crop data from CSS/Dataset:`, cropData);
+      console.log(`[WB-E] selectImage ${id} - crop data from CSS/Dataset:`, cropData);
       
       // Update selection border with current crop data
       updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       // Update click target to match visible area
-      const clickTarget = container.querySelector(".fate-image-click-target");
+      const clickTarget = container.querySelector(".wbe-image-click-target");
       updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       // Set move cursor on click target when selected
@@ -1679,11 +1697,11 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       // Update resize handle with current crop data
       updateImageResizeHandle(resizeHandle, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
-      console.log(`[FATE-TC] Image ${id} selected, pointer-events: ${container.style.pointerEvents}, resize handle visible: ${resizeHandle.style.display}`);
+      console.log(`[WB-E] Image ${id} selected, pointer-events: ${container.style.pointerEvents}, resize handle visible: ${resizeHandle.style.display}`);
     }
     
     async function deselectImage() {
-      console.log(`[FATE-TC] Deselecting image ${id}`);
+      console.log(`[WB-E] Deselecting image ${id}`);
       isSelected = false;
       delete container.dataset.selected; // Убираем метку
       if (selectedImageId === id) selectedImageId = null; // Сбрасываем глобальный ID только если это МЫ
@@ -1707,30 +1725,30 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       // ✨ NEW ARCHITECTURE: Update permanent border with current crop data
       const cropData = getImageCropData(imageElement);
-      console.log(`[FATE-TC] deselectImage ${id} - Using crop for permanent border:`, cropData.crop);
+      console.log(`[WB-E] deselectImage ${id} - Using crop for permanent border:`, cropData.crop);
       updateImageBorder(permanentBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       // Update click target to match visible area
-      const clickTarget = container.querySelector(".fate-image-click-target");
+      const clickTarget = container.querySelector(".wbe-image-click-target");
       updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
-      // Remove cursor from click target when deselected
+      // Disable click target pointer events when deselected to allow canvas drag/pan
       if (clickTarget) {
-        // clickTarget.style.cursor = "default"; // Removed cursor change
+        clickTarget.style.setProperty("pointer-events", "none", "important");
       }
       
       resizeHandle.style.display = "none";
       
-      console.log(`[FATE-TC] Image ${id} deselected, pointer-events: ${container.style.pointerEvents}`);
+      console.log(`[WB-E] Image ${id} deselected, pointer-events: ${container.style.pointerEvents}`);
     }
     
     // Удаление по клавише Delete
     async function deleteImage() {
-      console.log(`[FATE-TC] Deleting image ${id}`);
+      console.log(`[WB-E] Deleting image ${id}`);
       
       // Unregister from global registry
       imageRegistry.delete(id);
-      console.log(`[FATE-TC] Unregistered image ${id}, remaining images: ${imageRegistry.size}`);
+      console.log(`[WB-E] Unregistered image ${id}, remaining images: ${imageRegistry.size}`);
       
       container.remove();
       
@@ -1771,7 +1789,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       const worldY = (layerY - translateY) / scale;
       
       
-      const newImageId = `fate-image-${Date.now()}`;
+      const newImageId = `wbe-image-${Date.now()}`;
       const cropData = copiedImageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
       const maskTypeData = copiedImageData.maskType || 'rect';
       const circleOffsetData = copiedImageData.circleOffset || { x: 0, y: 0 };
@@ -1810,7 +1828,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         
         // 🔒 Блокируем drag если пользователь в режиме crop
         if (isCropping) {
-          console.log(`[FATE-TC] Drag blocked - image ${id} is in crop mode`);
+          console.log(`[WB-E] Drag blocked - image ${id} is in crop mode`);
           return;
         }
         
@@ -1929,7 +1947,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       if (!useCircleOffset)          useCircleOffset = { x: circleOffsetX, y: circleOffsetY };
       if (useCircleRadius === undefined) useCircleRadius = circleRadius;
 
-      console.log(`[FATE-TC] saveImageState(SNAPSHOT) for ${id}:`, {
+      console.log(`[WB-E] saveImageState(SNAPSHOT) for ${id}:`, {
         useMaskType, useCrop, useCircleOffset, useCircleRadius, currentScale
       });
 
@@ -1957,7 +1975,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
 
       // While actively cropping, don't spam sockets/db with intermediate states
       if (isCropping && broadcast) {
-        console.log(`[FATE-TC] Image ${id} in crop mode - saving locally only, no broadcast`);
+        console.log(`[WB-E] Image ${id} in crop mode - saving locally only, no broadcast`);
         return;
       }
 
@@ -1972,7 +1990,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       selectFn: selectImage,
       deselectFn: deselectImage
     });
-    console.log(`[FATE-TC] Registered image ${id} in global registry, total images: ${imageRegistry.size}`);
+    console.log(`[WB-E] Registered image ${id} in global registry, total images: ${imageRegistry.size}`);
     
     // Install global handler if not already installed
     installGlobalImageSelectionHandler();
@@ -1991,7 +2009,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     try {
       return await canvas.scene?.getFlag(FLAG_SCOPE, FLAG_KEY_IMAGES) || {};
     } catch (e) {
-      console.error("[FATE-TC] getAllImages error:", e);
+      console.error("[WB-E] getAllImages error:", e);
       return {};
     }
   }
@@ -2013,7 +2031,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         // Обновляем локально для немедленной реакции UI у игрока
         if (layer) {
           // Получаем все существующие картинки
-          const existingElements = layer.querySelectorAll(".fate-canvas-image-container");
+          const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
           const existingIds = new Set();
           
           // Обновляем существующие и создаем новые картинки локально
@@ -2054,7 +2072,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         }
       }
     } catch (e) {
-      console.error("[FATE-TC] setAllImages error:", e);
+      console.error("[WB-E] setAllImages error:", e);
     }
 }
 
@@ -2065,7 +2083,7 @@ function updateImageElement(existing, imageData) {
     existing.style.left = `${imageData.left}px`;
     existing.style.top = `${imageData.top}px`;
     
-    const imageElement = existing.querySelector(".fate-canvas-image");
+    const imageElement = existing.querySelector(".wbe-canvas-image");
     if (imageElement) {
       imageElement.style.transform = `scale(${imageData.scale})`;
       
@@ -2114,7 +2132,7 @@ function updateImageElement(existing, imageData) {
       isCropping: imageData.isCropping || false
     });
     
-    console.log(`[FATE-TC] updateImageElement updated imageLocalVars for ${existing.id}, crop:`, imageData.crop);
+    console.log(`[WB-E] updateImageElement updated imageLocalVars for ${existing.id}, crop:`, imageData.crop);
   }
   
   // Функция для применения визуальных стилей картинки
@@ -2151,7 +2169,7 @@ function updateImageElement(existing, imageData) {
   
   // Функция для полного обновления UI элементов картинки
   function updateImageUIElements(container, imageData) {
-    const imageElement = container.querySelector(".fate-canvas-image");
+    const imageElement = container.querySelector(".wbe-canvas-image");
     if (!imageElement) return;
     
     const maskType = imageData.maskType || 'rect';
@@ -2169,38 +2187,38 @@ function updateImageElement(existing, imageData) {
     const isLockedByMe = container.dataset.lockedBy === game.user.id;
     const isCropping = isLockedByMe || imageData.isCropping || false;
     
-    console.log(`[FATE-TC] updateImageUIElements for ${container.id}, preserving isSelected: ${isSelected}, isCropping: ${isCropping} (lockedByMe: ${isLockedByMe})`);
+    console.log(`[WB-E] updateImageUIElements for ${container.id}, preserving isSelected: ${isSelected}, isCropping: ${isCropping} (lockedByMe: ${isLockedByMe})`);
     
     // Обновляем постоянную рамку
-    const permanentBorder = container.querySelector(".fate-image-permanent-border");
+    const permanentBorder = container.querySelector(".wbe-image-permanent-border");
     if (permanentBorder) {
       updateImageBorder(permanentBorder, imageElement, maskType, crop, circleOffset, circleRadius, scale);
     }
     
     // Обновляем синюю рамку выделения
-    const selectionBorder = container.querySelector(".fate-image-selection-border");
+    const selectionBorder = container.querySelector(".wbe-image-selection-border");
     if (selectionBorder) {
       updateImageBorder(selectionBorder, imageElement, maskType, crop, circleOffset, circleRadius, scale);
     }
     
     // Обновляем позицию resize handle
-    const resizeHandle = container.querySelector(".fate-image-resize-handle");
+    const resizeHandle = container.querySelector(".wbe-image-resize-handle");
     if (resizeHandle) {
       updateImageResizeHandle(resizeHandle, imageElement, maskType, crop, circleOffset, circleRadius, scale);
     }
     
     // ✨ CRITICAL: Update click target to match visible area
     // This ensures the click target stays synchronized with crop changes from socket updates
-    const clickTarget = container.querySelector(".fate-image-click-target");
+    const clickTarget = container.querySelector(".wbe-image-click-target");
     if (clickTarget) {
-      console.log(`[FATE-TC] updateImageUIElements - updating click target for ${container.id}`);
+      console.log(`[WB-E] updateImageUIElements - updating click target for ${container.id}`);
       updateClickTarget(clickTarget, imageElement, maskType, crop, circleOffset, circleRadius, scale);
     } else {
-      console.log(`[FATE-TC] updateImageUIElements - click target not found for ${container.id}`);
+      console.log(`[WB-E] updateImageUIElements - click target not found for ${container.id}`);
     }
     
     // Обновляем переключатель типа маски
-    const maskTypeToggle = container.querySelector(".fate-mask-type-toggle");
+    const maskTypeToggle = container.querySelector(".wbe-mask-type-toggle");
     if (maskTypeToggle) {
       updateMaskTypeToggle(maskTypeToggle, maskType);
     }
@@ -2221,11 +2239,12 @@ function updateImageElement(existing, imageData) {
   
   // Функция для применения UI состояний картинки
   function updateImageUIStates(container, isSelected, isCropping) {
-    const imageElement = container.querySelector(".fate-canvas-image");
-    const permanentBorder = container.querySelector(".fate-image-permanent-border");
-    const selectionBorder = container.querySelector(".fate-image-selection-border");
-    const resizeHandle = container.querySelector(".fate-image-resize-handle");
-    const maskTypeToggle = container.querySelector(".fate-mask-type-toggle");
+    const imageElement = container.querySelector(".wbe-canvas-image");
+    const permanentBorder = container.querySelector(".wbe-image-permanent-border");
+    const selectionBorder = container.querySelector(".wbe-image-selection-border");
+    const resizeHandle = container.querySelector(".wbe-image-resize-handle");
+    const maskTypeToggle = container.querySelector(".wbe-mask-type-toggle");
+    const clickTarget = container.querySelector(".wbe-image-click-target");
     
     // ✨ CRITICAL: If this user is cropping (locked by them), force isCropping to true
     // This prevents socket updates from showing blue border/resize handle during crop mode
@@ -2240,6 +2259,11 @@ function updateImageElement(existing, imageData) {
       if (selectionBorder) selectionBorder.style.display = "block";
       if (resizeHandle) resizeHandle.style.display = "flex";
       
+      // Enable click target pointer events when selected
+      if (clickTarget) {
+        clickTarget.style.setProperty("pointer-events", "auto", "important");
+      }
+      
       // Don't set pointer-events on container - let click target handle interactions
       // container.style.setProperty("pointer-events", "auto", "important");
       // Cursor will be set based on crop mode below
@@ -2252,6 +2276,11 @@ function updateImageElement(existing, imageData) {
       if (permanentBorder) permanentBorder.style.display = "block";
       if (selectionBorder) selectionBorder.style.display = "none";
       if (resizeHandle) resizeHandle.style.display = "none";
+      
+      // Disable click target pointer events when not selected to allow canvas drag/pan
+      if (clickTarget) {
+        clickTarget.style.setProperty("pointer-events", "none", "important");
+      }
       
       // Убираем стили контейнера
       // Always keep pointer-events: none on container - click target handles interactions
@@ -2333,7 +2362,7 @@ function updateImageElement(existing, imageData) {
   
   // Функция для обновления локальных переменных картинки
   function updateImageLocalVars(imageId, data) {
-    console.log(`[FATE-TC] updateImageLocalVars called for ${imageId}, data.crop:`, data.crop);
+    console.log(`[WB-E] updateImageLocalVars called for ${imageId}, data.crop:`, data.crop);
     
     imageLocalVars[imageId] = {
       maskType: data.maskType || 'rect',
@@ -2343,7 +2372,7 @@ function updateImageElement(existing, imageData) {
       scale: data.scale || 1
     };
     
-    console.log(`[FATE-TC] imageLocalVars[${imageId}] now:`, JSON.stringify(imageLocalVars[imageId], null, 2));
+    console.log(`[WB-E] imageLocalVars[${imageId}] now:`, JSON.stringify(imageLocalVars[imageId], null, 2));
   }
   
   // Глобальная функция для обновления локальных переменных в createImageElement
@@ -2366,8 +2395,8 @@ function updateImageElement(existing, imageData) {
     const imageId = container.id;
     const data = getImageData(imageId);
     
-    const imageElement = container.querySelector(".fate-canvas-image");
-    const selectionBorder = container.querySelector(".fate-image-selection-border");
+    const imageElement = container.querySelector(".wbe-canvas-image");
+    const selectionBorder = container.querySelector(".wbe-image-selection-border");
     
     if (!imageElement || !selectionBorder) return;
     
@@ -2379,8 +2408,8 @@ function updateImageElement(existing, imageData) {
     const imageId = container.id;
     const data = getImageData(imageId);
     
-    const imageElement = container.querySelector(".fate-canvas-image");
-    const resizeHandle = container.querySelector(".fate-image-resize-handle");
+    const imageElement = container.querySelector(".wbe-canvas-image");
+    const resizeHandle = container.querySelector(".wbe-image-resize-handle");
     
     if (!imageElement || !resizeHandle) return;
     
@@ -2389,11 +2418,11 @@ function updateImageElement(existing, imageData) {
   
   // Глобальная функция для обновления кнопок переключателя маски
   function updateMaskTypeToggleGlobal(container, maskType) {
-    const maskTypeToggle = container.querySelector(".fate-mask-type-toggle");
+    const maskTypeToggle = container.querySelector(".wbe-mask-type-toggle");
     if (!maskTypeToggle) return;
     
-    const rectBtn = maskTypeToggle.querySelector(".fate-mask-btn");
-    const circleBtn = maskTypeToggle.querySelector(".fate-mask-btn:last-child");
+    const rectBtn = maskTypeToggle.querySelector(".wbe-mask-btn");
+    const circleBtn = maskTypeToggle.querySelector(".wbe-mask-btn:last-child");
     
     if (rectBtn && circleBtn) {
       if (maskType === 'rect') {
@@ -2489,8 +2518,8 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
   
   // Функция для обновления переключателя типа маски
   function updateMaskTypeToggle(maskTypeToggle, maskType) {
-    const rectBtn = maskTypeToggle.querySelector(".fate-mask-rect-btn");
-    const circleBtn = maskTypeToggle.querySelector(".fate-mask-circle-btn");
+    const rectBtn = maskTypeToggle.querySelector(".wbe-mask-rect-btn");
+    const circleBtn = maskTypeToggle.querySelector(".wbe-mask-circle-btn");
     
     if (rectBtn && circleBtn) {
       if (maskType === 'rect') {
@@ -2511,11 +2540,11 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
   function updateCropHandles(container, maskType, crop, circleOffset, circleRadius, scale) {
     // Прячем все handles если не в crop режиме
     const cropHandles = {
-      top: container.querySelector(".fate-crop-handle-top"),
-      right: container.querySelector(".fate-crop-handle-right"),
-      bottom: container.querySelector(".fate-crop-handle-bottom"),
-      left: container.querySelector(".fate-crop-handle-left"),
-      circleResize: container.querySelector(".fate-crop-handle-circle-resize")
+      top: container.querySelector(".wbe-crop-handle-top"),
+      right: container.querySelector(".wbe-crop-handle-right"),
+      bottom: container.querySelector(".wbe-crop-handle-bottom"),
+      left: container.querySelector(".wbe-crop-handle-left"),
+      circleResize: container.querySelector(".wbe-crop-handle-circle-resize")
     };
     
     // Показываем/прячем handles в зависимости от типа маски
@@ -2529,10 +2558,10 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
   // Глобальная функция для позиционирования crop handles
   function updateCropHandlesPositionGlobal(container, imageElement, maskType, crop, circleOffset, circleRadius, scale) {
     const cropHandles = {
-      top: container.querySelector(".fate-crop-handle-top"),
-      right: container.querySelector(".fate-crop-handle-right"),
-      bottom: container.querySelector(".fate-crop-handle-bottom"),
-      left: container.querySelector(".fate-crop-handle-left")
+      top: container.querySelector(".wbe-crop-handle-top"),
+      right: container.querySelector(".wbe-crop-handle-right"),
+      bottom: container.querySelector(".wbe-crop-handle-bottom"),
+      left: container.querySelector(".wbe-crop-handle-left")
     };
     
     const width = imageElement.offsetWidth;
@@ -2573,7 +2602,7 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
   // Глобальная функция для позиционирования circle resize handle
   function updateCircleResizeHandlePositionGlobal(container, imageElement, maskType, crop, circleOffset, circleRadius, scale) {
     const cropHandles = {
-      circleResize: container.querySelector(".fate-crop-handle-circle-resize")
+      circleResize: container.querySelector(".wbe-crop-handle-circle-resize")
     };
     
     if (!cropHandles.circleResize) return;
@@ -2604,7 +2633,7 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
     const { lastMouseX, lastMouseY } = getSharedVars();
     const worldPos = screenToWorld(lastMouseX, lastMouseY);
     
-    const newImageId = `fate-image-${Date.now()}`;
+    const newImageId = `wbe-image-${Date.now()}`;
     const cropData = copiedImageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
     const maskTypeData = copiedImageData.maskType || 'rect';
     const circleOffsetData = copiedImageData.circleOffset || { x: 0, y: 0 };
@@ -2629,7 +2658,7 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
 
   // Вставка картинки из системного буфера
 async function handleImagePasteFromClipboard(file) {
-    console.log("[FATE-TC] handleImagePasteFromClipboard called with file:", file.name, file.type);
+    console.log("[WB-E] handleImagePasteFromClipboard called with file:", file.name, file.type);
     try {
       // Сбрасываем наши скопированные элементы (вставляем из системного буфера)
       copiedImageData = null;
@@ -2637,7 +2666,7 @@ async function handleImagePasteFromClipboard(file) {
       // Создаем уникальное имя файла
       const timestamp = Date.now();
       const extension = file.type.split('/')[1] || 'png';
-      const filename = `fate-image-${timestamp}.${extension}`;
+      const filename = `wbe-image-${timestamp}.${extension}`;
       
       // Создаем новый File объект
       const newFile = new File([file], filename, { type: file.type });
@@ -2650,25 +2679,25 @@ async function handleImagePasteFromClipboard(file) {
       if (isGM) {
         // GM: Try direct upload only
         try {
-          console.log("[FATE-TC] GM canvas upload - using direct method only");
+          console.log("[WB-E] GM canvas upload - using direct method only");
           uploadResult = await foundry.applications.apps.FilePicker.implementation.upload("data", `worlds/${game.world.id}/`, newFile, { name: filename });
           const directTime = Date.now() - startTime;
-          console.log(`[FATE-TC] GM canvas upload successful in ${directTime}ms:`, uploadResult);
+          console.log(`[WB-E] GM canvas upload successful in ${directTime}ms:`, uploadResult);
         } catch (error) {
           const directTime = Date.now() - startTime;
-          console.error(`[FATE-TC] GM canvas upload failed after ${directTime}ms:`, error);
+          console.error(`[WB-E] GM canvas upload failed after ${directTime}ms:`, error);
           throw new Error(`GM canvas upload failed: ${error.message}`);
         }
       } else {
         // Player: Try direct upload only (no timeout, no base64 fallback)
         try {
-          console.log("[FATE-TC] Player canvas upload - using direct method only");
+          console.log("[WB-E] Player canvas upload - using direct method only");
           uploadResult = await foundry.applications.apps.FilePicker.implementation.upload("data", `worlds/${game.world.id}/`, newFile, { name: filename });
           const directTime = Date.now() - startTime;
-          console.log(`[FATE-TC] Player canvas direct upload successful in ${directTime}ms:`, uploadResult);
+          console.log(`[WB-E] Player canvas direct upload successful in ${directTime}ms:`, uploadResult);
         } catch (error) {
           const directTime = Date.now() - startTime;
-          console.error(`[FATE-TC] Player canvas direct upload failed after ${directTime}ms:`, error);
+          console.error(`[WB-E] Player canvas direct upload failed after ${directTime}ms:`, error);
           throw new Error(`Player canvas upload failed: ${error.message}`);
         }
       }
@@ -2680,7 +2709,7 @@ async function handleImagePasteFromClipboard(file) {
         
         
         // Создаем новое изображение В ПОЗИЦИИ КУРСОРА
-        const imageId = `fate-image-${timestamp}`;
+        const imageId = `wbe-image-${timestamp}`;
         const defaultCrop = { top: 0, right: 0, bottom: 0, left: 0 };
         createImageElement(imageId, uploadResult.path, worldPos.x, worldPos.y, 1, defaultCrop, 'rect', { x: 0, y: 0 }, null);
         
@@ -2700,7 +2729,7 @@ async function handleImagePasteFromClipboard(file) {
         ui.notifications.error("Не удалось загрузить изображение");
       }
     } catch (err) {
-      console.error("[FATE-TC] Ошибка при вставке картинки:", err);
+      console.error("[WB-E] Ошибка при вставке картинки:", err);
       ui.notifications.error("Ошибка при вставке изображения");
     }
   }
