@@ -10,6 +10,7 @@ const FLAG_KEY_IMAGES = "images"; // scene.flags[MODID].images = { [id]: { src, 
 
 import { TextTools } from "./modules/whiteboard-text.mjs";
 import { ImageTools } from "./modules/whiteboard-image.mjs";
+import { MassSelection } from "./modules/whiteboard-select.mjs";
 import { FateTableCardApp, CARD_CSS } from './modules/fate-card.mjs';
 
 // Inject CSS globally for all users as early as possible
@@ -60,6 +61,10 @@ Hooks.once("ready", async () => {
   
   // Поднять все тексты и картинки
   await loadCanvasElements();
+  
+  // Initialize mass selection system
+  MassSelection.initialize();
+  MassSelection.setToggleState(massSelectionToggleState);
 
   // Верхняя кнопка (справа у навигации) — только ГМ
   if (game.user.isGM && !document.getElementById("whiteboard-experience-topbtn")) {
@@ -84,12 +89,16 @@ Hooks.once("ready", async () => {
   }
 
   // Инъекция инструментов в левый тулбар
+  injectMassSelectionTool(); // Mass selection first (top priority)
   injectFateCardTool();
   TextTools.injectTextTool();
   Hooks.on("renderSceneControls", () => {
+    injectMassSelectionTool(); // Mass selection first (top priority)
     injectFateCardTool();
     TextTools.injectTextTool();
   });
+  
+
   
   // Глобальный обработчик Ctrl+V для вставки из буфера
   setupGlobalPasteHandler();
@@ -163,9 +172,22 @@ Hooks.once("ready", async () => {
             existingIds.add(id);
             const existing = document.getElementById(id);
             if (existing) {
+              // 🔥 CRITICAL FIX: Skip locked text elements (GM socket handler)
+              if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
+                console.log(`[WB-E] GM skipping socket update for ${id} - locked by user ${existing.dataset.lockedBy}`);
+                continue; // Don't update! This prevents cursor reset!
+              }
+              
               // Обновляем существующий элемент
               const textElement = existing.querySelector(".wbe-canvas-text");
               if (textElement) {
+                // ✅ ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
+                if (textElement.contentEditable === "true") {
+                  console.log(`[WB-E] GM skipping socket update for ${id} - actively being edited`);
+                  continue;
+                }
+                
+                // Safe to update now
                 textElement.textContent = textData.text;
                 existing.style.left = `${textData.left}px`;
                 existing.style.top = `${textData.top}px`;
@@ -177,6 +199,15 @@ Hooks.once("ready", async () => {
                 TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
                 TextTools.applyFontSizeToElement?.(textElement, textData.fontSize || TextTools.DEFAULT_FONT_SIZE);
                 TextTools.applyBorderDataToElement?.(textElement, textData.borderColor, textData.borderWidth);
+                
+                // ✅ FIX: Apply width if present
+                if (textData.width && textData.width > 0) {
+                  textElement.style.width = `${textData.width}px`;
+                  textElement.dataset.manualWidth = "true";
+                } else {
+                  textElement.style.width = "";
+                  textElement.dataset.manualWidth = "false";
+                }
                 
                 // Update resize handle position after scale/size changes
                 TextTools.updateTextUI(existing);
@@ -237,6 +268,11 @@ Hooks.once("ready", async () => {
     if (data.type === "textUpdate") {
       // Обновляем UI у всех (включая отправителя)
       // Умное обновление: обновляем только измененные тексты
+      // ✅ FIX: Skip update if this is the sender's own update
+      if (data.senderId && data.senderId === game.user.id) {
+        console.log("[WB-E] Skipping own textUpdate");
+        return;
+      }
       const layer = getOrCreateLayer();
       if (layer) {
         // Получаем все существующие текстовые элементы
@@ -248,9 +284,22 @@ Hooks.once("ready", async () => {
           existingIds.add(id);
           const existing = document.getElementById(id);
           if (existing) {
+            // 🔥 CRITICAL FIX: Skip locked text elements
+            if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
+              console.log(`[WB-E] Skipping socket update for ${id} - locked by user ${existing.dataset.lockedBy}`);
+              continue; // Don't update! This prevents cursor reset!
+            }
+            
             // Обновляем существующий элемент
             const textElement = existing.querySelector(".wbe-canvas-text");
             if (textElement) {
+              // ✅ ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
+              if (textElement.contentEditable === "true") {
+                console.log(`[WB-E] Skipping socket update for ${id} - actively being edited`);
+                continue;
+              }
+              
+              // Safe to update now
               textElement.textContent = textData.text;
               existing.style.left = `${textData.left}px`;
               existing.style.top = `${textData.top}px`;
@@ -349,7 +398,7 @@ Hooks.once("ready", async () => {
               const maskTypeData = imageData.maskType || 'rect';
               const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
               const circleRadiusData = imageData.circleRadius || null;
-              ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData);
+              ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex);
             }
             
             // ✨ Обновляем глобальные переменные для каждой картинки
@@ -399,7 +448,7 @@ Hooks.once("ready", async () => {
             const maskTypeData = imageData.maskType || 'rect';
             const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
             const circleRadiusData = imageData.circleRadius || null;
-            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData);
+            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex);
           }
           
           // ✨ Обновляем глобальные переменные для каждой картинки
@@ -423,6 +472,7 @@ Hooks.once("ready", async () => {
         });
       }
     }
+
 
     // Запрос на обновление карточки от игрока
     if (data.type === "cardUpdateRequest") {
@@ -533,6 +583,7 @@ Hooks.once("ready", async () => {
             game.socket.emit(`module.${MODID}`, { 
               type: "replaceCanvasBase64WithFile", 
               base64Path: data.base64,
+              
               filePath: response.path,
               fileName: data.fileName
             });
@@ -608,6 +659,24 @@ Hooks.once("ready", async () => {
       if (container) {
         // Убираем визуальную блокировку
         ImageTools.removeImageLockVisual(container);
+      }
+    }
+
+    // ✅ NEW: Handle text lock
+    if (data.type === "textLock") {
+      console.log(`[WB-E] Received textLock for ${data.textId} from ${data.userName}`);
+      const container = document.getElementById(data.textId);
+      if (container && data.userId !== game.user.id) {
+        TextTools.applyTextLockVisual(container, data.userId, data.userName);
+      }
+    }
+
+    // ✅ NEW: Handle text unlock
+    if (data.type === "textUnlock") {
+      console.log(`[WB-E] Received textUnlock for ${data.textId}`);
+      const container = document.getElementById(data.textId);
+      if (container) {
+        TextTools.removeTextLockVisual(container);
       }
     }
   });
@@ -768,11 +837,223 @@ async function injectFateCardTool() {
   await sc.render?.(true);
 }
 
+/* ----------------------- Mass Selection Tool ------------------ */
+// Load toggle state from localStorage, default to false (Ctrl+drag mode)
+let massSelectionToggleState = localStorage.getItem('wbe-mass-selection-toggle') === 'true';
+
+async function injectMassSelectionTool() {
+  const sc = ui.controls;
+  if (!sc || !sc.controls) return;
+
+  const groupsObj = sc.controls;
+  const group =
+    groupsObj.tokens || groupsObj.token || groupsObj.notes ||
+    Object.values(groupsObj)[0];
+
+  if (!group) return;
+
+  const toolName = "wbe-mass-selection";
+  const tool = {
+    name: toolName,
+    title: massSelectionToggleState ? 
+      "Mass Selection: ON (Default drag to select)" : 
+      "Mass Selection: OFF (Ctrl+drag to select)",
+    icon: massSelectionToggleState ? "fas fa-mouse-pointer" : "fas fa-mouse-pointer",
+    button: true,
+    active: massSelectionToggleState,
+    onChange: async () => {
+      // Toggle mass selection mode
+      massSelectionToggleState = !massSelectionToggleState;
+      
+      // Save toggle state to localStorage
+      localStorage.setItem('wbe-mass-selection-toggle', massSelectionToggleState.toString());
+      
+      // Update the tool state
+      tool.active = massSelectionToggleState;
+      tool.title = massSelectionToggleState ? 
+        "Mass Selection: ON (Default drag to select)" : 
+        "Mass Selection: OFF (Ctrl+drag to select)";
+      
+      // Update MassSelection system
+      MassSelection.setToggleState(massSelectionToggleState);
+      
+      // Clear any current selection when toggling
+      MassSelection.clear();
+      
+      // Update button visual state
+      setTimeout(() => {
+        const toolButton = document.querySelector(`[data-tool="wbe-mass-selection"]`);
+        if (toolButton) {
+          toolButton.classList.remove("wbe-mass-selection-toggle-on", "wbe-mass-selection-toggle-off");
+          toolButton.classList.add(massSelectionToggleState ? "wbe-mass-selection-toggle-on" : "wbe-mass-selection-toggle-off");
+        }
+      }, 100);
+      
+      // Show notification
+      if (massSelectionToggleState) {
+        ui.notifications.info("Mass Selection: ON - Default mouse drag to select objects");
+      } else {
+        ui.notifications.info("Mass Selection: OFF - Ctrl+drag to select objects");
+      }
+      
+      // Re-render to update button appearance
+      await sc.render?.(true);
+    }
+  };
+
+  const t = group.tools;
+  const exists = Array.isArray(t) ? t.some(x => x?.name === toolName) : t?.[toolName];
+  if (exists) {
+    // Update existing tool
+    const existingTool = Array.isArray(t) ? t.find(x => x?.name === toolName) : t[toolName];
+    if (existingTool) {
+      existingTool.active = massSelectionToggleState;
+      existingTool.title = massSelectionToggleState ? 
+        "Mass Selection: ON (Default drag to select)" : 
+        "Mass Selection: OFF (Ctrl+drag to select)";
+    }
+    return;
+  }
+
+  if (Array.isArray(t)) t.push(tool);
+  else if (t && typeof t === "object") {
+    t[toolName] = tool;
+    if (Array.isArray(group._toolOrder)) group._toolOrder.unshift(toolName); // Add to beginning
+  } else group.tools = [tool];
+
+  await sc.render?.(true);
+  
+  // Apply initial visual state
+  setTimeout(() => {
+    const toolButton = document.querySelector(`[data-tool="wbe-mass-selection"]`);
+    if (toolButton) {
+      toolButton.classList.add(massSelectionToggleState ? "wbe-mass-selection-toggle-on" : "wbe-mass-selection-toggle-off");
+    }
+  }, 100);
+}
+
 /* ----------------------- Text Tool ------------------ */
 let lastClickX = window.innerWidth / 2;
 let lastClickY = window.innerHeight / 2;
 let lastMouseX = window.innerWidth / 2;
 let lastMouseY = window.innerHeight / 2;
+
+// Z-Index Manager - Global for both text and image objects
+const ZIndexManager = {
+  // Track z-indexes for each object
+  textZIndexes: new Map(), // id -> zIndex
+  imageZIndexes: new Map(), // id -> zIndex
+  nextTextZIndex: 1000,    // Text range: 1000+
+  nextImageZIndex: 2000,   // Image range: 2000+
+  
+  // Get next available z-index for text
+  getNextText() {
+    return ++this.nextTextZIndex;
+  },
+  
+  // Get next available z-index for image
+  getNextImage() {
+    return ++this.nextImageZIndex;
+  },
+  
+  // Sync with existing z-index values to avoid conflicts
+  syncWithExisting(existingZIndexes) {
+    if (!Array.isArray(existingZIndexes)) return;
+    
+    let maxTextZIndex = this.nextTextZIndex;
+    let maxImageZIndex = this.nextImageZIndex;
+    
+    existingZIndexes.forEach(([id, zIndex]) => {
+      if (typeof zIndex === 'number') {
+        if (id.startsWith('wbe-text-') && zIndex >= 1000 && zIndex < 2000) {
+          // Text z-index (1000-1999 range)
+          if (zIndex > maxTextZIndex) {
+            maxTextZIndex = zIndex;
+          }
+        } else if (id.startsWith('wbe-image-') && zIndex >= 2000) {
+          // Image z-index (2000+ range)
+          if (zIndex > maxImageZIndex) {
+            maxImageZIndex = zIndex;
+          }
+        }
+      }
+    });
+    
+    // Update nextZIndex values to be higher than any existing values
+    this.nextTextZIndex = maxTextZIndex;
+    this.nextImageZIndex = maxImageZIndex;
+  },
+  
+  // Assign z-index to text
+  assignText(textId) {
+    const zIndex = this.getNextText();
+    this.textZIndexes.set(textId, zIndex);
+    return zIndex;
+  },
+  
+  // Assign z-index to image
+  assignImage(imageId) {
+    const zIndex = this.getNextImage();
+    this.imageZIndexes.set(imageId, zIndex);
+    return zIndex;
+  },
+  
+  // Get z-index for text
+  getText(textId) {
+    return this.textZIndexes.get(textId) || 1000;
+  },
+  
+  // Get z-index for image
+  getImage(imageId) {
+    return this.imageZIndexes.get(imageId) || 2000;
+  },
+  
+  // Get z-index for any object (tries both text and image)
+  get(id) {
+    if (id.startsWith('wbe-text-')) {
+      return this.getText(id);
+    } else if (id.startsWith('wbe-image-')) {
+      return this.getImage(id);
+    }
+    return 1000; // Default fallback
+  },
+  
+  // Remove z-index for text
+  removeText(textId) {
+    this.textZIndexes.delete(textId);
+  },
+  
+  // Remove z-index for image
+  removeImage(imageId) {
+    this.imageZIndexes.delete(imageId);
+  },
+  
+  // Remove z-index for any object
+  remove(id) {
+    this.removeText(id);
+    this.removeImage(id);
+  },
+  
+  // Check if text has z-index
+  hasText(textId) {
+    return this.textZIndexes.has(textId);
+  },
+  
+  // Check if image has z-index
+  hasImage(imageId) {
+    return this.imageZIndexes.has(imageId);
+  },
+  
+  // Get all tracked texts
+  getAllTexts() {
+    return Array.from(this.textZIndexes.entries());
+  },
+  
+  // Get all tracked images
+  getAllImages() {
+    return Array.from(this.imageZIndexes.entries());
+  }
+};
 
 
 
@@ -787,6 +1068,12 @@ export function getSharedVars() {
     selectedImageId: ImageTools.selectedImageId,
   };
 }
+
+// Export ZIndexManager for use by text and image modules
+export { ZIndexManager };
+
+// Make ZIndexManager globally accessible for console debugging
+window.ZIndexManager = ZIndexManager;
 
 export function setSelectedImageId(value) {
   ImageTools.selectedImageId = value;
@@ -809,6 +1096,11 @@ export function setLastClickY(value) {
 
 // Функция для снятия выделения со ВСЕХ элементов (кроме exceptId)
 function deselectAllElements(exceptId = null) {
+  
+  // ✅ CLEAR MASS SELECTION when deselecting all elements
+  if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+    window.MassSelection.clear();
+  }
   
   // Снимаем выделение со всех текстов
   document.querySelectorAll(".wbe-canvas-text-container").forEach(container => {
@@ -869,6 +1161,67 @@ document.addEventListener("copy", (e) => {
     ImageTools.copiedImageData = null;
   }
 }, true); // capture phase - раньше всех
+
+// Paste multi-selection functionality
+async function pasteMultiSelection() {
+  if (!window.wbeCopiedMultiSelection) return;
+  
+  console.log("[WB-E] Pasting multi-selection");
+  
+  const { texts, images } = window.wbeCopiedMultiSelection;
+  const offset = 20; // Offset for pasted elements
+  
+  // Get current mouse position
+  const { lastMouseX, lastMouseY } = getSharedVars();
+  const worldPos = screenToWorld(lastMouseX, lastMouseY);
+  
+  // Paste texts
+  for (const [id, textData] of Object.entries(texts)) {
+    const newId = `wbe-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const newLeft = worldPos.x + (textData.left || 0) + offset;
+    const newTop = worldPos.y + (textData.top || 0) + offset;
+    
+    TextTools.createTextElement(
+      newId,
+      textData.text,
+      newLeft,
+      newTop,
+      textData.scale,
+      textData.color,
+      textData.backgroundColor,
+      textData.borderColor,
+      textData.borderWidth,
+      textData.fontWeight,
+      textData.fontStyle,
+      textData.textAlign,
+      textData.fontFamily,
+      textData.fontSize,
+      textData.width
+    );
+    
+    // Save the new text
+    await TextTools.persistTextState(newId, document.getElementById(newId)?.querySelector(".wbe-canvas-text"), document.getElementById(newId));
+  }
+  
+  // Paste images
+  for (const [id, imageData] of Object.entries(images)) {
+    const newId = `wbe-image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const newLeft = worldPos.x + (imageData.left || 0) + offset;
+    const newTop = worldPos.y + (imageData.top || 0) + offset;
+    
+    const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+    const maskTypeData = imageData.maskType || 'rect';
+    const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
+    const circleRadiusData = imageData.circleRadius || null;
+    
+    ImageTools.createImageElement(newId, imageData.src, newLeft, newTop, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex);
+    
+    // Save the new image
+    await ImageTools.persistImageState(newId, document.getElementById(newId)?.querySelector(".wbe-canvas-image"), document.getElementById(newId));
+  }
+  
+  console.log("[WB-E] Multi-selection pasted successfully");
+}
 
 // Глобальный обработчик Ctrl+V для вставки из системного буфера
 function setupGlobalPasteHandler() {
@@ -961,6 +1314,22 @@ function setupGlobalPasteHandler() {
     }
     
     // FALLBACK: Если системный буфер пуст, используем наши скопированные элементы
+    // Check for multi-selection paste first
+    if (window.wbeCopiedMultiSelection) {
+      e.preventDefault();
+      e.stopPropagation();
+      await pasteMultiSelection();
+      return;
+    }
+    
+    // Check for mass selection paste
+    if (MassSelection.selectedCount > 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      await MassSelection.paste();
+      return;
+    }
+    
     if (ImageTools.copiedImageData) {
       e.preventDefault();
       e.stopPropagation();
@@ -990,6 +1359,12 @@ async function loadCanvasElements() {
   const texts = await TextTools.getAllTexts();
   const images = await ImageTools.getAllImages();
   
+  // Sync ZIndexManager with existing z-index values to avoid conflicts
+  const textZIndexes = Object.entries(texts).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
+  const imageZIndexes = Object.entries(images).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
+  const allZIndexes = [...textZIndexes, ...imageZIndexes];
+  ZIndexManager.syncWithExisting(allZIndexes);
+  
   // Восстановить тексты
   for (const [id, data] of Object.entries(texts)) {
     TextTools.createTextElement(
@@ -1007,7 +1382,8 @@ async function loadCanvasElements() {
       data.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
       data.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
       data.fontSize || TextTools.DEFAULT_FONT_SIZE,
-      data.width
+      data.width,
+      data.zIndex // Pass existing z-index
     );
   }
  
@@ -1023,7 +1399,7 @@ async function loadCanvasElements() {
     const maskTypeData = data.maskType || 'rect';
     const circleOffsetData = data.circleOffset || { x: 0, y: 0 };
     const circleRadiusData = data.circleRadius || null;
-    ImageTools.createImageElement(id, data.src, data.left, data.top, data.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData);
+    ImageTools.createImageElement(id, data.src, data.left, data.top, data.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, data.zIndex);
   }
 }
 
@@ -1155,7 +1531,8 @@ export {
   deleteCardState, 
   screenToWorld, 
   worldToScreen,
-  deselectAllElements
+  deselectAllElements,
+  getOrCreateLayer
 };
 
 /* ----------------------- CSS ---------------------------- */
@@ -1212,6 +1589,35 @@ const OTHER_CSS = `
   display: block;
 }
 
+/* Text Lock Overlay Styles */
+.wbe-text-lock-overlay {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wbe-lock-icon {
+  background: rgba(255, 69, 0, 0.9);
+  color: white;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wbe-lock-icon svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
 `;
 
 /* ----------------------- Expose (optional) --------------- */
@@ -1253,5 +1659,11 @@ window.FateTableCard = {
     } else {
     }
     
-  }
+  },
+  
+  // Mass selection helper
+  get massSelection() { return MassSelection; }
 };
+
+// ✅ NEW: Expose MassSelection globally for integration with text/image handlers
+window.MassSelection = MassSelection;

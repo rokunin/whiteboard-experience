@@ -11,11 +11,16 @@ import {
   setLastClickX,
   setLastClickY,
   createCardsLayer,
-  deselectAllElements
+  deselectAllElements,
+  getOrCreateLayer,
+  ZIndexManager
 } from "../main.mjs";
 
 let copiedTextData = null; // Буфер для копирования текста
 let selectedTextId = null; // ID выделенного текстового элемента
+
+// Scale sensitivity constant
+const SCALE_SENSITIVITY = 0.01; // Sensitivity for text scaling
 
 const DEFAULT_TEXT_COLOR = "#000000";
 const DEFAULT_BACKGROUND_COLOR = "#ffffff";
@@ -29,15 +34,129 @@ const DEFAULT_TEXT_ALIGN = "left";
 const DEFAULT_FONT_FAMILY = "Arial";
 const DEFAULT_FONT_SIZE = 16;
 
+// Resize handle positioning
+const RESIZE_HANDLE_OFFSET_X = -3; // pixels from right edge (negative = inside, positive = outside)
+const RESIZE_HANDLE_OFFSET_Y = -3; // pixels from bottom edge (negative = inside, positive = outside)
+
 // Map of element-id -> disposer function
 let pendingColorPickerTimeout = null;
 let pendingColorPickerRaf = null;
 let skipNextTextDeselect = false;
 const disposers = new Map();
 
+/* ======================== Edit and Lock System ======================== */
+
+/**
+ * Apply visual lock overlay when another user is editing text
+ */
+function applyTextLockVisual(container, lockerId, lockerName) {
+  if (!container) return;
+  
+  // Auto-deselect if we're viewing a locked element
+  if (container.dataset.selected === "true" && selectedTextId === container.id) {
+    // Call deselect if you have it, or just clear selection
+    selectedTextId = null;
+    container.dataset.selected = "false";
+  }
+  
+  // Mark as locked
+  container.dataset.lockedBy = lockerId;
+  
+  // Get text element bounds
+  const textElement = container.querySelector(".wbe-canvas-text");
+  if (!textElement) return;
+  
+  const scale = getTextScale(textElement);
+  const width = textElement.offsetWidth * scale;
+  const height = textElement.offsetHeight * scale;
+  
+  // Create or update lock overlay
+  let lockOverlay = container.querySelector(".wbe-text-lock-overlay");
+  if (!lockOverlay) {
+    lockOverlay = document.createElement("div");
+    lockOverlay.className = "wbe-text-lock-overlay";
+    container.appendChild(lockOverlay);
+  }
+  
+  lockOverlay.style.cssText = `
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: ${width}px;
+    height: ${height}px;
+    background: rgba(183, 6, 199, 0.54);
+    pointer-events: none;
+    z-index: 1001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  `;
+  
+  // Add lock icon
+  let lockIcon = lockOverlay.querySelector(".wbe-lock-icon");
+  if (!lockIcon) {
+    lockIcon = document.createElement("div");
+    lockIcon.className = "wbe-lock-icon";
+    lockIcon.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
+        <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6z"/>
+      </svg>
+    `;
+    lockIcon.style.cssText = `
+      background: rgb(187, 56, 248);
+      color: white;
+      padding: 0;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: bold;
+      display: flex;
+      align-items: center;
+      gap: 0;
+    `;
+    lockOverlay.appendChild(lockIcon);
+  } else {
+    const nameDiv = lockIcon.querySelector("div");
+    if (nameDiv) nameDiv.textContent = `locked`;
+  }
+  container.style.setProperty("pointer-events", "none", "important");
+}
+
+/**
+ * Remove visual lock overlay when editing ends
+ */
+function removeTextLockVisual(container) {
+  if (!container) return;
+  
+  
+  delete container.dataset.lockedBy;
+  
+  const lockOverlay = container.querySelector(".wbe-text-lock-overlay");
+  if (lockOverlay) {
+    lockOverlay.remove();
+  }
+  container.style.setProperty("pointer-events", "auto", "important");
+}
+
 // Text mode state
 let isTextMode = false;
 let textModeCursor = null;
+
+
+
+function exitTextMode() {
+  if (!isTextMode) return;
+  
+  isTextMode = false;
+  
+  if (textModeCursor && textModeCursor._cleanup) {
+    textModeCursor._cleanup();
+  }
+  
+  textModeCursor = null;
+  ui.notifications.info("Text mode disabled (Press T to re-enable)");
+}
+
+/* ======================== End Edit and Lock System ======================== */
 
 function cancelPendingColorPicker() {
   if (pendingColorPickerTimeout) {
@@ -93,18 +212,7 @@ function enterTextMode() {
   ui.notifications.info("Text mode: Click to create text (Press T again or Right-click to exit)");
 }
 
-function exitTextMode() {
-  if (!isTextMode) return;
-  
-  isTextMode = false;
-  
-  if (textModeCursor && textModeCursor._cleanup) {
-    textModeCursor._cleanup();
-  }
-  
-  textModeCursor = null;
-  ui.notifications.info("Text mode disabled (Press T to re-enable)");
-}
+/* ======================== Font and Style Utilities ======================== */
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
@@ -239,6 +347,8 @@ async function getAvailableFonts() {
   ];
 }
 
+/* ======================== End Font and Style Utilities ======================== */
+
 function makeMiniButton(text, iconClass = null) {
   const button = document.createElement("button");
   if (iconClass) {
@@ -305,6 +415,7 @@ function extractTextState(id, textElement, container) {
   const left = parseFloat(container.style.left);
   const top = parseFloat(container.style.top);
   const width = textElement.style.width ? parseFloat(textElement.style.width) : null;
+  const zIndex = ZIndexManager.getText(id);
 
   return {
     text: textElement.textContent,
@@ -320,7 +431,8 @@ function extractTextState(id, textElement, container) {
     fontSize,
     borderColor,
     borderWidth,
-    width
+    width,
+    zIndex
   };
 }
 
@@ -333,9 +445,11 @@ async function persistTextState(id, textElement, container) {
   await setAllTexts(texts);
 }
 
+/* ======================== Color Picker System ======================== */
+
 function killColorPanel() {
   cancelPendingColorPicker();
-  const p = window.fateColorPanel;
+  const p = window.wbeColorPanel;
   if (p && typeof p.cleanup === "function") {
     try { p.cleanup(); } catch {}
   }
@@ -349,6 +463,10 @@ function destroyTextElementById(id) {
   }
   const el = document.getElementById(id);
   if (el) el.remove();
+  
+  // ✅ FIX: Remove z-index from manager
+  ZIndexManager.removeText(id);
+  
   killColorPanel(); // ensure stray panel listeners are gone
 }
 
@@ -388,15 +506,14 @@ async function showColorPicker() {
     border: 1px solid #d7d7d7;
     border-radius: 14px;
     box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
-    padding: 10px 18px;
+    padding: 6px;
     z-index: 10000;
     pointer-events: auto;
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 12px;
-    min-width: 240px;
-    min-height: 60px;
+    
     aspect-ratio: 4 / 1;
     transform: translateX(-50%) scale(0.9) translateY(12px);
     opacity: 0;
@@ -751,7 +868,11 @@ async function showColorPicker() {
     fontSizeRow.appendChild(fontSizeSliderRow);
 
     // Handle font size change
-    fontSizeSlider.addEventListener("input", async (e) => {
+    fontSizeSlider.addEventListener("input", (e) => {
+      updateFontSizeLabel(e.target.value);
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    fontSizeSlider.addEventListener("change", async (e) => {
       updateFontSizeLabel(e.target.value);
       await applyFontSizeSelection(Number(e.target.value));
     });
@@ -761,7 +882,11 @@ async function showColorPicker() {
       swatch.style.background = e.target.value;
       await applyTextColor(e.target.value, Number(slider.value));
     });
-    slider.addEventListener("input", async (e) => {
+    slider.addEventListener("input", (e) => {
+      updateLabel(e.target.value);
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    slider.addEventListener("change", async (e) => {
       updateLabel(e.target.value);
       await applyTextColor(textColorInput.value, Number(e.target.value));
     });
@@ -812,7 +937,11 @@ async function showColorPicker() {
       swatch.style.background = e.target.value;
       await applyBackgroundColor(e.target.value, Number(slider.value));
     });
-    slider.addEventListener("input", async (e) => {
+    slider.addEventListener("input", (e) => {
+      updateLabel(e.target.value);
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    slider.addEventListener("change", async (e) => {
       updateLabel(e.target.value);
       await applyBackgroundColor(bgColorInput.value, Number(e.target.value));
     });
@@ -862,10 +991,10 @@ async function showColorPicker() {
     const { wrapper: widthRow, slider: widthSlider, update: updateWidthLabel } = createSlider(currentBorderWidth, {
       min: 0,
       max: 12,
-      step: 0.5,
+      step: 1,
       format: (v) => {
         const numeric = Number(v) || 0;
-        return Number.isInteger(numeric) ? `${numeric}px` : `${numeric.toFixed(1)}px`;
+        return `${Math.round(numeric)}px`;
       }
     });
     sub.appendChild(widthRow);
@@ -884,8 +1013,20 @@ async function showColorPicker() {
       swatch.style.background = e.target.value;
       await sync();
     });
-    opacitySlider.addEventListener("input", sync);
-    widthSlider.addEventListener("input", sync);
+    opacitySlider.addEventListener("input", () => {
+      updateOpacityLabel(Number(opacitySlider.value));
+      updateWidthLabel(Number(widthSlider.value));
+      swatch.style.opacity = Number(widthSlider.value) > 0 ? "1" : "0.45";
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    widthSlider.addEventListener("input", () => {
+      updateOpacityLabel(Number(opacitySlider.value));
+      updateWidthLabel(Number(widthSlider.value));
+      swatch.style.opacity = Number(widthSlider.value) > 0 ? "1" : "0.45";
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    opacitySlider.addEventListener("change", sync);
+    widthSlider.addEventListener("change", sync);
 
     return sub;
   };
@@ -949,7 +1090,7 @@ async function showColorPicker() {
 
   updatePanelPosition();
   requestAnimationFrame(() => {
-    panel.style.transform = "translateX(-50%) scale(1) translateY(0)";
+    panel.style.transform = "translateX(-50%) scale(.9) translateY(32px)";
     panel.style.opacity = "1";
   });
 
@@ -961,11 +1102,11 @@ async function showColorPicker() {
 
     if (activeSubpanel) {
       closeSubpanel();
-      window.fateColorPanelUpdate?.();
+      window.wbeColorPanelUpdate?.();
     }
 
     if (clickedInsideText) {
-      window.fateColorPanelUpdate?.();
+      window.wbeColorPanelUpdate?.();
       return;
     }
 
@@ -985,13 +1126,13 @@ async function showColorPicker() {
     document.removeEventListener("keydown", onKey);
     closeSubpanel();
     panel.remove();
-    window.fateColorPanel = null;
-    window.fateColorPanelUpdate = null;
+    window.wbeColorPanel = null;
+    window.wbeColorPanelUpdate = null;
   }
 
   panel.cleanup = cleanup;
-  window.fateColorPanel = panel;
-  window.fateColorPanelUpdate = updatePanelPosition;
+  window.wbeColorPanel = panel;
+  window.wbeColorPanelUpdate = updatePanelPosition;
 }
 
 function safeReshowColorPicker(targetId, delayMs = 0) {
@@ -1025,11 +1166,11 @@ function safeReshowColorPicker(targetId, delayMs = 0) {
 }
 
 // Install global pan hooks (module scope, once)
-let __fatePanHooksInstalled = false;
+let __wbePanHooksInstalled = false;
 
 function installGlobalPanHooks() {
-  if (__fatePanHooksInstalled) return;
-  __fatePanHooksInstalled = true;
+  if (__wbePanHooksInstalled) return;
+  __wbePanHooksInstalled = true;
 
   let isCanvasPanningGlobal = false;
 
@@ -1051,7 +1192,7 @@ function installGlobalPanHooks() {
     if (!isCanvasPanningGlobal) return;
     isCanvasPanningGlobal = false;
 
-    if (selectedTextId && !window.fateColorPanel) {
+    if (selectedTextId && !window.wbeColorPanel) {
       // Give the canvas a tick to settle transforms
       safeReshowColorPicker(selectedTextId, 100);
     }
@@ -1069,6 +1210,8 @@ function installGlobalPanHooks() {
 // call this once, after defining killColorPanel/safeReshowColorPicker
 installGlobalPanHooks();
 
+/* ======================== End Color Picker System ======================== */
+
 // Global text mode key handler
 let textModeKeyHandler = null;
 
@@ -1079,6 +1222,16 @@ function installTextModeKeys() {
     // T key to toggle text mode - use keyCode for international support
     if (e.keyCode === 84) { // KeyCode 84 is 'T' in any language
       if (e.ctrlKey || e.metaKey || e.altKey) return; // Don't interfere with shortcuts
+      
+      // 🔥 CRITICAL FIX: Ignore T-key when user is editing text
+      if (selectedTextId) {
+        const container = document.getElementById(selectedTextId);
+        const textElement = container?.querySelector(".wbe-canvas-text");
+        if (textElement && textElement.contentEditable === "true") {
+          return; // Don't interfere with text editing!
+        }
+      }
+      
       e.preventDefault();
       
       if (isTextMode) {
@@ -1206,6 +1359,9 @@ async function globalPasteText() {
     if (!textEl) return;
     await persistTextState(newTextId, textEl, container);
     
+    // ✅ LOG: Track global text paste with z-index
+    const zIndex = ZIndexManager.getText(newTextId);
+    
     ui.notifications.info("Текст вставлен");
 }
 
@@ -1227,6 +1383,9 @@ async function handleTextPasteFromClipboard(text) {
     const textEl = container.querySelector(".wbe-canvas-text");
     if (!textEl) return;
     await persistTextState(textId, textEl, container);
+    
+    // ✅ LOG: Track clipboard text paste with z-index
+    const zIndex = ZIndexManager.getText(textId);
     
     // Update container dimensions after paste
     updateTextUI(container);
@@ -1276,12 +1435,12 @@ async function injectTextTool() {
     // Отслеживаем клики на кнопке инструмента
     setTimeout(() => {
       const toolButton = document.querySelector(`[data-tool="${toolName}"]`);
-      if (toolButton && !toolButton.dataset.fateTextListener) {
+      if (toolButton && !toolButton.dataset.wbeTextListener) {
         toolButton.addEventListener("click", (e) => {
           setLastClickX(e.clientX);
           setLastClickY(e.clientY);
         });
-        toolButton.dataset.fateTextListener = "1";
+        toolButton.dataset.wbeTextListener = "1";
       }
     }, 100);
 }
@@ -1301,7 +1460,8 @@ function createTextElement(
     textAlign = DEFAULT_TEXT_ALIGN,
     fontFamily = DEFAULT_FONT_FAMILY,
     fontSize = DEFAULT_FONT_SIZE,
-    width = null
+    width = null,
+    existingZIndex = null
   ) {
     const layer = getOrCreateLayer();
     if (!layer) return null;
@@ -1310,11 +1470,22 @@ function createTextElement(
     const container = document.createElement("div");
     container.id = id;
     container.className = "wbe-canvas-text-container";
+    
+    // ✅ FIX: Get z-index from manager or use existing
+    const zIndex = existingZIndex || ZIndexManager.assignText(id);
+    
+    // If using existing z-index, make sure it's registered in the manager
+    if (existingZIndex) {
+      ZIndexManager.textZIndexes.set(id, existingZIndex);
+    }
+    
+    // ✅ LOG: Track text creation with z-index
+    
     container.style.cssText = `
       position: absolute;
       left: ${left}px;
       top: ${top}px;
-      z-index: 1000;
+      z-index: ${zIndex};
     `;
     
     // Внутренний элемент для контента + масштабирование
@@ -1369,17 +1540,17 @@ function createTextElement(
       position: absolute;
       left: 0;
       top: 0;
-      width: 12px;
-      height: 12px;
+      width: 6px;
+      height: 6px;
       display: none;
-      background: #4a9eff;
-      border: 2px solid white;
+      background:rgb(255, 255, 255);
+      border: 1px solid #4a9eff;
       border-radius: 50%;
       cursor: nwse-resize;
-      z-index: 1002;
+      z-index: 3002;
       pointer-events: auto;
       user-select: none;
-      transform-origin: center center;
+      transform-origin: right center;
     `;
     container.appendChild(resizeHandle);
     
@@ -1404,8 +1575,8 @@ function createTextElement(
       const scaledHeight = height * currentScale;
       
       // Позиционируем resize handle в правом нижнем углу
-      resizeHandle.style.left = `${scaledWidth - 6}px`;
-      resizeHandle.style.top = `${scaledHeight - 6}px`;
+      resizeHandle.style.left = `${scaledWidth + RESIZE_HANDLE_OFFSET_X}px`;
+      resizeHandle.style.top = `${scaledHeight + RESIZE_HANDLE_OFFSET_Y}px`;
     }
     
     // Обработчики событий
@@ -1414,8 +1585,190 @@ function createTextElement(
     let dragging = false, dragInitialized = false, startScreenX = 0, startScreenY = 0, startWorldX = 0, startWorldY = 0;
     let resizing = false, resizeStartX = 0, resizeStartScale = scale;
     
+    /* ======================== Edit and Lock ======================== */
+    
+    // Edit blur handler - exits edit mode when clicking outside
+    const editBlurHandler = async (e) => {
+      if (!isEditing) return;
+      
+      // Ignore if clicking on the text element itself
+      if (textElement.contains(e.target)) return;
+      
+      // Ignore if clicking on color panel
+      if (window.wbeColorPanel?.contains(e.target)) return;
+      
+      // Ignore if clicking on resize handle
+      if (resizeHandle.contains(e.target)) return;
+      
+      // User clicked somewhere else in Foundry - exit edit mode
+      await exitEditMode();
+    };
+    
+    // ✅ NEW: Add exitEditMode function
+    async function exitEditMode() {
+      if (!isEditing) return;
+      
+      
+      isEditing = false;
+      textElement.contentEditable = "false";
+      textElement.style.userSelect = "none";
+      
+      // Remove the blur handler
+      document.removeEventListener("mousedown", editBlurHandler, true);
+
+      // Remove lock locally
+      delete container.dataset.lockedBy;
+      
+      
+      
+      // Broadcast unlock to all users
+      game.socket.emit(`module.${MODID}`, {
+        type: "textUnlock",
+        textId: id
+      });
+      
+      // Save changes
+      await persistTextState(id, textElement, container);
+      
+      // Return to selected state
+      // ✅ CLEAR MASS SELECTION when exiting edit mode
+      if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+        window.MassSelection.clear();
+      }
+      selectText();
+      
+      // Show scale gizmo again
+      if (isSelected) {
+        resizeHandle.style.display = "flex";
+        resizeHandle.style.opacity = "0";
+        resizeHandle.style.transform = "scale(0.8)";
+        
+        setTimeout(() => {
+          requestAnimationFrame(() => {
+            resizeHandle.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+            resizeHandle.style.opacity = "1";
+            resizeHandle.style.transform = "scale(1)";
+          });
+        }, 100);
+      }
+      
+      ui.notifications.info("Edit mode deactivated (text unlocked)");
+    }
+    
+    // Двойной клик для редактирования
+    textElement.addEventListener("dblclick", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      // ✅ NEW: Check if locked by another user
+      if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
+        ui.notifications.warn("This text is being edited by another user");
+        return;
+      }
+      
+      // ✅ NEW: Toggle edit mode
+      if (isEditing) {
+        // Already editing - exit edit mode
+        await exitEditMode();
+        return;
+      }
+      
+      // ✅ NEW: Enter edit mode with lock
+      isEditing = true;
+      
+      // Broadcast lock to all users
+      game.socket.emit(`module.${MODID}`, {
+        type: "textLock",
+        textId: id,
+        userId: game.user.id,
+        userName: game.user.name
+      });
+      
+      // Mark locked locally
+      container.dataset.lockedBy = game.user.id;
+      
+      textElement.contentEditable = "true";
+      textElement.style.userSelect = "text";
+      textElement.focus();
+      
+      // Add the blur handler to detect clicks outside
+      document.addEventListener("mousedown", editBlurHandler, true);
+      
+      // Hide color panel during editing
+      killColorPanel();
+      
+      // Hide scale gizmo during editing with smooth animation
+      if (resizeHandle.style.display !== "none") {
+        resizeHandle.style.transition = "opacity 0.15s ease, transform 0.15s ease";
+        resizeHandle.style.opacity = "0";
+        resizeHandle.style.transform = "scale(0.8)";
+        setTimeout(() => {
+          resizeHandle.style.display = "none";
+        }, 150);
+      }
+      
+      // Выделяем весь текст
+      const range = document.createRange();
+      range.selectNodeContents(textElement);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      
+      ui.notifications.info("Edit mode activated (text locked)");
+    });
+
+    // Завершение редактирования по Enter
+    textElement.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        await exitEditMode();
+      }
+    });
+    
+    // Auto-expand width during typing
+    textElement.addEventListener("input", async () => {
+      if (isEditing) {
+        // Check if width was manually set (not auto-expanded)
+        const hasManualWidth = textElement.dataset.manualWidth === "true";
+        
+        if (!hasManualWidth) {
+          // Only auto-expand if width wasn't manually set
+          // Temporarily remove width constraint to measure natural width
+          const currentWidth = textElement.style.width;
+          textElement.style.width = "auto";
+          
+          // Get the natural width of the content
+          const naturalWidth = textElement.scrollWidth;
+          const minWidth = 100; // Minimum width
+          const maxWidth = 800; // Maximum width to prevent excessive expansion
+          
+          // Set width to natural width, but within bounds
+          const newWidth = Math.max(minWidth, Math.min(maxWidth, naturalWidth));
+          textElement.style.width = `${newWidth}px`;
+        }
+        
+        // Update panel position if it's open
+        if (window.wbeColorPanelUpdate) {
+          window.wbeColorPanelUpdate();
+        }
+        
+        // Save the width change to sync with other clients
+        //await persistTextState(id, textElement, container);
+        
+        // Update container dimensions after size change
+        updateTextUI(container);
+      }
+    });
+
+    /* ======================== End Edit and Lock ======================== */
+    
     // Функция выделения/снятия выделения
     function selectText() {
+      // ✅ PREVENT SELECTION OF MASS-SELECTED TEXT
+      if (container.classList.contains("wbe-mass-selected")) {
+        return; // Don't select mass-selected text individually
+      }
+      
       isSelected = true;
       selectedTextId = id; // Устанавливаем глобальный ID
       setSelectedImageId(null); // Сбрасываем выделение картинки
@@ -1442,11 +1795,11 @@ function createTextElement(
         resizeHandle.style.transform = "scale(1)";
       });
       
-      // Automatically show color pickers when text is selected
-      if (window.fateColorPanel) {
-        window.fateColorPanelUpdate?.();
-      } else {
-        safeReshowColorPicker(id, 100);
+      // Automatically show color pickers when text is selected (but not during editing)
+      if (!isEditing) {
+        // ✅ FIX: Always ensure fresh panel
+        killColorPanel(); // Clean up any existing panel
+        safeReshowColorPicker(id, 100); // Show fresh panel for this text
       }
       
       // Создаем программный selection, чтобы Ctrl+C работал
@@ -1538,15 +1891,18 @@ function createTextElement(
         copiedTextData.width || null
       );
       
-      if (container) {
-        const textEl = container.querySelector(".wbe-canvas-text");
-        if (textEl) await persistTextState(newTextId, textEl, container);
-        
-        // Update container dimensions after paste
-        updateTextUI(container);
-      }
+    if (container) {
+      const textEl = container.querySelector(".wbe-canvas-text");
+      if (textEl) await persistTextState(newTextId, textEl, container);
       
-      ui.notifications.info("Текст вставлен");
+      // ✅ LOG: Track text paste with z-index
+      const zIndex = ZIndexManager.getText(newTextId);
+      
+      // Update container dimensions after paste
+      updateTextUI(container);
+    }
+    
+    ui.notifications.info("Текст вставлен");
     }
     
     // ---- Document-level handlers bound to this element ----
@@ -1605,17 +1961,39 @@ function createTextElement(
     };
 
     const onDocMouseDown = (e) => {
-      if (window.fateColorPanel && window.fateColorPanel.contains(e.target)) {
+      if (window.wbeColorPanel && window.wbeColorPanel.contains(e.target)) {
         return;
       }
       if (e.button !== 0) return;
+      
+      // ✅ PREVENT SINGLE CLICK SELECTION OF MASS-SELECTED TEXT
+      if (container.classList.contains("wbe-mass-selected")) {
+        e.preventDefault();
+        e.stopPropagation();
+        return; // Don't select mass-selected text on single click
+      }
+      
+      if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
+        container.style.setProperty("pointer-events", "none", "important");
+        return; // Let everything pass through to canvas
+      }
       container.style.setProperty("pointer-events", "auto", "important");
       const hit = document.elementFromPoint(e.clientX, e.clientY);
       if (hit === container || container.contains(hit)) {
+        if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
+          e.preventDefault(); e.stopPropagation();
+          return; // Don't select locked text
+        }
         if (!isSelected) {
           e.preventDefault(); e.stopPropagation();
+          
+          // ✅ CLEAR MASS SELECTION when selecting individual text
+          if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+            window.MassSelection.clear();
+          }
+          
           selectText();
-        } else if (!window.fateColorPanel) {
+        } else if (!window.wbeColorPanel) {
           safeReshowColorPicker(id, 0);
         }
       } else {
@@ -1640,128 +2018,6 @@ function createTextElement(
       document.removeEventListener("keydown",  keydownHandler);
       document.removeEventListener("copy",     copyHandler);
       document.removeEventListener("mousedown", onDocMouseDown, true);
-    });
-  
-    // Двойной клик для редактирования
-    textElement.addEventListener("dblclick", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      isEditing = true;
-      textElement.contentEditable = "true";
-      textElement.style.userSelect = "text";
-      textElement.focus();
-      
-      // Hide scale gizmo during editing with smooth animation
-      if (resizeHandle.style.display !== "none") {
-        resizeHandle.style.transition = "opacity 0.15s ease, transform 0.15s ease";
-        resizeHandle.style.opacity = "0";
-        resizeHandle.style.transform = "scale(0.8)";
-        setTimeout(() => {
-          resizeHandle.style.display = "none";
-        }, 150);
-      }
-      
-      // Выделяем весь текст
-      const range = document.createRange();
-      range.selectNodeContents(textElement);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-    });
-  
-    // Завершение редактирования по Enter или потере фокуса
-    textElement.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        textElement.contentEditable = "false";
-        textElement.style.userSelect = "none";
-        isEditing = false;
-        textElement.blur();
-        
-        // Show scale gizmo after editing ends with smooth animation
-        if (isSelected) {
-          resizeHandle.style.display = "flex";
-          resizeHandle.style.opacity = "0";
-          resizeHandle.style.transform = "scale(0.8)";
-          
-          setTimeout(() => {
-            requestAnimationFrame(() => {
-              resizeHandle.style.transition = "opacity 0.2s ease, transform 0.2s ease";
-              resizeHandle.style.opacity = "1";
-              resizeHandle.style.transform = "scale(1)";
-            });
-          }, 100);
-        }
-      }
-    });
-    
-    // Auto-expand width during typing
-    textElement.addEventListener("input", async () => {
-      if (isEditing) {
-        // Check if width was manually set (not auto-expanded)
-        const hasManualWidth = textElement.dataset.manualWidth === "true";
-        
-        if (!hasManualWidth) {
-          // Only auto-expand if width wasn't manually set
-          // Temporarily remove width constraint to measure natural width
-          const currentWidth = textElement.style.width;
-          textElement.style.width = "auto";
-          
-          // Get the natural width of the content
-          const naturalWidth = textElement.scrollWidth;
-          const minWidth = 100; // Minimum width
-          const maxWidth = 800; // Maximum width to prevent excessive expansion
-          
-          // Set width to natural width, but within bounds
-          const newWidth = Math.max(minWidth, Math.min(maxWidth, naturalWidth));
-          textElement.style.width = `${newWidth}px`;
-        }
-        
-        // Update panel position if it's open
-        if (window.fateColorPanelUpdate) {
-          window.fateColorPanelUpdate();
-        }
-        
-        // Save the width change to sync with other clients
-        await persistTextState(id, textElement, container);
-        
-        // Update container dimensions after size change
-        updateTextUI(container);
-      }
-    });
-  
-    textElement.addEventListener("blur", async () => {
-      if (isEditing) {
-        textElement.contentEditable = "false";
-        textElement.style.userSelect = "none";
-        isEditing = false;
-        
-        // Извлекаем scale из transform textElement
-        const transform = textElement.style.transform || "";
-        const scaleMatch = transform.match(/scale\(([\d.]+)\)/);
-        const currentScale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
-        
-        // Сохранить изменения
-        await persistTextState(id, textElement, container);
-        
-        // Возвращаем в выделенное состояние
-        selectText();
-        
-        // Show scale gizmo after editing ends with smooth animation
-        if (isSelected) {
-          resizeHandle.style.display = "flex";
-          resizeHandle.style.opacity = "0";
-          resizeHandle.style.transform = "scale(0.8)";
-          
-          setTimeout(() => {
-            requestAnimationFrame(() => {
-              resizeHandle.style.transition = "opacity 0.2s ease, transform 0.2s ease";
-              resizeHandle.style.opacity = "1";
-              resizeHandle.style.transform = "scale(1)";
-            });
-          }, 100);
-        }
-      }
     });
   
   
@@ -1818,8 +2074,8 @@ function createTextElement(
       container.style.top = `${newTop}px`;
       
       // Update panel position if it exists
-      if (window.fateColorPanelUpdate) {
-        window.fateColorPanelUpdate();
+      if (window.wbeColorPanelUpdate) {
+        window.wbeColorPanelUpdate();
       }
     }
   
@@ -1839,8 +2095,12 @@ function createTextElement(
         await persistTextState(id, textElement, container);
         
         // Re-assert selection and refresh panel positioning
+        // ✅ CLEAR MASS SELECTION when re-asserting after resize
+        if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+          window.MassSelection.clear();
+        }
         selectText();            // keeps outline, selection state, id
-        window.fateColorPanelUpdate?.();
+        window.wbeColorPanelUpdate?.();
       }
     }
     
@@ -1941,7 +2201,7 @@ function createTextElement(
       const deltaX = e.clientX - resizeStartX;
       
       // Новый scale (минимум 0.3, максимум 3.0, как у карточки)
-      const newScale = resizeStartScale + (deltaX * 0.002);
+      const newScale = resizeStartScale + (deltaX * SCALE_SENSITIVITY);
       const clampedScale = Math.max(0.3, Math.min(3.0, newScale));
       
       // Применяем ТОЛЬКО scale к textElement
@@ -1953,8 +2213,8 @@ function createTextElement(
       // Update container dimensions after scale change
       updateTextUI(container);
       
-      if (window.fateColorPanelUpdate) {
-        window.fateColorPanelUpdate();
+      if (window.wbeColorPanelUpdate) {
+        window.wbeColorPanelUpdate();
       }
     }
     
@@ -1967,12 +2227,9 @@ function createTextElement(
       textElement.style.width = `${newWidth}px`;
       textElement.dataset.manualWidth = "true"; // Mark as manually set
       
-      if (window.fateColorPanelUpdate) {
-        window.fateColorPanelUpdate();
+      if (window.wbeColorPanelUpdate) {
+        window.wbeColorPanelUpdate();
       }
-      
-      // Save the width change to sync with other clients
-      persistTextState(id, textElement, container);
     }
     
     function handleRightResize(e) {
@@ -1984,12 +2241,9 @@ function createTextElement(
       textElement.style.width = `${newWidth}px`;
       textElement.dataset.manualWidth = "true"; // Mark as manually set
       
-      if (window.fateColorPanelUpdate) {
-        window.fateColorPanelUpdate();
+      if (window.wbeColorPanelUpdate) {
+        window.wbeColorPanelUpdate();
       }
-      
-      // Save the width change to sync with other clients
-      persistTextState(id, textElement, container);
     }
     
     async function handleResizeUp() {
@@ -2026,8 +2280,12 @@ function createTextElement(
         await persistTextState(id, textElement, container);
         
         // Re-assert selection and refresh panel positioning
+        // ✅ CLEAR MASS SELECTION when re-asserting after resize
+        if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+          window.MassSelection.clear();
+        }
         selectText();            // keeps outline, selection state, id
-        window.fateColorPanelUpdate?.();
+        window.wbeColorPanelUpdate?.();
       }
     }
     
@@ -2060,6 +2318,9 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
     const textEl = container.querySelector(".wbe-canvas-text");
     if (!textEl) return;
     await persistTextState(textId, textEl, container);
+    
+    // ✅ LOG: Track main text creation with z-index
+    const zIndex = ZIndexManager.getText(textId);
     
     // Update container dimensions after creation
     updateTextUI(container);
@@ -2101,6 +2362,10 @@ async function getAllTexts() {
 
 async function setAllTexts(texts) {
     try {
+      // Sync ZIndexManager with existing z-index values to avoid conflicts
+      const existingZIndexes = Object.entries(texts).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
+      ZIndexManager.syncWithExisting(existingZIndexes);
+      
       if (game.user.isGM) {
         // GM сохраняет в базу
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
@@ -2124,9 +2389,20 @@ async function setAllTexts(texts) {
             existingIds.add(id);
             const existing = document.getElementById(id);
             if (existing) {
+              // 🔥 CRITICAL FIX: Skip locked text elements
+              if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
+                continue; // Don't update! This prevents cursor reset!
+              }
+              
               // Обновляем существующий элемент
               const textElement = existing.querySelector(".wbe-canvas-text");
               if (textElement) {
+                // ✅ ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
+                if (textElement.contentEditable === "true") {
+                  continue;
+                }
+                
+                // Safe to update now
                 textElement.textContent = textData.text;
                 existing.style.left = `${textData.left}px`;
                 existing.style.top = `${textData.top}px`;
@@ -2156,6 +2432,12 @@ async function setAllTexts(texts) {
                   textElement.dataset.manualWidth = "false"; // Mark as auto
                 }
                 
+                // ✅ FIX: Update z-index from database
+                if (textData.zIndex) {
+                  existing.style.zIndex = textData.zIndex;
+                  ZIndexManager.textZIndexes.set(id, textData.zIndex);
+                }
+                
                 // Clamp container to scaled dimensions
                 const scale = getTextScale(textElement);
                 const width = textElement.offsetWidth * scale;
@@ -2183,7 +2465,8 @@ async function setAllTexts(texts) {
                 textData.textAlign || DEFAULT_TEXT_ALIGN,
                 textData.fontFamily || DEFAULT_FONT_FAMILY,
                 textData.fontSize || DEFAULT_FONT_SIZE,
-                textData.width ?? null
+                textData.width ?? null,
+                textData.zIndex // Pass existing z-index
               );
               
               if (createdContainer) {
@@ -2198,6 +2481,12 @@ async function setAllTexts(texts) {
                     textElement.dataset.manualWidth = "true";
                   } else {
                     textElement.dataset.manualWidth = "false";
+                  }
+                  
+                  // ✅ FIX: Update z-index from database for new elements
+                  if (textData.zIndex) {
+                    createdContainer.style.zIndex = textData.zIndex;
+                    ZIndexManager.textZIndexes.set(id, textData.zIndex);
                   }
                   
                   // Clamp container to scaled dimensions for new elements
@@ -2246,8 +2535,8 @@ function updateTextResizeHandlePosition(container) {
   container.style.width = `${w}px`;
   container.style.height = `${h}px`;
 
-  handle.style.left = `${w - 6}px`;
-  handle.style.top  = `${h - 6}px`;
+  handle.style.left = `${w + RESIZE_HANDLE_OFFSET_X}px`;
+  handle.style.top  = `${h + RESIZE_HANDLE_OFFSET_Y}px`;
 }
 
 /** Public one-shot refresher used after socket-driven updates */
@@ -2302,6 +2591,10 @@ export const TextTools = {
 
   // font detection helper
   getAvailableFonts,
+
+  // text lock visual functions
+  applyTextLockVisual,
+  removeTextLockVisual,
 
   // defaults
   DEFAULT_TEXT_COLOR,

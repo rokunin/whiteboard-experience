@@ -27,7 +27,6 @@ class FateTableCardApp extends Application {
       if (typeof state === 'object' && state !== null) {
         app.cardData = state;
       } else {
-        console.warn(`[FATE-TC] Invalid state for card ${id}:`, state);
         // Не перезаписываем state если он некорректный
       }
     }
@@ -63,7 +62,6 @@ class FateTableCardApp extends Application {
     
     // Убеждаемся что state - это объект
     if (typeof state !== 'object' || state === null) {
-      console.warn(`[FATE-TC] Invalid state for card ${id}:`, state);
       this._cardData = { pos: { left: 0, top: 0, width: 200 } };
     } else {
       this._cardData = { ...state }; // Копируем объект
@@ -470,13 +468,10 @@ class FateTableCardApp extends Application {
         
         // Обработчик paste на document (т.к. на div не работает)
         const pasteHandler = async (e) => {
-          console.log("[FATE-TC] Paste event triggered, activeElement:", document.activeElement, "portraitDiv:", portraitDiv);
           // Проверяем, в фокусе ли наш портрет
           if (document.activeElement !== portraitDiv) {
-            console.log("[FATE-TC] Paste not for this portrait, ignoring");
             return; // Paste событие не для нас
           }
-          console.log("[FATE-TC] Processing paste for portrait");
           e.preventDefault();
           e.stopPropagation();
           
@@ -514,7 +509,6 @@ class FateTableCardApp extends Application {
             
             // Загружаем файл в Foundry (using v13+ API with fallback)
             const uploadPath = `worlds/${game.world.id}`;
-            console.log("[FATE-TC] Starting upload to:", uploadPath, "file:", renamedFile.name);
             
             let response;
             const startTime = Date.now();
@@ -523,12 +517,10 @@ class FateTableCardApp extends Application {
             if (isGM) {
               // GM: Try direct upload with longer timeout, no base64 fallback
               try {
-                console.log("[FATE-TC] GM upload - using direct method only");
                 response = await foundry.applications.apps.FilePicker.implementation.upload("data", uploadPath, renamedFile, {}, {
                   notify: false
                 });
                 const directTime = Date.now() - startTime;
-                console.log(`[FATE-TC] GM direct upload successful in ${directTime}ms:`, response);
               } catch (error) {
                 const directTime = Date.now() - startTime;
                 console.error(`[FATE-TC] GM direct upload failed after ${directTime}ms:`, error);
@@ -537,12 +529,10 @@ class FateTableCardApp extends Application {
       } else {
         // Player: Try direct upload only (no timeout, no base64 fallback)
         try {
-          console.log("[FATE-TC] Player upload - using direct method only");
           response = await foundry.applications.apps.FilePicker.implementation.upload("data", uploadPath, renamedFile, {}, {
             notify: false
           });
           const directTime = Date.now() - startTime;
-          console.log(`[FATE-TC] Player direct upload successful in ${directTime}ms:`, response);
         } catch (error) {
           const directTime = Date.now() - startTime;
           console.error(`[FATE-TC] Player direct upload failed after ${directTime}ms:`, error);
@@ -551,10 +541,8 @@ class FateTableCardApp extends Application {
       }
             
             if (response?.path) {
-              console.log("[FATE-TC] Upload successful, path:", response.path);
               // Обновляем портрет
               this.cardData.portrait = response.path;
-              console.log("[FATE-TC] Updating card state with portrait:", response.path);
               await updateCardState(this.cardId, { portrait: this.cardData.portrait });
               
               // Обновляем UI
@@ -565,7 +553,6 @@ class FateTableCardApp extends Application {
               // Ensure the image loads properly
               const img = new Image();
               img.onload = () => {
-                console.log("[FATE-TC] Image loaded successfully");
                 portraitDiv.style.backgroundImage = `url(${response.path})`;
               };
               img.onerror = () => {
@@ -574,7 +561,6 @@ class FateTableCardApp extends Application {
               };
               img.src = response.path;
               
-              console.log("[FATE-TC] UI updated with new portrait");
               ui.notifications.success("Портрет обновлён!");
             } else {
               console.error("[FATE-TC] No path in response:", response);
@@ -585,7 +571,6 @@ class FateTableCardApp extends Application {
             ui.notifications.error(`Ошибка загрузки: ${error.message}`);
           } finally {
             // Убираем индикатор загрузки
-            console.log("[FATE-TC] Clearing blur effect");
             portraitDiv.style.opacity = "";
             portraitDiv.style.filter = "";
           }
@@ -593,7 +578,6 @@ class FateTableCardApp extends Application {
         
         // Добавляем обработчик на document с capture=true чтобы он сработал раньше глобального
         document.addEventListener("paste", pasteHandler, true);
-        console.log("[FATE-TC] Paste handler registered for portrait");
         
         // Сохраняем ссылку для очистки при закрытии
         if (!this._pasteHandlers) this._pasteHandlers = [];

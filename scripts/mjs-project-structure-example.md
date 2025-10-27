@@ -13,7 +13,6 @@ import { sayHelloWorld, getGreeting, SimpleGreeter } from './helpers/hello-world
 
 // Инициализация модуля
 Hooks.once('init', function() {
-    console.log("Hello Universe! Main module initializing...");
     
     // Используем импортированную функцию
     sayHelloWorld();
@@ -32,14 +31,12 @@ Hooks.once('init', function() {
 
 // Когда Foundry полностью загружен
 Hooks.once('ready', function() {
-    console.log("Hello Universe! Module is ready!");
     
     // Демонстрируем использование функции getGreeting
     const message = getGreeting("Universe");
     ui.notifications.info(message);
     
     // Показываем, что модуль доступен через консоль
-    console.log("You can now use game.myModule in console!");
 });
 ```
 
@@ -51,7 +48,6 @@ Hooks.once('ready', function() {
 // Простой вспомогательный модуль
 
 export function sayHelloWorld() {
-    console.log("Hello World from helper module!");
     ui.notifications.info("Hello World!");
 }
 
@@ -66,7 +62,6 @@ export class SimpleGreeter {
     
     greet(name) {
         const greetingName = name || this.defaultName;
-        console.log(`Greetings, ${greetingName}!`);
         return `Greetings, ${greetingName}!`;
     }
 }

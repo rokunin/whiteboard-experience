@@ -8,11 +8,16 @@ import {
     setSelectedImageId,
     setCopiedImageData,
     deselectAllElements,
-    createCardsLayer
+    createCardsLayer,
+    ZIndexManager
   } from "../main.mjs";
+
+// Scale sensitivity constant
+const SCALE_SENSITIVITY = 0.005; // Sensitivity for image scaling
 
 let copiedImageData = null; // Буфер для копирования картинок
 let selectedImageId = null; // ID выделенного изображения
+let isScalingImage = false; // Flag to prevent deselection during scaling
 // Глобальное хранилище данных картинок для синхронизации
 let globalImageData = {}; // { [id]: { maskType, circleOffset, circleRadius, crop, scale } }
 // Глобальное хранилище локальных переменных картинок
@@ -77,6 +82,10 @@ document.addEventListener("keydown", (e) => {
     if (imageData && imageData.deselectFn) {
       imageData.deselectFn(); // ensure exit crop first
     }
+    
+    // Clean up z-index
+    ZIndexManager.removeImage(selectedImageId);
+    
     container.remove();
     (async () => {
       const images = await getAllImages();
@@ -125,7 +134,6 @@ function clearImageCaches(id) {
     // Clear from global data
     delete globalImageData[id];
     delete imageLocalVars[id];
-    console.log(`[WB-E] Cleared caches for image ${id}`);
   }
 
 /**
@@ -251,7 +259,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     // This prevents stale selection UI when lock is removed
     const wasSelected = container.dataset.selected === "true";
     if (wasSelected) {
-      console.log(`[WB-E] Auto-deselecting ${container.id} because it was locked by ${lockerName}`);
       const imageData = imageRegistry.get(container.id);
       if (imageData && imageData.deselectFn) {
         imageData.deselectFn();
@@ -293,7 +300,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       borderRadius = "50%";
     }
     
-    console.log(`[WB-E] Lock overlay for ${container.id}: ${overlayWidth}x${overlayHeight}, crop:`, cropData.crop);
     
     // Создаём overlay с фиолетовой рамкой и opacity
     let lockOverlay = container.querySelector(".wbe-image-lock-overlay");
@@ -353,7 +359,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
   }
   
   function removeImageLockVisual(container) {
-    console.log(`[WB-E] Removing lock from ${container.id}, wasSelected: ${container.dataset.selected}`);
     
     // Убираем блокировку
     delete container.dataset.lockedBy;
@@ -378,7 +383,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     if (wasSelected) {
       // Было выделено - восстанавливаем полный UI выделения
-      console.log(`[WB-E] Restoring selected state for ${container.id}`);
       // Don't set pointer-events on container - let click target handle interactions
       // container.style.setProperty("pointer-events", "auto", "important");
       // container.style.setProperty("cursor", "move", "important");
@@ -390,11 +394,9 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       }
       if (resizeHandle) {
         resizeHandle.style.display = "flex";
-        console.log(`[WB-E] Restored resize handle for ${container.id}`);
       }
     } else {
       // Не было выделено - возвращаем в базовое состояние
-      console.log(`[WB-E] Restoring unselected state for ${container.id}`);
       container.style.removeProperty("pointer-events");
       container.style.removeProperty("cursor");
       
@@ -405,7 +407,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       // ✨ NEW ARCHITECTURE: Update permanent border with current crop data
       if (permanentBorder && imageElement) {
         const cropData = getImageCropData(imageElement);
-        console.log(`[WB-E] Updating permanent border after unlock, crop:`, cropData.crop);
         updateImageBorder(permanentBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
         
         // Update click target to match visible area
@@ -423,7 +424,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
   function installGlobalImageSelectionHandler() {
     if (globalImageSelectionHandlerInstalled) return;
     
-    console.log("[WB-E] Installing global image selection handler");
     
     document.addEventListener("mousedown", async (e) => {
       if (e.button !== 0) return; // Only left click
@@ -435,22 +435,55 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       for (const [id, imageData] of imageRegistry) {
         const container = imageData.container;
         
+        
         // Skip locked images
         if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
           continue;
+        }
+        
+        // ✅ PREVENT SINGLE CLICK SELECTION OF MASS-SELECTED IMAGES
+        if (container.classList.contains("wbe-mass-selected")) {
+          continue; // Skip mass-selected images for individual selection
         }
         
         // Temporarily enable pointer-events to check hit detection
         const originalPointerEvents = container.style.pointerEvents;
         container.style.setProperty("pointer-events", "auto", "important");
         
+        // Enable click target for hit detection
+        const clickTarget = container.querySelector(".wbe-image-click-target");
+        if (clickTarget) {
+          clickTarget.style.setProperty("pointer-events", "auto", "important");
+        }
+
+        const cropHandles = container.querySelectorAll(
+          '.wbe-crop-handle-top, .wbe-crop-handle-right, ' +
+          '.wbe-crop-handle-bottom, .wbe-crop-handle-left, ' +
+          '.wbe-crop-handle-circle-resize'
+        );
+
+
+        const maskToggle = container.querySelector('.wbe-mask-type-toggle');
         const elementUnderCursor = document.elementFromPoint(e.clientX, e.clientY);
-        const clickedOnThis = elementUnderCursor === container || container.contains(elementUnderCursor);
+        const isCropUI = Array.from(cropHandles).some(h => 
+          h === elementUnderCursor || h.contains(elementUnderCursor)
+        ) || (maskToggle && (maskToggle === elementUnderCursor || maskToggle.contains(elementUnderCursor)));
         
+        
+        const resizeHandle = container.querySelector(".wbe-image-resize-handle");
+        const clickedOnThis = elementUnderCursor === clickTarget || 
+                             (clickTarget && clickTarget.contains(elementUnderCursor)) ||
+                             elementUnderCursor === resizeHandle || isCropUI;
+        
+        
+
+
         if (clickedOnThis) {
           clickedImageId = id;
           clickedImageData = imageData;
-          console.log(`[WB-E] Clicked on image ${id}`);
+          
+
+
           // If this image is in crop mode for THIS user, keep pointer-events enabled
           const inCropModeForMe = container.dataset.lockedBy === game.user.id;
           if (!inCropModeForMe) {
@@ -490,18 +523,23 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       // Handle selection/deselection
       if (clickedImageId && clickedImageData) {
+
+       
         // Clicked on an image
         const isSelected = clickedImageData.container.dataset.selected === "true";
         
         if (!isSelected) {
-          console.log(`[WB-E] Selecting image ${clickedImageId}`);
           e.preventDefault();
           e.stopPropagation();
+          
+          // ✅ CLEAR MASS SELECTION when selecting individual image
+          if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+            window.MassSelection.clear();
+          }
           
           // Deselect all others first
           for (const [otherId, otherData] of imageRegistry) {
             if (otherId !== clickedImageId && otherData.container.dataset.selected === "true") {
-              console.log(`[WB-E] Deselecting other image ${otherId}`);
               await otherData.deselectFn(); // Await async deselect
             }
           }
@@ -510,12 +548,14 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           clickedImageData.selectFn();
         }
       } else {
-        // Clicked elsewhere - deselect all selected images
-        console.log(`[WB-E] Clicked outside all images, deselecting all`);
-        for (const [id, imageData] of imageRegistry) {
-          if (imageData.container.dataset.selected === "true") {
-            console.log(`[WB-E] Deselecting image ${id}`);
-            await imageData.deselectFn(); // Await async deselect
+        
+
+        // Clicked elsewhere - deselect all selected images (unless scaling)
+        if (!isScalingImage) {
+          for (const [id, imageData] of imageRegistry) {
+            if (imageData.container.dataset.selected === "true") {
+              await imageData.deselectFn(); // Await async deselect
+            }
           }
         }
       }
@@ -527,7 +567,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
   /* ----------------------- Canvas Text/Image Functions ------------------ */
   
   
-  function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, right: 0, bottom: 0, left: 0 }, maskType = 'rect', circleOffset = { x: 0, y: 0 }, circleRadiusParam = null) {
+  function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, right: 0, bottom: 0, left: 0 }, maskType = 'rect', circleOffset = { x: 0, y: 0 }, circleRadiusParam = null, existingZIndex = null) {
     const layer = getOrCreateLayer();
     if (!layer) return;
     
@@ -551,18 +591,27 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     const container = document.createElement("div");
     container.id = id;
     container.className = "wbe-canvas-image-container";
+    // ✅ Get z-index from ZIndexManager or use existing
+    const zIndex = existingZIndex || ZIndexManager.assignImage(id);
+    
+    // If using existing z-index, make sure it's registered in the manager
+    if (existingZIndex) {
+      ZIndexManager.imageZIndexes.set(id, existingZIndex);
+    }
+    
     container.style.cssText = `
       position: absolute;
       left: ${left}px;
       top: ${top}px;
-      z-index: 1000;
+      z-index: ${zIndex};
       filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));
     `;
     
     // Внутренний элемент для контента + масштабирование
     const imageElement = document.createElement("img");
     imageElement.className = "wbe-canvas-image";
-    imageElement.src = src;
+    
+    // ✨ Progressive loading: Show placeholder IMMEDIATELY
     imageElement.style.cssText = `
       transform: scale(${scale});
       transform-origin: top left;
@@ -571,7 +620,88 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       display: block;
       border: none !important;
       pointer-events: none;
+      background: linear-gradient(45deg, #f0f0f0 25%, transparent 25%), 
+                  linear-gradient(-45deg, #f0f0f0 25%, transparent 25%), 
+                  linear-gradient(45deg, transparent 75%, #f0f0f0 75%), 
+                  linear-gradient(-45deg, transparent 75%, #f0f0f0 75%);
+      background-size: 20px 20px;
+      background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+      opacity: 0.8;
+      transition: opacity 0.3s ease;
     `;
+    
+    // Add loading indicator
+    const loadingIndicator = document.createElement("div");
+    loadingIndicator.className = "wbe-image-loading";
+    loadingIndicator.style.cssText = `
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 24px;
+      height: 24px;
+      border: 2px solid #4a9eff;
+      border-top: 2px solid transparent;
+      border-radius: 50%;
+      animation: wbe-spin 1s linear infinite;
+      z-index: 10;
+    `;
+    
+    // Add CSS animation for spinner
+    if (!document.getElementById("wbe-loading-styles")) {
+      const style = document.createElement("style");
+      style.id = "wbe-loading-styles";
+      style.textContent = `
+        @keyframes wbe-spin {
+          0% { transform: translate(-50%, -50%) rotate(0deg); }
+          100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    
+    container.appendChild(loadingIndicator);
+    
+    // Track loading start time for minimum display duration
+    const loadingStartTime = Date.now();
+    const minDisplayDuration = 500; // 0.5 seconds
+    
+    // Set up progressive loading
+    imageElement.addEventListener("load", () => {
+      const elapsedTime = Date.now() - loadingStartTime;
+      const remainingTime = Math.max(0, minDisplayDuration - elapsedTime);
+      
+      // Ensure placeholder is visible for at least 0.5 seconds
+      setTimeout(() => {
+        // Image loaded successfully
+        imageElement.style.opacity = "1";
+        imageElement.style.background = "none";
+        loadingIndicator.remove();
+        
+        // Update UI elements that depend on image dimensions
+        updateClipPath();
+        updateSelectionBorderSize();
+        updateHandlePosition();
+        
+        // Update click target after image loads
+        const cropData = getImageCropData(imageElement);
+        const clickTarget = container.querySelector(".wbe-image-click-target");
+        updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+      }, remainingTime);
+    });
+    
+    imageElement.addEventListener("error", () => {
+      // Image failed to load
+      imageElement.style.background = "linear-gradient(45deg, #ffcccc 25%, transparent 25%), linear-gradient(-45deg, #ffcccc 25%, transparent 25%)";
+      imageElement.style.backgroundSize = "20px 20px";
+      loadingIndicator.innerHTML = "❌";
+      loadingIndicator.style.animation = "none";
+      loadingIndicator.style.border = "2px solid #ff4444";
+      console.error(`[WB-E] Failed to load image: ${src}`);
+    });
+    
+    // Start loading the image
+    imageElement.src = src;
     
     // ✨ Init circle from the *arguments* first; fall back to locals
     const local = getImageLocalVars(id);
@@ -826,17 +956,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     layer.appendChild(container);
     
-    // Обновляем размеры рамок после загрузки картинки
-    imageElement.addEventListener("load", () => {
-      updateClipPath(); // ✨ Обновляем clip-path после загрузки!
-      updateSelectionBorderSize();
-      updateHandlePosition();
-      
-      // Update click target on load
-      const cropData = getImageCropData(imageElement);
-      const clickTarget = container.querySelector(".wbe-image-click-target");
-      updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
-    });
+    // Click target will be updated after image loads (handled by progressive loading system)
     
     // Resize handle (круглая точка)
     const resizeHandle = document.createElement("div");
@@ -858,35 +978,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       transform-origin: center center;
     `;
     container.appendChild(resizeHandle);
-    
-    // Border toggle button for selected mode
-    const borderToggleBtn = document.createElement("div");
-    borderToggleBtn.className = "wbe-border-toggle-btn";
-    borderToggleBtn.innerHTML = '<i class="fas fa-square"></i>';
-    borderToggleBtn.title = "Показать/скрыть серую рамку";
-    borderToggleBtn.style.cssText = `
-      position: absolute;
-      top: -35px;
-      right: 0;
-      width: 28px;
-      height: 28px;
-      background: #4a9eff;
-      border: 2px solid white;
-      border-radius: 4px;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      color: white;
-      font-size: 14px;
-      z-index: 1002;
-      pointer-events: auto;
-    `;
-    borderToggleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleGrayBorder();
-    });
-    container.appendChild(borderToggleBtn);
     
     // Функция для обновления позиции handle
     function updateHandlePosition() {
@@ -995,28 +1086,13 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     // UI переключатели типа маски
     let maskTypeToggle = null;
-      let rectBtn = null;
-      let circleBtn = null;
+    let rectBtn = null;
+    let circleBtn = null;
     
     function updateMaskToggleButtons() {
       if (rectBtn && circleBtn) {
         rectBtn.style.background = currentMaskType === 'rect' ? '#4a9eff' : '#333';
         circleBtn.style.background = currentMaskType === 'circle' ? '#4a9eff' : '#333';
-      }
-    }
-    
-    function toggleGrayBorder() {
-      const permanentBorder = container.querySelector(".wbe-image-permanent-border");
-      if (permanentBorder) {
-        const isVisible = permanentBorder.style.display !== "none";
-        permanentBorder.style.display = isVisible ? "none" : "block";
-        
-        // Update button appearance
-        const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
-        if (borderToggleBtn) {
-          borderToggleBtn.style.background = isVisible ? "#333" : "#4a9eff";
-          borderToggleBtn.title = isVisible ? "Показать серую рамку" : "Скрыть серую рамку";
-        }
       }
     }
     
@@ -1026,7 +1102,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         ui.notifications.warn("This image is being cropped by another user");
         return;
       }
-      
+      isCropping = true;
       // ✨ NEW ARCHITECTURE: Sync closure variables from CSS/Dataset (source of truth)
       // This ensures crop handles start at correct position
       const cropData = getImageCropData(imageElement);
@@ -1039,9 +1115,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       circleOffsetY = cropData.circleOffset.y;
       circleRadius = cropData.circleRadius;
       
-      console.log(`[WB-E] enterCropMode - synced closure from CSS:`, cropData);
       
-      isCropping = true;
+      
       
       // Broadcast lock to all users
       game.socket.emit(`module.${MODID}`, {
@@ -1051,6 +1126,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         userName: game.user.name
       });
       
+      // Mark as cropping
+      container.setAttribute('data-cropping', 'true');
       // Mark as locked locally
       container.dataset.lockedBy = game.user.id;
       
@@ -1078,7 +1155,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       selectionBorder.style.borderColor = "rgba(128, 0, 255, 0.9)"; // Фиолетовый для crop mode
       
       // ✨ NEW ARCHITECTURE: Update border using synced data
-      console.log(`[WB-E] enterCropMode - updating border with synced crop:`, cropData);
       updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       ui.notifications.info("Crop mode activated (image locked)");
@@ -1243,14 +1319,12 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     }
     
     async function exitCropMode() {
-      console.log(`[WB-E] Exiting crop mode for ${id}`);
       
       isCropping = false;
       
       // ✨ CRITICAL: Write closure modifications back to CSS/Dataset (source of truth)
       // During crop mode, we only modified closures for performance
       // Now sync everything before broadcasting/reading
-      console.log(`[WB-E] Syncing closure changes to CSS/Dataset:`, { crop, maskType: currentMaskType });
       setImageCropData(imageElement, {
         crop: { ...crop },
         maskType: currentMaskType,
@@ -1259,7 +1333,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       });
       
       // ✨ FINAL SAVE - Now broadcast all crop changes to everyone
-      console.log(`[WB-E] Broadcasting final crop state for ${id}`);
       await saveImageState(true); // Force broadcast
       
       // Broadcast unlock to all users
@@ -1268,6 +1341,9 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         imageId: id
       });
       
+      // Remove cropping flag
+      container.removeAttribute('data-cropping');
+
       // Remove lock locally
       delete container.dataset.lockedBy;
       
@@ -1292,7 +1368,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       // ✨ NEW ARCHITECTURE: Update permanent border to reflect NEW crop state
       const cropData = getImageCropData(imageElement);
-      console.log(`[WB-E] exitCropMode - updating permanent border with crop:`, cropData.crop);
       updateImageBorder(permanentBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       // Update click target to match NEW visible area and re-enable it
@@ -1434,8 +1509,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           // ✨ CRITICAL: Update purple border during crop mode with current circle data
           if (isCropping && selectionBorder) {
             const cropData = getImageCropData(imageElement);
-            // Use the current circleRadius that's being updated, not the old one from cropData
-            updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, circleRadius, cropData.scale);
+            // Use ALL current live values, not mixed old/new data
+            updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, { x: circleOffsetX, y: circleOffsetY }, circleRadius, cropData.scale);
           }
           
         }
@@ -1671,8 +1746,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           // ✨ CRITICAL: Ensure purple border updates during crop mode circle drag
           if (isCropping && selectionBorder) {
             const cropData = getImageCropData(imageElement);
-            // Use the current circleOffset that's being updated, not the old one from cropData
-            updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, { x: circleOffsetX, y: circleOffsetY }, cropData.circleRadius, cropData.scale);
+            // Use ALL current live values, not mixed old/new data
+            updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, { x: circleOffsetX, y: circleOffsetY }, circleRadius, cropData.scale);
           }
         }
         
@@ -1713,11 +1788,14 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     function selectImage() {
       // Нельзя выделить заблокированную картинку
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
-        console.log(`[WB-E] Cannot select ${id} - locked by ${container.dataset.lockedBy}`);
         return;
       }
       
-      console.log(`[WB-E] Selecting image ${id}`);
+      // ✅ PREVENT SELECTION OF MASS-SELECTED IMAGES
+      if (container.classList.contains("wbe-mass-selected")) {
+        return; // Don't select mass-selected images individually
+      }
+      
       isSelected = true;
       selectedImageId = id; // Устанавливаем глобальный ID
       
@@ -1741,7 +1819,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       // ✨ NEW ARCHITECTURE: Single source of truth
       const cropData = getImageCropData(imageElement);
-      console.log(`[WB-E] selectImage ${id} - crop data from CSS/Dataset:`, cropData);
       
       // Update selection border with current crop data
       updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
@@ -1757,24 +1834,12 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       resizeHandle.style.display = "flex";
       
-      // Show border toggle button in selected mode
-      const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
-      if (borderToggleBtn) {
-        borderToggleBtn.style.display = "flex";
-        // Update button state based on current border visibility
-        const isVisible = permanentBorder && permanentBorder.style.display !== "none";
-        borderToggleBtn.style.background = isVisible ? "#4a9eff" : "#333";
-        borderToggleBtn.title = isVisible ? "Скрыть серую рамку" : "Показать серую рамку";
-      }
-      
       // Update resize handle with current crop data
       updateImageResizeHandle(resizeHandle, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
-      console.log(`[WB-E] Image ${id} selected, pointer-events: ${container.style.pointerEvents}, resize handle visible: ${resizeHandle.style.display}`);
     }
     
     async function deselectImage() {
-      console.log(`[WB-E] Deselecting image ${id}`);
       isSelected = false;
       delete container.dataset.selected; // Убираем метку
       if (selectedImageId === id) selectedImageId = null; // Сбрасываем глобальный ID только если это МЫ
@@ -1798,7 +1863,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       // ✨ NEW ARCHITECTURE: Update permanent border with current crop data
       const cropData = getImageCropData(imageElement);
-      console.log(`[WB-E] deselectImage ${id} - Using crop for permanent border:`, cropData.crop);
       updateImageBorder(permanentBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
       // Update click target to match visible area
@@ -1812,20 +1876,16 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       resizeHandle.style.display = "none";
       
-      // Hide border toggle button when deselected
-      const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
-      if (borderToggleBtn) borderToggleBtn.style.display = "none";
-      
-      console.log(`[WB-E] Image ${id} deselected, pointer-events: ${container.style.pointerEvents}`);
     }
     
     // Удаление по клавише Delete
     async function deleteImage() {
-      console.log(`[WB-E] Deleting image ${id}`);
       
       // Unregister from global registry
       imageRegistry.delete(id);
-      console.log(`[WB-E] Unregistered image ${id}, remaining images: ${imageRegistry.size}`);
+      
+      // Clean up z-index
+      ZIndexManager.removeImage(id);
       
       container.remove();
       
@@ -1882,7 +1942,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         crop: cropData,
         maskType: maskTypeData,
         circleOffset: circleOffsetData,
-        circleRadius: circleRadiusData
+        circleRadius: circleRadiusData,
+        zIndex: ZIndexManager.getImage(newImageId)
       };
       await setAllImages(images);
       
@@ -1905,12 +1966,16 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         
         // 🔒 Блокируем drag если пользователь в режиме crop
         if (isCropping) {
-          console.log(`[WB-E] Drag blocked - image ${id} is in crop mode`);
           return;
         }
         
+        
         // Если элемент не выделен - сначала выделяем его
         if (!isSelected) {
+          // ✅ CLEAR MASS SELECTION when selecting image for drag
+          if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+            window.MassSelection.clear();
+          }
           selectImage();
         }
         
@@ -1961,6 +2026,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     
     // Resize handle
     resizeHandle.addEventListener("mousedown", (e) => {
+      console.log("Global handler fired!", e.target, e.target.classList);
       if (e.button !== 0) return;
       
       // Блокируем resize если картинка заблокирована другим пользователем
@@ -1972,6 +2038,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       e.stopPropagation();
       
       resizing = true;
+      isScalingImage = true; // Set flag to prevent deselection during scaling
       resizeStartX = e.clientX;
       
       const transform = imageElement.style.transform || "";
@@ -1987,13 +2054,21 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       if (!resizing) return;
       
       const deltaX = e.clientX - resizeStartX;
-      const newScale = resizeStartScale + (deltaX * 0.002);
-      const clampedScale = Math.max(0.3, Math.min(3.0, newScale));
+      const newScale = resizeStartScale + (deltaX * SCALE_SENSITIVITY);
+      // No scale limits - allow unlimited scaling
+      const finalScale = Math.max(0.01, newScale); // Only prevent negative/zero scale
       
-      imageElement.style.transform = `scale(${clampedScale})`;
+      imageElement.style.transform = `scale(${finalScale})`;
       
       // ✨ CRITICAL: Store scale in CSS/Dataset system for persistence
-      setImageCropData(imageElement, { scale: clampedScale });
+      setImageCropData(imageElement, { scale: finalScale });
+      
+      // Update click target to match new scale
+      const clickTarget = container.querySelector(".wbe-image-click-target");
+      if (clickTarget) {
+        const cropData = getImageCropData(imageElement);
+        updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, finalScale);
+      }
       
       updateHandlePosition();
       updateSelectionBorderSize(); // ✨ Обновляем рамку при resize!
@@ -2002,6 +2077,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     async function handleImageResizeUp() {
       if (resizing) {
         resizing = false;
+        isScalingImage = false; // Clear flag to allow deselection again
         document.removeEventListener("mousemove", handleImageResize);
         document.removeEventListener("mouseup", handleImageResizeUp);
         
@@ -2024,9 +2100,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       if (!useCircleOffset)          useCircleOffset = { x: circleOffsetX, y: circleOffsetY };
       if (useCircleRadius === undefined) useCircleRadius = circleRadius;
 
-      console.log(`[WB-E] saveImageState(SNAPSHOT) for ${id}:`, {
-        useMaskType, useCrop, useCircleOffset, useCircleRadius, currentScale
-      });
 
       const imageData = {
         src: imageElement.src,
@@ -2037,7 +2110,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         maskType: useMaskType,
         circleOffset: useCircleOffset,
         circleRadius: useCircleRadius,
-        isCropping: isCropping
+        isCropping: isCropping,
+        zIndex: ZIndexManager.getImage(id)
       };
 
       // Keep caches in sync with what we're persisting
@@ -2052,7 +2126,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
 
       // While actively cropping, don't spam sockets/db with intermediate states
       if (isCropping && broadcast) {
-        console.log(`[WB-E] Image ${id} in crop mode - saving locally only, no broadcast`);
         return;
       }
 
@@ -2067,7 +2140,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       selectFn: selectImage,
       deselectFn: deselectImage
     });
-    console.log(`[WB-E] Registered image ${id} in global registry, total images: ${imageRegistry.size}`);
     
     // Install global handler if not already installed
     installGlobalImageSelectionHandler();
@@ -2093,6 +2165,10 @@ function applyImageLockVisual(container, lockerId, lockerName) {
   
   async function setAllImages(images) {
     try {
+      // Sync ZIndexManager with existing z-index values to avoid conflicts
+      const existingZIndexes = Object.entries(images).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
+      ZIndexManager.syncWithExisting(existingZIndexes);
+      
       if (game.user.isGM) {
         // GM сохраняет в базу
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
@@ -2124,7 +2200,7 @@ function applyImageLockVisual(container, lockerId, lockerName) {
               const maskTypeData = imageData.maskType || 'rect';
               const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
               const circleRadiusData = imageData.circleRadius || null;
-              createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData);
+              createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex);
             }
             
             // ✨ Обновляем глобальные переменные для каждой картинки
@@ -2143,6 +2219,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
             if (!existingIds.has(element.id)) {
               // Clear runtime caches to prevent resurrection
               clearImageCaches(element.id);
+              // Clean up z-index
+              ZIndexManager.removeImage(element.id);
               element.remove();
             }
           });
@@ -2209,7 +2287,6 @@ function updateImageElement(existing, imageData) {
       isCropping: imageData.isCropping || false
     });
     
-    console.log(`[WB-E] updateImageElement updated imageLocalVars for ${existing.id}, crop:`, imageData.crop);
   }
   
   // Функция для применения визуальных стилей картинки
@@ -2264,7 +2341,6 @@ function updateImageElement(existing, imageData) {
     const isLockedByMe = container.dataset.lockedBy === game.user.id;
     const isCropping = isLockedByMe || imageData.isCropping || false;
     
-    console.log(`[WB-E] updateImageUIElements for ${container.id}, preserving isSelected: ${isSelected}, isCropping: ${isCropping} (lockedByMe: ${isLockedByMe})`);
     
     // Обновляем постоянную рамку
     const permanentBorder = container.querySelector(".wbe-image-permanent-border");
@@ -2288,10 +2364,8 @@ function updateImageElement(existing, imageData) {
     // This ensures the click target stays synchronized with crop changes from socket updates
     const clickTarget = container.querySelector(".wbe-image-click-target");
     if (clickTarget) {
-      console.log(`[WB-E] updateImageUIElements - updating click target for ${container.id}`);
       updateClickTarget(clickTarget, imageElement, maskType, crop, circleOffset, circleRadius, scale);
     } else {
-      console.log(`[WB-E] updateImageUIElements - click target not found for ${container.id}`);
     }
     
     // Обновляем переключатель типа маски
@@ -2331,20 +2405,10 @@ function updateImageElement(existing, imageData) {
     }
     
     if (isSelected) {
-      // Выделена - показываем синюю рамку, прячем серую, показываем resize handle и border toggle
+      // Выделена - показываем синюю рамку, прячем серую, показываем resize handle
       if (permanentBorder) permanentBorder.style.display = "none";
       if (selectionBorder) selectionBorder.style.display = "block";
       if (resizeHandle) resizeHandle.style.display = "flex";
-      
-      // Show border toggle button in selected mode
-      const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
-      if (borderToggleBtn) {
-        borderToggleBtn.style.display = "flex";
-        // Update button state based on current border visibility
-        const isVisible = permanentBorder && permanentBorder.style.display !== "none";
-        borderToggleBtn.style.background = isVisible ? "#4a9eff" : "#333";
-        borderToggleBtn.title = isVisible ? "Скрыть серую рамку" : "Показать серую рамку";
-      }
       
       // Enable click target pointer events when selected
       if (clickTarget) {
@@ -2359,19 +2423,10 @@ function updateImageElement(existing, imageData) {
       // }
       container.dataset.selected = "true";
     } else {
-      // Не выделена - показываем серую рамку только если она не скрыта кнопкой, прячем синюю, прячем resize handle
-      if (permanentBorder) {
-        // Check if gray border is hidden by toggle button
-        const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
-        const isHiddenByToggle = borderToggleBtn && borderToggleBtn.style.background === "#333";
-        permanentBorder.style.display = isHiddenByToggle ? "none" : "block";
-      }
+      // Не выделена - показываем серую рамку, прячем синюю, прячем resize handle
+      if (permanentBorder) permanentBorder.style.display = "block";
       if (selectionBorder) selectionBorder.style.display = "none";
       if (resizeHandle) resizeHandle.style.display = "none";
-      
-      // Hide border toggle button when not selected
-      const borderToggleBtn = container.querySelector(".wbe-border-toggle-btn");
-      if (borderToggleBtn) borderToggleBtn.style.display = "none";
       
       // Disable click target pointer events when not selected to allow canvas drag/pan
       if (clickTarget) {
@@ -2458,7 +2513,6 @@ function updateImageElement(existing, imageData) {
   
   // Функция для обновления локальных переменных картинки
   function updateImageLocalVars(imageId, data) {
-    console.log(`[WB-E] updateImageLocalVars called for ${imageId}, data.crop:`, data.crop);
     
     imageLocalVars[imageId] = {
       maskType: data.maskType || 'rect',
@@ -2468,7 +2522,6 @@ function updateImageElement(existing, imageData) {
       scale: data.scale || 1
     };
     
-    console.log(`[WB-E] imageLocalVars[${imageId}] now:`, JSON.stringify(imageLocalVars[imageId], null, 2));
   }
   
   // Глобальная функция для обновления локальных переменных в createImageElement
@@ -2517,8 +2570,8 @@ function updateImageElement(existing, imageData) {
     const maskTypeToggle = container.querySelector(".wbe-mask-type-toggle");
     if (!maskTypeToggle) return;
     
-    const rectBtn = maskTypeToggle.querySelector(".wbe-mask-rect-btn");
-    const circleBtn = maskTypeToggle.querySelector(".wbe-mask-circle-btn");
+    const rectBtn = maskTypeToggle.querySelector(".wbe-mask-btn");
+    const circleBtn = maskTypeToggle.querySelector(".wbe-mask-btn:last-child");
     
     if (rectBtn && circleBtn) {
       if (maskType === 'rect') {
@@ -2532,8 +2585,10 @@ function updateImageElement(existing, imageData) {
         rectBtn.style.backgroundColor = "#333";
         rectBtn.style.color = "white";
       }
+      
+  
     }
-  }
+}
 
 
 // Функция для обновления рамок картинки
@@ -2743,7 +2798,8 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
       crop: cropData,
       maskType: maskTypeData,
       circleOffset: circleOffsetData,
-      circleRadius: circleRadiusData
+      circleRadius: circleRadiusData,
+      zIndex: ZIndexManager.getImage(newImageId)
     };
     await setAllImages(images);
     
@@ -2752,7 +2808,6 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
 
   // Вставка картинки из системного буфера
 async function handleImagePasteFromClipboard(file) {
-    console.log("[WB-E] handleImagePasteFromClipboard called with file:", file.name, file.type);
     try {
       // Сбрасываем наши скопированные элементы (вставляем из системного буфера)
       copiedImageData = null;
@@ -2773,10 +2828,8 @@ async function handleImagePasteFromClipboard(file) {
       if (isGM) {
         // GM: Try direct upload only
         try {
-          console.log("[WB-E] GM canvas upload - using direct method only");
           uploadResult = await foundry.applications.apps.FilePicker.implementation.upload("data", `worlds/${game.world.id}/`, newFile, { name: filename });
           const directTime = Date.now() - startTime;
-          console.log(`[WB-E] GM canvas upload successful in ${directTime}ms:`, uploadResult);
         } catch (error) {
           const directTime = Date.now() - startTime;
           console.error(`[WB-E] GM canvas upload failed after ${directTime}ms:`, error);
@@ -2785,10 +2838,8 @@ async function handleImagePasteFromClipboard(file) {
       } else {
         // Player: Try direct upload only (no timeout, no base64 fallback)
         try {
-          console.log("[WB-E] Player canvas upload - using direct method only");
           uploadResult = await foundry.applications.apps.FilePicker.implementation.upload("data", `worlds/${game.world.id}/`, newFile, { name: filename });
           const directTime = Date.now() - startTime;
-          console.log(`[WB-E] Player canvas direct upload successful in ${directTime}ms:`, uploadResult);
         } catch (error) {
           const directTime = Date.now() - startTime;
           console.error(`[WB-E] Player canvas direct upload failed after ${directTime}ms:`, error);
@@ -2814,7 +2865,8 @@ async function handleImagePasteFromClipboard(file) {
           left: worldPos.x,
           top: worldPos.y,
           scale: 1,
-          crop: defaultCrop
+          crop: defaultCrop,
+          zIndex: ZIndexManager.getImage(imageId)
         };
         await setAllImages(images);
         
