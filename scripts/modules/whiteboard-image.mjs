@@ -29,6 +29,333 @@ const imageRegistry = new Map(); // { id: { container, selectFn, deselectFn } }
 let globalImageSelectionHandlerInstalled = false;
 let removalObserver = null;
 
+/* ======================== Mask Control Panel System ======================== */
+
+function killImagePanel() {
+  const p = window.wbeImagePanel;
+  if (p && typeof p.cleanup === "function") {
+    try { p.cleanup(); } catch {}
+  }
+}
+
+/**
+ * Показать панель управления масками для выбранного изображения
+ * Аналог showColorPicker для текстов
+ */
+async function showImagePanel(imageElement, container, currentMaskType, callbacks) {
+  if (!imageElement || !container) return;
+  
+  killImagePanel();
+  
+  const panel = document.createElement("div");
+  panel.className = "wbe-mask-picker-panel";
+  panel.style.cssText = `
+    position: fixed;
+    background: white;
+    border: 1px solid #d7d7d7;
+    border-radius: 14px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+    padding: 6px;
+    z-index: 10000;
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    
+    aspect-ratio: 3 / 1;
+    transform: translateX(-50%) scale(0.9) translateY(12px);
+    opacity: 0;
+    transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  `;
+
+  const toolbar = document.createElement("div");
+  toolbar.style.cssText = `
+    display: flex;
+    gap: 12px;
+    position: relative;
+  `;
+
+  const setButtonActive = (button, isActive) => {
+    if (!button) return;
+    if (isActive) {
+      button.dataset.active = "1";
+      button.style.background = "#e0ebff";
+      button.style.borderColor = "#4d8dff";
+      button.style.color = "#1a3f8b";
+    } else {
+      button.dataset.active = "0";
+      button.style.background = "#f5f5f7";
+      button.style.borderColor = "#d2d2d8";
+      button.style.color = "#333";
+    }
+  };
+
+  const makeToolbarButton = (label, iconClass) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "wbe-mask-toolbar-btn";
+    btn.style.cssText = `
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 40px;
+      padding: 0;
+      border-radius: 10px;
+      border: 1px solid #d2d2d8;
+      background: #f5f5f7;
+      font-size: 16px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+    `;
+    btn.dataset.active = "0";
+    btn.title = label;
+
+    if (iconClass) {
+      const icon = document.createElement("i");
+      icon.className = iconClass;
+      icon.style.cssText = "font-size: 18px;";
+      btn.appendChild(icon);
+    }
+
+    btn.addEventListener("mouseenter", () => {
+      if (btn.dataset.active === "1") return;
+      btn.style.background = "#ededf8";
+    });
+    btn.addEventListener("mouseleave", () => {
+      if (btn.dataset.active === "1") return;
+      setButtonActive(btn, false);
+    });
+
+    return btn;
+  };
+
+  // Создаем кнопки для типов масок
+  const rectBtn = makeToolbarButton("Rectangle Mask", "fas fa-square");
+  const circleBtn = makeToolbarButton("Circle Mask", "fas fa-circle");
+
+  // ✅ FIX: Use a mutable reference to track current mask type
+  let panelCurrentMaskType = currentMaskType;
+
+  // Устанавливаем активную кнопку в зависимости от текущего типа маски
+  setButtonActive(rectBtn, panelCurrentMaskType === 'rect');
+  setButtonActive(circleBtn, panelCurrentMaskType === 'circle');
+
+  // ✅ FIX: Update panel's internal state and sync with external state
+  const updatePanelState = (newMaskType) => {
+    panelCurrentMaskType = newMaskType;
+    setButtonActive(rectBtn, newMaskType === 'rect');
+    setButtonActive(circleBtn, newMaskType === 'circle');
+  };
+
+  // Обработчики нажатий на кнопки
+  rectBtn.addEventListener("click", () => {
+    // ✅ FIX: Allow toggling off active button or switching to different type
+    if (panelCurrentMaskType === 'rect') {
+      // Toggle off - don't change mask type, just update visual state
+      return;
+    }
+    
+    // Switch to rect
+    updatePanelState('rect');
+    
+    // ✅ FIX: Add error handling for callbacks
+    if (callbacks?.onMaskTypeChange) {
+      try {
+        callbacks.onMaskTypeChange('rect');
+      } catch (error) {
+        console.error("[WB-E] ImagePanel callback error:", error);
+      }
+    }
+  });
+
+  circleBtn.addEventListener("click", () => {
+    // ✅ FIX: Allow toggling off active button or switching to different type
+    if (panelCurrentMaskType === 'circle') {
+      // Toggle off - don't change mask type, just update visual state
+      return;
+    }
+    
+    // Switch to circle
+    updatePanelState('circle');
+    
+    // ✅ FIX: Add error handling for callbacks
+    if (callbacks?.onMaskTypeChange) {
+      try {
+        callbacks.onMaskTypeChange('circle');
+      } catch (error) {
+        console.error("[WB-E] ImagePanel callback error:", error);
+      }
+    }
+  });
+
+  toolbar.appendChild(rectBtn);
+  toolbar.appendChild(circleBtn);
+  panel.appendChild(toolbar);
+  document.body.appendChild(panel);
+
+  const updatePanelPosition = () => {
+    const rect = imageElement.getBoundingClientRect();
+    panel.style.left = `${rect.left + rect.width / 2}px`;
+    panel.style.top = `${rect.top - 80}px`;
+  };
+
+  updatePanelPosition();
+  requestAnimationFrame(() => {
+    panel.style.transform = "translateX(-50%) scale(1) translateY(0)";
+    panel.style.opacity = "1";
+  });
+
+  const onOutside = (ev) => {
+    if (panel.contains(ev.target)) return;
+    
+    const clickedInsideImage = container?.contains(ev.target);
+    
+    if (clickedInsideImage) {
+      window.wbeImagePanelUpdate?.();
+      return;
+    }
+    
+    // ✅ FIX: Prevent cleanup if clicking on crop handles or other crop UI
+    const cropHandles = container.querySelectorAll(
+      '.wbe-crop-handle-top, .wbe-crop-handle-right, ' +
+      '.wbe-crop-handle-bottom, .wbe-crop-handle-left, ' +
+      '.wbe-crop-handle-circle-resize'
+    );
+    
+    const isCropUI = Array.from(cropHandles).some(h => 
+      h === ev.target || h.contains(ev.target)
+    );
+    
+    if (isCropUI) {
+      return; // Don't close panel when interacting with crop handles
+    }
+    
+    cleanup();
+  };
+  
+  const onKey = (ev) => {
+    if (ev.key === "Escape") cleanup();
+  };
+
+  panel.addEventListener("mousedown", (ev) => ev.stopPropagation());
+  setTimeout(() => document.addEventListener("mousedown", onOutside, true), 0);
+  document.addEventListener("keydown", onKey);
+
+  function cleanup() {
+    try { document.removeEventListener("mousedown", onOutside, true); } catch {}
+    document.removeEventListener("keydown", onKey);
+    panel.remove();
+    window.wbeImagePanel = null;
+    window.wbeImagePanelUpdate = null;
+  }
+
+  panel.cleanup = cleanup;
+  window.wbeImagePanel = panel;
+  window.wbeImagePanelUpdate = updatePanelPosition;
+  
+  // Сохраняем ссылки на кнопки для внешнего обновления
+  panel.rectBtn = rectBtn;
+  panel.circleBtn = circleBtn;
+  panel.setButtonActive = setButtonActive;
+  panel.updatePanelState = updatePanelState; // ✅ FIX: Expose state update function
+}
+
+// Install global pan hooks for ImagePanel (similar to ColorPanel)
+let __wbeMaskPanHooksInstalled = false;
+
+function installGlobalMaskPanHooks() {
+  if (__wbeMaskPanHooksInstalled) return;
+  __wbeMaskPanHooksInstalled = true;
+
+  let isCanvasPanningGlobal = false;
+
+  // Start pan on ANY right-button down; close panel immediately
+  document.addEventListener("mousedown", (e) => {
+    if (e.button !== 2) return;
+    if (e.target.closest(".wbe-canvas-image-container")) {
+      // If you want to keep the panel when RMB starts ON the image, comment this line:
+      killImagePanel();
+    } else {
+      killImagePanel();
+    }
+    isCanvasPanningGlobal = true;
+  }, true);
+
+  // On pan end, reopen for the currently selected image (if any)
+  document.addEventListener("mouseup", (e) => {
+    if (e.button !== 2) return;
+    if (!isCanvasPanningGlobal) return;
+    isCanvasPanningGlobal = false;
+
+    if (selectedImageId && !window.wbeImagePanel) {
+      // Give the canvas a tick to settle transforms
+      safeReshowImagePanel(selectedImageId, 100);
+    }
+  }, true);
+
+  // Zoom wheel should also temporarily hide + then restore
+  document.addEventListener("wheel", (e) => {
+    if (e.deltaY === 0) return;
+    if (!selectedImageId) return;
+    killImagePanel();
+    safeReshowImagePanel(selectedImageId, 150);
+  }, { passive: true });
+}
+
+function safeReshowImagePanel(targetId, delayMs = 0) {
+  const open = async () => {
+    const container = document.getElementById(targetId);
+    if (!container) return;
+    
+    const imageElement = container.querySelector(".wbe-canvas-image");
+    if (!imageElement) return;
+    
+    // Check if we're in crop mode (only show panel during crop)
+    const isCropping = container.getAttribute('data-cropping') === 'true';
+    if (!isCropping) return;
+    
+    // Get current mask type from the image
+    const cropData = getImageCropData(imageElement);
+    const currentMaskType = cropData.maskType || 'rect';
+    
+    // Reassert selection target in case other handlers nulled it
+    selectedImageId = targetId;
+    
+    showImagePanel(imageElement, container, currentMaskType, {
+      onMaskTypeChange: async (newMaskType) => {
+        // This callback will be handled by the existing crop mode logic
+        // The panel will be updated via the existing socket system
+        // Note: The panel's internal state will be updated by the external updatePanelState call
+      }
+    });
+  };
+
+  if (delayMs <= 0) {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        open();
+      });
+    });
+  } else {
+    setTimeout(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          open();
+        });
+      });
+    }, delayMs);
+  }
+}
+
+// Install global pan hooks
+installGlobalMaskPanHooks();
+
+/* ======================== End Mask Control Panel System ======================== */
+
+
 function ensureRemovalObserver() {
   const layer = createCardsLayer();
   if (!layer) return;
@@ -428,6 +755,11 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     document.addEventListener("mousedown", async (e) => {
       if (e.button !== 0) return; // Only left click
       
+      // ✅ FIX: Prevent image deselection when clicking ImagePanel
+      if (window.wbeImagePanel && window.wbeImagePanel.contains(e.target)) {
+        return; // Don't process image selection when clicking ImagePanel
+      }
+      
       let clickedImageId = null;
       let clickedImageData = null;
       
@@ -462,12 +794,10 @@ function applyImageLockVisual(container, lockerId, lockerName) {
           '.wbe-crop-handle-circle-resize'
         );
 
-
-        const maskToggle = container.querySelector('.wbe-mask-type-toggle');
         const elementUnderCursor = document.elementFromPoint(e.clientX, e.clientY);
         const isCropUI = Array.from(cropHandles).some(h => 
           h === elementUnderCursor || h.contains(elementUnderCursor)
-        ) || (maskToggle && (maskToggle === elementUnderCursor || maskToggle.contains(elementUnderCursor)));
+        );
         
         
         const resizeHandle = container.querySelector(".wbe-image-resize-handle");
@@ -861,11 +1191,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
         } else {
           ensureCircleHandles();
         }
-        if (maskTypeToggle) maskTypeToggle.style.display = "flex";
-        if (rectBtn && circleBtn) {
-          rectBtn.style.background = currentMaskType === 'rect' ? '#4a9eff' : '#333';
-          circleBtn.style.background = currentMaskType === 'circle' ? '#4a9eff' : '#333';
-        }
         updateSelectionBorderSize();
         updateCropHandlesPosition();
         updateCircleResizeHandlePosition();
@@ -1084,18 +1409,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       circleResize: null
     };
     
-    // UI переключатели типа маски
-    let maskTypeToggle = null;
-    let rectBtn = null;
-    let circleBtn = null;
-    
-    function updateMaskToggleButtons() {
-      if (rectBtn && circleBtn) {
-        rectBtn.style.background = currentMaskType === 'rect' ? '#4a9eff' : '#333';
-        circleBtn.style.background = currentMaskType === 'circle' ? '#4a9eff' : '#333';
-      }
-    }
-    
     function enterCropMode() {
       // Проверяем, не заблокирована ли картинка другим пользователем
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
@@ -1159,84 +1472,17 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       
       ui.notifications.info("Crop mode activated (image locked)");
       
-      // Создаем UI переключатели типа маски (квадрат/круг)
-      if (!maskTypeToggle) {
-        maskTypeToggle = document.createElement("div");
-        maskTypeToggle.className = "wbe-mask-type-toggle";
-        maskTypeToggle.style.cssText = `
-          position: absolute;
-          top: -35px;
-          left: 50%;
-          transform: translateX(-50%);
-          display: flex; /* Показываем в crop mode */
-          gap: 8px;
-          z-index: 1004;
-        `;
-        
-        // Кнопка "Квадрат"
-        rectBtn = document.createElement("div");
-        rectBtn.className = "wbe-mask-btn wbe-mask-rect-btn";
-        rectBtn.innerHTML = '<i class="fas fa-square"></i>';
-        rectBtn.title = "Прямоугольная маска";
-        rectBtn.style.cssText = `
-          width: 28px;
-          height: 28px;
-          background: ${currentMaskType === 'rect' ? '#4a9eff' : '#333'};
-          border: 2px solid white;
-          border-radius: 4px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          color: white;
-          font-size: 14px;
-        `;
-        rectBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          if (currentMaskType !== 'rect') {
-            currentMaskType = 'rect';
-            updateMaskType();
-            updateMaskToggleButtons();
-            saveImageState(); // ✨ Сохраняем изменение типа маски!
+      showImagePanel(imageElement, container, currentMaskType, {
+        onMaskTypeChange: async (newMaskType) => {
+          currentMaskType = newMaskType;
+          updateMaskType();
+          // ✅ FIX: Use centralized state update instead of manual button updates
+          if (window.wbeImagePanel && window.wbeImagePanel.updatePanelState) {
+            window.wbeImagePanel.updatePanelState(newMaskType);
           }
-        });
-        
-        // Кнопка "Круг"
-        circleBtn = document.createElement("div");
-        circleBtn.className = "wbe-mask-btn wbe-mask-circle-btn";
-        circleBtn.innerHTML = '<i class="fas fa-circle"></i>';
-        circleBtn.title = "Круговая маска";
-        circleBtn.style.cssText = `
-          width: 28px;
-          height: 28px;
-          background: ${currentMaskType === 'circle' ? '#4a9eff' : '#333'};
-          border: 2px solid white;
-          border-radius: 4px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          color: white;
-          font-size: 14px;
-        `;
-        circleBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          if (currentMaskType !== 'circle') {
-            currentMaskType = 'circle';
-            updateMaskType();
-            updateMaskToggleButtons();
-            saveImageState(); // ✨ Сохраняем изменение типа маски!
-          }
-        });
-        
-        maskTypeToggle.appendChild(rectBtn);
-        maskTypeToggle.appendChild(circleBtn);
-        container.appendChild(maskTypeToggle);
-      } else {
-        // Кнопки уже созданы, просто показываем их
-        maskTypeToggle.style.display = "flex";
-        updateMaskToggleButtons(); // Обновляем подсветку
-      }
+          await saveImageState(); // Сохраняем изменение типа маски
+        }
+      });
       
       // Создаем элементы управления в зависимости от типа маски
       if (currentMaskType === 'rect') {
@@ -1321,6 +1567,8 @@ function applyImageLockVisual(container, lockerId, lockerName) {
     async function exitCropMode() {
       
       isCropping = false;
+
+      killImagePanel();
       
       // ✨ CRITICAL: Write closure modifications back to CSS/Dataset (source of truth)
       // During crop mode, we only modified closures for performance
@@ -1377,11 +1625,6 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       // Re-enable click target after crop mode
       if (clickTarget) {
         clickTarget.style.pointerEvents = "auto";
-      }
-      
-      // Прячем UI переключатели
-      if (maskTypeToggle) {
-        maskTypeToggle.style.display = "none";
       }
       
       ui.notifications.info("Crop mode deactivated (image unlocked)");
@@ -1827,9 +2070,9 @@ function applyImageLockVisual(container, lockerId, lockerName) {
       const clickTarget = container.querySelector(".wbe-image-click-target");
       updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
       
-      // Set move cursor on click target when selected
+      // ✅ FIX: Enable click target pointer events for dragging/scaling/resizing
       if (clickTarget) {
-        // clickTarget.style.cursor = "move"; // Removed move cursor
+        clickTarget.style.setProperty("pointer-events", "auto", "important");
       }
       
       resizeHandle.style.display = "flex";
@@ -2365,13 +2608,6 @@ function updateImageElement(existing, imageData) {
     const clickTarget = container.querySelector(".wbe-image-click-target");
     if (clickTarget) {
       updateClickTarget(clickTarget, imageElement, maskType, crop, circleOffset, circleRadius, scale);
-    } else {
-    }
-    
-    // Обновляем переключатель типа маски
-    const maskTypeToggle = container.querySelector(".wbe-mask-type-toggle");
-    if (maskTypeToggle) {
-      updateMaskTypeToggle(maskTypeToggle, maskType);
     }
     
     // Обновляем crop handles
@@ -2394,7 +2630,6 @@ function updateImageElement(existing, imageData) {
     const permanentBorder = container.querySelector(".wbe-image-permanent-border");
     const selectionBorder = container.querySelector(".wbe-image-selection-border");
     const resizeHandle = container.querySelector(".wbe-image-resize-handle");
-    const maskTypeToggle = container.querySelector(".wbe-mask-type-toggle");
     const clickTarget = container.querySelector(".wbe-image-click-target");
     
     // ✨ CRITICAL: If this user is cropping (locked by them), force isCropping to true
@@ -2441,17 +2676,15 @@ function updateImageElement(existing, imageData) {
     }
     
     if (isCropping) {
-      // Crop режим - прячем resize handle и gray border, показываем переключатель, фиолетовая рамка, cursor default
+      // Crop режим - прячем resize handle и gray border, фиолетовая рамка, cursor default
       if (resizeHandle) resizeHandle.style.display = "none";
       if (permanentBorder) permanentBorder.style.display = "none"; // ✨ Hide gray border during crop
       if (selectionBorder) selectionBorder.style.borderColor = "rgba(128, 0, 255, 0.9)"; // Фиолетовый для crop mode
-      if (maskTypeToggle) maskTypeToggle.style.display = "flex";
       container.style.setProperty("cursor", "default", "important"); // Default cursor для crop mode
     } else {
-      // Не crop режим - показываем resize handle если выделена, прячем переключатель, обычная синяя рамка
+      // Не crop режим - показываем resize handle если выделена, обычная синяя рамка
       if (isSelected && resizeHandle) resizeHandle.style.display = "flex";
       if (selectionBorder) selectionBorder.style.borderColor = "#4a9eff";
-      if (maskTypeToggle) maskTypeToggle.style.display = "none";
     }
   }
   
@@ -2564,32 +2797,6 @@ function updateImageElement(existing, imageData) {
     
     updateImageResizeHandle(resizeHandle, imageElement, data.maskType, data.crop, data.circleOffset, data.circleRadius, data.scale);
   }
-  
-  // Глобальная функция для обновления кнопок переключателя маски
-  function updateMaskTypeToggleGlobal(container, maskType) {
-    const maskTypeToggle = container.querySelector(".wbe-mask-type-toggle");
-    if (!maskTypeToggle) return;
-    
-    const rectBtn = maskTypeToggle.querySelector(".wbe-mask-btn");
-    const circleBtn = maskTypeToggle.querySelector(".wbe-mask-btn:last-child");
-    
-    if (rectBtn && circleBtn) {
-      if (maskType === 'rect') {
-        rectBtn.style.backgroundColor = "#4a9eff";
-        rectBtn.style.color = "white";
-        circleBtn.style.backgroundColor = "#333";
-        circleBtn.style.color = "white";
-      } else if (maskType === 'circle') {
-        circleBtn.style.backgroundColor = "#4a9eff";
-        circleBtn.style.color = "white";
-        rectBtn.style.backgroundColor = "#333";
-        rectBtn.style.color = "white";
-      }
-      
-  
-    }
-}
-
 
 // Функция для обновления рамок картинки
 function updateImageBorder(border, imageElement, maskType, crop, circleOffset, circleRadius, scale) {
@@ -2662,26 +2869,6 @@ function updateImageBorder(border, imageElement, maskType, crop, circleOffset, c
       
       resizeHandle.style.left = `${handleX * scale - 6}px`;
       resizeHandle.style.top = `${handleY * scale - 6}px`;
-    }
-  }
-  
-  // Функция для обновления переключателя типа маски
-  function updateMaskTypeToggle(maskTypeToggle, maskType) {
-    const rectBtn = maskTypeToggle.querySelector(".wbe-mask-rect-btn");
-    const circleBtn = maskTypeToggle.querySelector(".wbe-mask-circle-btn");
-    
-    if (rectBtn && circleBtn) {
-      if (maskType === 'rect') {
-        rectBtn.style.backgroundColor = "#4a9eff";
-        rectBtn.style.color = "white";
-        circleBtn.style.backgroundColor = "transparent";
-        circleBtn.style.color = "#4a9eff";
-      } else if (maskType === 'circle') {
-        circleBtn.style.backgroundColor = "#4a9eff";
-        circleBtn.style.color = "white";
-        rectBtn.style.backgroundColor = "transparent";
-        rectBtn.style.color = "#4a9eff";
-      }
     }
   }
   
