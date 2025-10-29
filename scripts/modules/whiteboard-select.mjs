@@ -34,6 +34,9 @@ import {
   ZIndexManager
 } from "../main.mjs";
 
+// Import frozen image functions from image module
+import { ImageTools } from "./whiteboard-image.mjs";
+
 // Mass selection state
 let massSelectionMode = false;
 let selectedObjects = new Set(); // Set of object IDs
@@ -620,9 +623,53 @@ function releaseBoundingBox(e) {
   // Hide selection box
   selectionBox.style.display = "none";
   
-  // Update indicator
-  updateSelectionIndicator();
-  
+  // Check if only one object is selected
+  if (selectedObjects.size === 1) {
+    // Convert mass selection to regular selection
+    const selectedId = Array.from(selectedObjects)[0];
+    const container = document.getElementById(selectedId);
+    
+    if (container) {
+      // Clear mass selection first
+      clearMassSelection();
+      
+      // Trigger regular selection based on object type
+      if (container.classList.contains("wbe-canvas-text-container")) {
+        // For text, we need to find and call the selectText function
+        // Since we can't directly access it, we'll simulate a click on the text element
+        const textElement = container.querySelector(".wbe-canvas-text");
+        if (textElement) {
+          // Create a synthetic click event
+          const clickEvent = new MouseEvent("mousedown", {
+            bubbles: true,
+            cancelable: true,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            button: 0
+          });
+          textElement.dispatchEvent(clickEvent);
+        }
+      } else if (container.classList.contains("wbe-canvas-image-container")) {
+        // For images, we need to find and call the selectImage function
+        // Since we can't directly access it, we'll simulate a click on the click target
+        const clickTarget = container.querySelector(".wbe-image-click-target");
+        if (clickTarget) {
+          // Create a synthetic click event
+          const clickEvent = new MouseEvent("mousedown", {
+            bubbles: true,
+            cancelable: true,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            button: 0
+          });
+          clickTarget.dispatchEvent(clickEvent);
+        }
+      }
+    }
+  } else {
+    // Multiple objects selected - keep mass selection
+    updateSelectionIndicator();
+  }
 }
 
 /**
@@ -642,6 +689,11 @@ function updateSelectionFromBox(left, top, width, height) {
   
   // Check which objects intersect with selection box
   allContainers.forEach(container => {
+    // Skip frozen images
+    if (container.classList.contains("wbe-canvas-image-container") && ImageTools.isImageFrozen(container.id)) {
+      return; // Skip frozen images completely
+    }
+    
     const rect = container.getBoundingClientRect();
     
     // For images, check if the selection box intersects with the click target area (cropped and scaled)
@@ -819,6 +871,11 @@ function selectAllObjects() {
   
   // Select all
   allContainers.forEach(container => {
+    // Skip frozen images
+    if (container.classList.contains("wbe-canvas-image-container") && ImageTools.isImageFrozen(container.id)) {
+      return; // Skip frozen images completely
+    }
+    
     selectedObjects.add(container.id);
     container.classList.add("wbe-mass-selected");
   });
