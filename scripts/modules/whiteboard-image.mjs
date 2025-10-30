@@ -18,6 +18,28 @@ const SCALE_SENSITIVITY = 0.005; // Sensitivity for image scaling
 // Freeze animation constants
 const FREEZE_FADE_DURATION = 0.5; // Duration in seconds for freeze fade animation
 
+// Inject CSS for frozen selection styling
+if (!document.querySelector('#wbe-frozen-selection-styles')) {
+  const style = document.createElement('style');
+  style.id = 'wbe-frozen-selection-styles';
+  style.textContent = `
+    .wbe-image-selection-border.wbe-frozen-selected {
+      border-color: #666666 !important;
+      border-width: 2px !important;
+      border-style: solid !important;
+      opacity: 1 !important;
+      z-index: 1003 !important;
+    }
+    
+    .wbe-image-frozen .wbe-image-selection-border.wbe-frozen-selected {
+      border-color: #666666 !important;
+      border-width: 2px !important;
+      z-index: 1003 !important;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 let copiedImageData = null; // Буфер для копирования картинок
 let selectedImageId = null; // ID выделенного изображения
 let isScalingImage = false; // Flag to prevent deselection during scaling
@@ -43,8 +65,14 @@ function setImageFrozen(id, frozen) {
     imageData.isFrozen = frozen;
     imageData.container.dataset.frozen = frozen ? "true" : "false";
 
-    // Apply CSS pointer-events as backup protection
-    imageData.container.style.pointerEvents = frozen ? "none" : "";
+    // NEW: Allow clicks but block drag/resize through controller validation
+    // Remove blanket pointer-events blocking to enable click interactions
+    if (frozen) {
+      // Don't set pointer-events: none - let controllers handle interaction blocking
+      imageData.container.style.pointerEvents = "";
+    } else {
+      imageData.container.style.pointerEvents = "";
+    }
 
     // Update visual indicator
     if (frozen) {
@@ -309,6 +337,10 @@ class ImageDragController {
       if (window.wbeImageControlPanel && window.wbeImageControlPanel.contains(event.target)) {
         return;
       }
+      
+      if (window.wbeFrozenControlPanel && window.wbeFrozenControlPanel.contains(event.target)) {
+        return;
+      }
 
       // Handle selection logic if image not selected
       const isSelected = this.container.dataset.selected === "true";
@@ -536,9 +568,22 @@ class SelectionController {
    */
   select() {
     try {
-      // Prevent selection if already selected
-      if (this.selectionState.selected) {
+      // ✅ FIX: Check DOM state to ensure consistency before early return
+      const domSelected = this.container.dataset.selected === "true";
+
+      // Prevent selection if already selected (check both internal and DOM state)
+      if (this.selectionState.selected && domSelected) {
         return;
+      }
+
+      // ✅ FIX: If there's a state mismatch, reset internal state to match DOM
+      if (this.selectionState.selected !== domSelected) {
+        // Silently fix state mismatch - this can happen due to external DOM manipulation
+        this.selectionState.selected = domSelected;
+        if (domSelected) {
+          // DOM says selected but we're in select() - this shouldn't happen, but handle it
+          return;
+        }
       }
 
       // Check if container is locked by another user
@@ -580,10 +625,22 @@ class SelectionController {
         this.visualElements.border.style.display = 'block';
       }
 
-      // Hide permanent border when selected (legacy system coordination)
+      // ✅ FIX: Keep permanent border visible like text elements do
+      // Don't hide permanent border - let both borders show simultaneously
       const permanentBorder = this.container.querySelector('.wbe-image-permanent-border');
       if (permanentBorder) {
-        permanentBorder.style.display = 'none';
+        // Ensure permanent border is visible and updated
+        permanentBorder.style.display = 'block';
+        const cropData = getImageCropData(this.imageElement);
+        updateImageBorder(
+          permanentBorder,
+          this.imageElement,
+          cropData.maskType,
+          cropData.crop,
+          cropData.circleOffset,
+          cropData.circleRadius,
+          cropData.scale
+        );
       }
 
       // Trigger callbacks
@@ -615,8 +672,13 @@ class SelectionController {
     try {
       // Prevent deselection if not selected
       if (!this.selectionState.selected) {
+        console.log('[DEBUG] SelectionController deselect called but not selected:', this.container.id);
         return;
       }
+
+
+
+
 
       // Update selection state
       this.selectionState.selected = false;
@@ -633,6 +695,7 @@ class SelectionController {
       // ✅ FIX: Restore permanent border when deselected (legacy system coordination)
       const permanentBorder = this.container.querySelector('.wbe-image-permanent-border');
       if (permanentBorder) {
+
         permanentBorder.style.display = 'block';
         // Update permanent border with current crop data
         const cropData = getImageCropData(this.imageElement);
@@ -895,6 +958,443 @@ class SelectionController {
   }
 }
 
+/* ======================== Frozen Selection Functions ======================== */
+
+/**
+ * Show frozen selection visual state for a frozen image
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ */
+function showFrozenSelection(container) {
+  try {
+    if (!container) {
+      console.error('[showFrozenSelection] Invalid container provided');
+      return;
+    }
+
+    const imageElement = container.querySelector('.wbe-canvas-image');
+    if (!imageElement) {
+      console.error('[showFrozenSelection] Image element not found');
+      return;
+    }
+
+    // Check if image is actually frozen
+    if (!isImageFrozen(container.id)) {
+      console.warn('[showFrozenSelection] Image is not frozen:', container.id);
+      return;
+    }
+
+    // Find or create selection border
+    let selectionBorder = container.querySelector('.wbe-image-selection-border');
+    if (!selectionBorder) {
+      selectionBorder = document.createElement('div');
+      selectionBorder.className = 'wbe-image-selection-border';
+      selectionBorder.style.cssText = `
+        position: absolute;
+        left: 0;
+        top: 0;
+        border: 2px solid #666666;
+        pointer-events: none;
+        display: block;
+        z-index: 1003;
+      `;
+      container.appendChild(selectionBorder);
+    }
+
+    // Apply frozen selection styling (dark gray border)
+    selectionBorder.classList.add('wbe-frozen-selected');
+    selectionBorder.style.borderColor = '#666666'; // Dark gray for frozen state
+    selectionBorder.style.borderWidth = '2px';
+    selectionBorder.style.borderStyle = 'solid';
+    selectionBorder.style.zIndex = '1003'; // Ensure it's above permanent border
+    selectionBorder.style.display = 'block';
+    
+    // Mark container as selected so global selection handler can deselect it
+    container.dataset.selected = "true";
+    
+    console.log('[showFrozenSelection] Applied frozen styling to:', container.id, {
+      borderColor: selectionBorder.style.borderColor,
+      borderWidth: selectionBorder.style.borderWidth,
+      classes: selectionBorder.className,
+      display: selectionBorder.style.display
+    });
+
+    // Get current crop data
+    const cropData = getImageCropData(imageElement);
+
+    // Ensure permanent border is visible and updated (like normal selection does)
+    const permanentBorder = container.querySelector('.wbe-image-permanent-border');
+    if (permanentBorder) {
+      permanentBorder.style.display = 'block';
+      updateImageBorder(
+        permanentBorder,
+        imageElement,
+        cropData.maskType,
+        cropData.crop,
+        cropData.circleOffset,
+        cropData.circleRadius,
+        cropData.scale
+      );
+    }
+
+    // Update frozen selection border size to match permanent border
+    updateImageBorder(
+      selectionBorder,
+      imageElement,
+      cropData.maskType,
+      cropData.crop,
+      cropData.circleOffset,
+      cropData.circleRadius,
+      cropData.scale
+    );
+
+    // Hide resize handle (blue gizmo) when frozen
+    const resizeHandle = container.querySelector('.wbe-image-resize-handle');
+    if (resizeHandle) {
+      resizeHandle.style.display = 'none';
+    }
+
+    // Mark container as having frozen selection
+    container.dataset.frozenSelected = "true";
+
+  } catch (error) {
+    console.error('[showFrozenSelection] Failed to show frozen selection:', error);
+  }
+}
+
+/**
+ * Hide frozen selection visual state
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ */
+function hideFrozenSelection(container) {
+  try {
+    if (!container) {
+      console.error('[hideFrozenSelection] Invalid container provided');
+      return;
+    }
+
+    const selectionBorder = container.querySelector('.wbe-image-selection-border');
+    if (selectionBorder) {
+      console.log('[hideFrozenSelection] Hiding frozen selection for:', container.id);
+      
+      // Remove frozen selection styling
+      selectionBorder.classList.remove('wbe-frozen-selected');
+      selectionBorder.style.display = 'none';
+      
+      // Reset border color to normal blue (in case it gets reused)
+      selectionBorder.style.borderColor = '#4a9eff';
+      selectionBorder.style.borderWidth = '1px';
+    }
+
+    // Restore resize handle if image becomes selected again
+    const resizeHandle = container.querySelector('.wbe-image-resize-handle');
+    if (resizeHandle && container.dataset.selected === "true") {
+      resizeHandle.style.display = 'flex';
+    }
+
+    // Remove frozen selection marker
+    delete container.dataset.frozenSelected;
+    
+    // Remove selected dataset so global selection handler doesn't see it as selected
+    delete container.dataset.selected;
+
+  } catch (error) {
+    console.error('[hideFrozenSelection] Failed to hide frozen selection:', error);
+  }
+}
+
+/* ======================== End Frozen Selection Functions ======================== */
+
+/* ======================== Frozen Control Panel Functions ======================== */
+
+/**
+ * Create frozen control panel component with specialized styling
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ * @returns {HTMLElement} The created frozen panel element
+ */
+function createFrozenControlPanel(container) {
+  try {
+    if (!container) {
+      console.error('[createFrozenControlPanel] Invalid container provided');
+      return null;
+    }
+
+    const panel = document.createElement("div");
+    panel.className = "wbe-image-control-panel wbe-frozen-panel";
+    panel.style.cssText = `
+      position: fixed;
+      background: #f8f8f8;
+      border: 2px solid #666666;
+      border-radius: 14px;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+      padding: 8px;
+      z-index: 10000;
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      
+      aspect-ratio: 3 / 1;
+      transform: translateX(-50%) scale(.9) translateY(12px);
+      opacity: 0;
+      transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+    `;
+
+    const toolbar = document.createElement("div");
+    toolbar.style.cssText = `
+      display: flex;
+      gap: 12px;
+      position: relative;
+    `;
+
+    // Create unfreeze button with unlock icon
+    const unfreezeBtn = document.createElement("button");
+    unfreezeBtn.type = "button";
+    unfreezeBtn.className = "wbe-frozen-unfreeze-btn";
+    unfreezeBtn.style.cssText = `
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 40px;
+      padding: 0;
+      border-radius: 10px;
+      border: 2px solid #666666;
+      background: #ffffff;
+      font-size: 16px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+    `;
+    unfreezeBtn.title = "Unfreeze image";
+
+    const unfreezeIcon = document.createElement("i");
+    unfreezeIcon.className = "fas fa-unlock";
+    unfreezeIcon.style.cssText = "font-size: 18px; color: #666666;";
+    unfreezeBtn.appendChild(unfreezeIcon);
+
+    // Add hover effects
+    unfreezeBtn.addEventListener("mouseenter", () => {
+      unfreezeBtn.style.background = "#e6e6e6";
+      unfreezeIcon.style.color = "#333333";
+    });
+    unfreezeBtn.addEventListener("mouseleave", () => {
+      unfreezeBtn.style.background = "#ffffff";
+      unfreezeIcon.style.color = "#666666";
+    });
+
+    toolbar.appendChild(unfreezeBtn);
+    panel.appendChild(toolbar);
+
+    // Store reference to unfreeze button for external access
+    panel.unfreezeBtn = unfreezeBtn;
+
+    console.log('[createFrozenControlPanel] Created frozen panel for:', container.id);
+    return panel;
+
+  } catch (error) {
+    console.error('[createFrozenControlPanel] Failed to create frozen panel:', error);
+    return null;
+  }
+}
+
+/**
+ * Show frozen control panel for a frozen image
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ * @param {Function} onUnfreeze - Callback function for unfreeze action
+ */
+function showFrozenControlPanel(container, onUnfreeze) {
+  try {
+    if (!container) {
+      console.error('[showFrozenControlPanel] Invalid container provided');
+      return;
+    }
+
+    const imageElement = container.querySelector('.wbe-canvas-image');
+    if (!imageElement) {
+      console.error('[showFrozenControlPanel] Image element not found');
+      return;
+    }
+
+    // Check if image is actually frozen
+    if (!isImageFrozen(container.id)) {
+      console.warn('[showFrozenControlPanel] Image is not frozen:', container.id);
+      return;
+    }
+
+    // Kill any existing panel first
+    killFrozenControlPanel();
+
+    // Create the frozen panel
+    const panel = createFrozenControlPanel(container);
+    if (!panel) {
+      console.error('[showFrozenControlPanel] Failed to create panel');
+      return;
+    }
+
+    // Set up unfreeze button click handler
+    if (panel.unfreezeBtn) {
+      panel.unfreezeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('[showFrozenControlPanel] Unfreeze button clicked for:', container.id);
+        
+        // Add visual feedback during unfreeze process
+        panel.unfreezeBtn.style.opacity = '0.6';
+        panel.unfreezeBtn.style.transform = 'scale(0.95)';
+        
+        // Use the provided callback or default to handleUnfreezeAction
+        const unfreezeHandler = onUnfreeze || handleUnfreezeAction;
+        
+        // Execute unfreeze with slight delay for visual feedback
+        setTimeout(() => {
+          unfreezeHandler(container);
+        }, 100);
+      });
+    }
+
+    // Position panel relative to image
+    const updatePanelPosition = () => {
+      const rect = imageElement.getBoundingClientRect();
+      panel.style.left = `${rect.left + rect.width / 2}px`;
+      panel.style.top = `${rect.top - 110}px`;
+    };
+
+    // Add panel to DOM
+    document.body.appendChild(panel);
+    updatePanelPosition();
+
+    // Animate panel in
+    requestAnimationFrame(() => {
+      panel.style.transform = "translateX(-50%) scale(1) translateY(32px)";
+      panel.style.opacity = "1";
+    });
+
+    // Set up click outside handler
+    const onOutsideClick = (ev) => {
+      if (panel.contains(ev.target)) return;
+      if (container?.contains(ev.target)) return;
+      
+      // Clicking outside - hide panel
+      killFrozenControlPanel();
+    };
+
+    // Set up escape key handler
+    const onEscapeKey = (ev) => {
+      if (ev.key === "Escape") {
+        killFrozenControlPanel();
+      }
+    };
+
+    // Prevent panel clicks from bubbling
+    panel.addEventListener("mousedown", (ev) => ev.stopPropagation());
+
+    // Install event listeners with delay to avoid immediate triggering
+    setTimeout(() => {
+      document.addEventListener("mousedown", onOutsideClick, true);
+      document.addEventListener("keydown", onEscapeKey);
+    }, 0);
+
+    // Store cleanup function and position updater
+    panel.cleanup = () => {
+      try {
+        document.removeEventListener("mousedown", onOutsideClick, true);
+        document.removeEventListener("keydown", onEscapeKey);
+        panel.remove();
+        window.wbeFrozenControlPanel = null;
+        window.wbeFrozenControlPanelUpdate = null;
+      } catch (error) {
+        console.error('[showFrozenControlPanel] Cleanup failed:', error);
+      }
+    };
+
+    // Store global references
+    window.wbeFrozenControlPanel = panel;
+    window.wbeFrozenControlPanelUpdate = updatePanelPosition;
+
+    console.log('[showFrozenControlPanel] Shown frozen panel for:', container.id);
+
+  } catch (error) {
+    console.error('[showFrozenControlPanel] Failed to show frozen panel:', error);
+  }
+}
+
+/**
+ * Hide and cleanup frozen control panel
+ */
+function killFrozenControlPanel() {
+  const panel = window.wbeFrozenControlPanel;
+  if (panel && typeof panel.cleanup === "function") {
+    try {
+      panel.cleanup();
+    } catch (error) {
+      console.error('[killFrozenControlPanel] Cleanup failed:', error);
+    }
+  }
+  // Ensure global reference is cleared even if cleanup fails
+  window.wbeFrozenControlPanel = null;
+  window.wbeFrozenControlPanelUpdate = null;
+}
+
+/**
+ * Handle unfreeze action from frozen control panel
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ */
+function handleUnfreezeAction(container) {
+  try {
+    if (!container) {
+      console.error('[handleUnfreezeAction] Invalid container provided');
+      return;
+    }
+
+    const imageElement = container.querySelector('.wbe-canvas-image');
+    if (!imageElement) {
+      console.error('[handleUnfreezeAction] Image element not found');
+      return;
+    }
+
+    console.log('[handleUnfreezeAction] Unfreezing image:', container.id);
+
+    // Hide frozen panel first
+    killFrozenControlPanel();
+
+    // Hide frozen selection state
+    hideFrozenSelection(container);
+
+    // Remove frozen state from registry
+    setImageFrozen(container.id, false);
+
+    // Transition to normal selection state
+    const imageData = imageRegistry.get(container.id);
+    if (imageData && imageData.selectFn) {
+      // Select the image with normal selection
+      // The selectFn() will handle showing the normal control panel via SelectionController
+      imageData.selectFn();
+    }
+
+    console.log('[handleUnfreezeAction] Successfully unfroze image:', container.id);
+
+  } catch (error) {
+    console.error('[handleUnfreezeAction] Failed to unfreeze image:', error);
+  }
+}
+
+/**
+ * Update frozen panel position when image moves or canvas changes
+ * Integrates with existing panel management system
+ */
+function updateFrozenPanelPosition() {
+  if (window.wbeFrozenControlPanelUpdate) {
+    try {
+      window.wbeFrozenControlPanelUpdate();
+    } catch (error) {
+      console.error('[updateFrozenPanelPosition] Failed to update position:', error);
+    }
+  }
+}
+
+/* ======================== End Frozen Control Panel Functions ======================== */
+
 class ResizeController {
   constructor(container, imageElement, options = {}) {
     this.container = container;
@@ -955,6 +1455,10 @@ class ResizeController {
 
     // Проверки из оригинального кода
     if (window.wbeImageControlPanel && window.wbeImageControlPanel.contains(e.target)) {
+      return;
+    }
+    
+    if (window.wbeFrozenControlPanel && window.wbeFrozenControlPanel.contains(e.target)) {
       return;
     }
 
@@ -1035,7 +1539,10 @@ class ResizeController {
 
   // Показать/скрыть handle
   show() {
-    if (this.handle) this.handle.style.display = 'flex';
+    // Only show if not frozen
+    if (this.handle && !isImageFrozen(this.container.id)) {
+      this.handle.style.display = 'flex';
+    }
   }
 
   hide() {
@@ -1086,6 +1593,8 @@ function killImageControlPanel() {
   if (p && typeof p.cleanup === "function") {
     try { p.cleanup(); } catch { }
   }
+  // ✅ FIX: Ensure global reference is cleared even if cleanup fails
+  window.wbeImageControlPanel = null;
 }
 
 async function showImageControlPanel(imageElement, container, currentMaskType, callbacks) {
@@ -1421,26 +1930,19 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
       // Set image as frozen in registry
       setImageFrozen(container.id, true);
 
-      // Start fade animation for panel and border
+      // Start fade animation for panel only
       const fadeDuration = FREEZE_FADE_DURATION * 1000; // Convert to milliseconds
 
       // Fade out the panel
       panel.style.transition = `opacity ${FREEZE_FADE_DURATION}s ease-out`;
       panel.style.opacity = "0";
 
-      // Fade out the selection border
-      const selectionBorder = container.querySelector(".wbe-image-selection-border");
-      if (selectionBorder) {
-        selectionBorder.style.transition = `opacity ${FREEZE_FADE_DURATION}s ease-out`;
-        selectionBorder.style.opacity = "0";
-      }
-
-      // After fade animation completes, deselect the image
+      // After fade animation completes, just deselect peacefully
       setTimeout(() => {
-        // Kill the panel
+        // Kill the normal panel
         killImageControlPanel();
 
-        // Deselect the image
+        // Deselect the image - it should stay deselected after freeze
         const imageData = imageRegistry.get(container.id);
         if (imageData && imageData.deselectFn) {
           imageData.deselectFn();
@@ -1448,19 +1950,12 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
       }, fadeDuration);
 
     } else {
-      // Unfreeze the image - restore interactions
-      setButtonActive(lockBtn, false);
-      lockBtn.innerHTML = '<i class="fas fa-lock"></i>';
-      lockBtn.title = "Freeze image";
-
-      // Show all buttons again
-      const allButtons = toolbar.querySelectorAll('.wbe-image-toolbar-btn');
-      allButtons.forEach(btn => {
-        btn.style.display = 'flex';
-      });
-
-      // Set image as unfrozen in registry
-      setImageFrozen(container.id, false);
+      // This branch should not be reached in the new system
+      // Unfreezing is now handled by the frozen panel's unfreeze button
+      console.warn('[lockBtn] Unfreeze action should be handled by frozen panel');
+      
+      // Fallback: use the new unfreeze handler
+      handleUnfreezeAction(container);
     }
   });
 
@@ -1555,7 +2050,6 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
     document.removeEventListener("keydown", onKey);
 
     closeSubpanel();
-    console.log("🎯 CLEANUP CALLED");
     // Exit crop mode if still active
     if (isCropModeActive) {
       isCropModeActive = false;
@@ -1728,6 +2222,9 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Delete" || e.key === "Backspace") {
     e.preventDefault();
     e.stopPropagation();
+
+    // ✅ FIX: Kill image control panel before deletion
+    killImageControlPanel();
 
     // Clear runtime caches FIRST to prevent resurrection
     clearImageCaches(selectedImageId);
@@ -2063,12 +2560,12 @@ function removeImageLockVisual(container) {
     // container.style.setProperty("pointer-events", "auto", "important");
     // container.style.setProperty("cursor", "move", "important");
 
-    if (permanentBorder) permanentBorder.style.display = "none";
+    // ✅ FIX: Let SelectionController manage permanent border
     if (selectionBorder) {
       selectionBorder.style.display = "block";
       selectionBorder.style.borderColor = "#4a9eff"; // Стандартный цвет выделения
     }
-    if (resizeHandle) {
+    if (resizeHandle && !isImageFrozen(container.id)) {
       resizeHandle.style.display = "flex";
     }
   } else {
@@ -2076,7 +2573,7 @@ function removeImageLockVisual(container) {
     container.style.removeProperty("pointer-events");
     container.style.removeProperty("cursor");
 
-    if (permanentBorder) permanentBorder.style.display = "block";
+    // ✅ FIX: Let SelectionController manage permanent border
     if (selectionBorder) selectionBorder.style.display = "none";
     if (resizeHandle) resizeHandle.style.display = "none";
 
@@ -2102,11 +2599,17 @@ function installGlobalImageSelectionHandler() {
 
 
   document.addEventListener("mousedown", async (e) => {
+
+
     if (e.button !== 0) return; // Only left click
 
-    // ✅ FIX: Prevent image deselection when clicking ImageControlPanel
+    // ✅ FIX: Prevent image deselection when clicking ImageControlPanel or FrozenControlPanel
     if (window.wbeImageControlPanel && window.wbeImageControlPanel.contains(e.target)) {
       return; // Don't process image selection when clicking ImageControlPanel
+    }
+    
+    if (window.wbeFrozenControlPanel && window.wbeFrozenControlPanel.contains(e.target)) {
+      return; // Don't process image selection when clicking FrozenControlPanel
     }
 
     // ✅ FIX: Prevent dual selection - check if clicking on other element types first
@@ -2114,15 +2617,25 @@ function installGlobalImageSelectionHandler() {
     const cardContainer = e.target.closest(".wbe-canvas-card-container");
     const colorPanel = e.target.closest(".wbe-color-picker-panel");
 
+    // ✅ FIX: Text elements have pointer-events: none, so we need to check coordinates
+    let clickedOnText = !!textContainer;
+    if (!clickedOnText && e.target.tagName === 'CANVAS') {
+      // Check if there's a text element at these coordinates
+      const elementsAtPoint = document.elementsFromPoint(e.clientX, e.clientY);
+      clickedOnText = elementsAtPoint.some(el =>
+        el.classList.contains('wbe-canvas-text-container') ||
+        el.classList.contains('wbe-canvas-text')
+      );
+
+    }
+
     // If clicking on text, cards, or color panels, don't process image selection
-    if (textContainer || cardContainer || colorPanel) {
-      // Only deselect images if not clicking on an already selected element
-      if (!textContainer?.dataset.selected && !cardContainer?.dataset.selected) {
-        // Deselect all images when clicking on other element types
-        for (const [id, imageData] of imageRegistry) {
-          if (imageData.container.dataset.selected === "true") {
-            await imageData.deselectFn();
-          }
+    if (clickedOnText || cardContainer || colorPanel) {
+      // ✅ FIX: Always deselect images when clicking on text, regardless of text selection state
+      for (const [id, imageData] of imageRegistry) {
+        if (imageData.container.dataset.selected === "true") {
+
+          await imageData.deselectFn();
         }
       }
       return; // Let other handlers deal with text/card selection
@@ -2137,14 +2650,20 @@ function installGlobalImageSelectionHandler() {
       .filter(([id, data]) => data.container.dataset.selected === "true")
       .map(([id]) => id);
 
+    // ✅ FIX: Check images in z-index order (highest first) for proper overlapping handling
+    const sortedImages = Array.from(imageRegistry.entries()).sort(([idA, dataA], [idB, dataB]) => {
+      const zIndexA = parseInt(dataA.container.style.zIndex) || 0;
+      const zIndexB = parseInt(dataB.container.style.zIndex) || 0;
+      return zIndexB - zIndexA; // Highest z-index first
+    });
+
     // Check which image (if any) was clicked
-    for (const [id, imageData] of imageRegistry) {
+    for (const [id, imageData] of sortedImages) {
       const container = imageData.container;
 
-      // EARLY EXIT: Skip frozen images
-      if (imageData.isFrozen) {
-        continue; // This image is completely ignored
-      }
+      // NEW: Allow frozen images to be clicked for status display
+      // Frozen images can be clicked but drag/resize is blocked in controllers
+      // (No early exit for frozen images)
 
       // Skip locked images
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
@@ -2275,10 +2794,8 @@ function installGlobalImageSelectionHandler() {
           if (imageData.container.dataset.selected === "true") {
             await imageData.deselectFn(); // Await async deselect
           }
-          // ✅ SAFEGUARD: Also check SelectionController state and force consistency
-          if (imageData.selectionController && imageData.selectionController.isSelected()) {
-            imageData.selectionController.deselect();
-          }
+          // ✅ REMOVED: Redundant SelectionController check that caused state mismatch loop
+          // The deselectFn() already handles SelectionController deselection properly
         }
       }
     }
@@ -2290,6 +2807,7 @@ function installGlobalImageSelectionHandler() {
 /* ----------------------- Canvas Text/Image Functions ------------------ */
 
 function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, right: 0, bottom: 0, left: 0 }, maskType = 'rect', circleOffset = { x: 0, y: 0 }, circleRadiusParam = null, existingZIndex = null) {
+  console.log('[DEBUG] Creating image element:', { id, src, left, top, scale, crop, maskType });
   const layer = getOrCreateLayer();
   if (!layer) return;
 
@@ -2415,13 +2933,33 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
   });
 
   imageElement.addEventListener("error", () => {
-    // Image failed to load
+    // Image failed to load - show error state with proper dimensions
+    console.error(`[WB-E] Failed to load image: ${src}`);
+
+    // Set a reasonable fallback size for the error state
+    imageElement.style.width = "200px";
+    imageElement.style.height = "150px";
     imageElement.style.background = "linear-gradient(45deg, #ffcccc 25%, transparent 25%), linear-gradient(-45deg, #ffcccc 25%, transparent 25%)";
     imageElement.style.backgroundSize = "20px 20px";
+    imageElement.style.opacity = "1";
+
+    // Update loading indicator to show error
     loadingIndicator.innerHTML = "❌";
     loadingIndicator.style.animation = "none";
     loadingIndicator.style.border = "2px solid #ff4444";
-    console.error(`[WB-E] Failed to load image: ${src}`);
+    loadingIndicator.style.backgroundColor = "rgba(255, 255, 255, 0.9)";
+
+    // Update UI elements with fallback dimensions
+    setTimeout(() => {
+      updateClipPath();
+      updateSelectionBorderSize();
+      updateHandlePosition();
+
+      // Update click target with error state dimensions
+      const cropData = getImageCropData(imageElement);
+      const clickTarget = container.querySelector(".wbe-image-click-target");
+      updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+    }, 100);
   });
 
   // Start loading the image
@@ -2760,28 +3298,37 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       killImageControlPanel();
     },
     showControlPanel: (imageElement, container) => {
-      showImageControlPanel(imageElement, container, currentMaskType, {
-        onCropModeToggle: async (enabled) => {
-          if (enabled) {
-            await enterCropMode();
-          } else {
-            await exitCropMode();
-          }
-        },
-        onMaskTypeChange: async (newMaskType) => {
-          currentMaskType = newMaskType;
-          updateMaskType();
+      // Check if image is frozen and show appropriate panel
+      if (isImageFrozen(container.id)) {
+        // Show frozen control panel for frozen images
+        showFrozenControlPanel(container);
+      } else {
+        // Show normal control panel for non-frozen images
+        showImageControlPanel(imageElement, container, currentMaskType, {
+          onCropModeToggle: async (enabled) => {
+            if (enabled) {
+              await enterCropMode();
+            } else {
+              await exitCropMode();
+            }
+          },
+          onMaskTypeChange: async (newMaskType) => {
+            currentMaskType = newMaskType;
+            updateMaskType();
 
-          if (window.wbeImageControlPanel?.updatePanelState) {
-            window.wbeImageControlPanel.updatePanelState(newMaskType);
-          }
+            if (window.wbeImageControlPanel?.updatePanelState) {
+              window.wbeImageControlPanel.updatePanelState(newMaskType);
+            }
 
-          await saveImageState();
-        }
-      });
+            await saveImageState();
+          }
+        });
+      }
     },
     hideControlPanel: () => {
+      // Hide both normal and frozen panels
       killImageControlPanel();
+      killFrozenControlPanel();
     },
     clearMassSelection: () => {
       if (window.MassSelection && window.MassSelection.selectedCount > 0) {
@@ -3097,7 +3644,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     cleanupCircleDrag();
 
     // Показываем resize handle и восстанавливаем cursor
-    if (selectionController.isSelected()) {
+    if (selectionController.isSelected() && !isImageFrozen(container.id)) {
       resizeController.handle.style.display = "flex";
       updateHandlePosition();
 
@@ -3521,7 +4068,76 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
 
   // Function for selecting/deselecting
   function selectImage() {
+    // Check if image is frozen and handle differently
+    if (isImageFrozen(id)) {
+      // For frozen images, show frozen selection state instead of normal selection
+      
+      // ✅ FIX: Only kill text color panel and deselect text elements, don't kill image panels
+      if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
+        try {
+          window.wbeColorPanel.cleanup();
+        } catch { }
+      }
+
+      // Deselect text elements manually without killing image panels
+      document.querySelectorAll(".wbe-canvas-text-container").forEach(container => {
+        if (container.id === id) return; // Skip current (shouldn't match anyway)
+
+        const textElement = container.querySelector(".wbe-canvas-text");
+        const resizeHandle = container.querySelector(".wbe-text-resize-handle");
+        if (textElement && resizeHandle) {
+          delete container.dataset.selected;
+          container.style.removeProperty("pointer-events");
+          textElement.style.removeProperty("outline");
+          textElement.style.removeProperty("outline-offset");
+          container.style.removeProperty("cursor");
+          resizeHandle.style.display = "none";
+        }
+      });
+
+      // Update global state for backward compatibility
+      selectedImageId = id;
+
+      // Update global selection state - other elements should listen to this
+      if (typeof setSelectedImageId === 'function') {
+        setSelectedImageId(id); // This notifies other modules to deselect themselves
+      }
+
+      // Show frozen selection state and frozen panel
+      showFrozenSelection(container);
+      showFrozenControlPanel(container);
+      
+      // Ensure resize handle is hidden for frozen images
+      resizeController.hide();
+      
+      return; // Exit early for frozen images
+    }
+
+    // Normal selection behavior for non-frozen images
     // Selecting image via SelectionController
+
+    // ✅ FIX: Only kill text color panel and deselect text elements, don't kill image panels
+    if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
+      try {
+        window.wbeColorPanel.cleanup();
+      } catch { }
+    }
+
+    // Deselect text elements manually without killing image panels
+    document.querySelectorAll(".wbe-canvas-text-container").forEach(container => {
+      if (container.id === id) return; // Skip current (shouldn't match anyway)
+
+      const textElement = container.querySelector(".wbe-canvas-text");
+      const resizeHandle = container.querySelector(".wbe-text-resize-handle");
+      if (textElement && resizeHandle) {
+        delete container.dataset.selected;
+        container.style.removeProperty("pointer-events");
+        textElement.style.removeProperty("outline");
+        textElement.style.removeProperty("outline-offset");
+        container.style.removeProperty("cursor");
+        resizeHandle.style.display = "none";
+      }
+    });
 
     // Use SelectionController for selection logic
     selectionController.select();
@@ -3541,8 +4157,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     // Update visual elements with current crop data
     const cropData = getImageCropData(imageElement);
 
-    // Hide grey border, show blue border
-    permanentBorder.style.display = "none";
+    // Show blue border (SelectionController handles permanent border)
     selectionBorder.style.display = "block";
     selectionBorder.style.borderColor = "#4a9eff";
 
@@ -3560,6 +4175,28 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
   }
 
   async function deselectImage() {
+    // Check if image is frozen and handle differently
+    if (isImageFrozen(id)) {
+      // For frozen images, hide frozen selection state and panel
+      hideFrozenSelection(container);
+      killFrozenControlPanel();
+      
+      // Hide resize handle for frozen images
+      resizeController.hide();
+      
+      // Update global state for backward compatibility
+      if (selectedImageId === id) {
+        selectedImageId = null;
+        // Clear global selection state
+        if (typeof setSelectedImageId === 'function') {
+          setSelectedImageId(null);
+        }
+      }
+      
+      return; // Exit early for frozen images
+    }
+
+    // Normal deselection behavior for non-frozen images
     // Deselect image and clean up state
 
     // Use SelectionController for deselection logic
@@ -3576,7 +4213,6 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
 
     // Exit crop mode if it was active
     if (isCropping) {
-      console.log("🎯 EXITING CROP MODE FROM DESELECT");
       isCropping = false;
       await exitCropMode(); // Await to ensure save completes
     }
@@ -3588,9 +4224,8 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     container.style.setProperty("pointer-events", "none", "important");
     container.style.removeProperty("cursor");
 
-    // Hide blue border, show grey border
+    // Hide blue border (SelectionController handles permanent border)
     selectionBorder.style.display = "none";
-    permanentBorder.style.display = "block";
 
     // NEW ARCHITECTURE: Update permanent border with current crop data
     const cropData = getImageCropData(imageElement);
@@ -3611,6 +4246,9 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
 
   // Delete by Delete key
   async function deleteImage() {
+    // ✅ FIX: Kill image control panel before deletion
+    killImageControlPanel();
+
     resizeController.destroy();
     // Destroy dragController if it exists
     if (resizeController.dragController) {
@@ -4081,10 +4719,12 @@ function updateImageUIStates(container, isSelected, isCropping) {
   }
 
   if (isSelected) {
-    // Selected - show blue border, hide grey border, show resize handle
-    if (permanentBorder) permanentBorder.style.display = "none";
+    // Selected - show blue border, show resize handle (SelectionController manages permanent border)
     if (selectionBorder) selectionBorder.style.display = "block";
-    if (resizeHandle) resizeHandle.style.display = "flex";
+    // Only show resize handle if not frozen
+    if (resizeHandle && !isImageFrozen(container.id)) {
+      resizeHandle.style.display = "flex";
+    }
 
     // Enable click target pointer events when selected
     if (clickTarget) {
@@ -4099,8 +4739,7 @@ function updateImageUIStates(container, isSelected, isCropping) {
     // }
     container.dataset.selected = "true";
   } else {
-    // Not selected - show grey border, hide blue border, hide resize handle
-    if (permanentBorder) permanentBorder.style.display = "block";
+    // Not selected - hide blue border, hide resize handle (SelectionController manages permanent border)
     if (selectionBorder) selectionBorder.style.display = "none";
     if (resizeHandle) resizeHandle.style.display = "none";
 
@@ -4123,8 +4762,10 @@ function updateImageUIStates(container, isSelected, isCropping) {
     if (selectionBorder) selectionBorder.style.borderColor = "rgba(128, 0, 255, 0.9)"; // Purple for crop mode
     container.style.setProperty("cursor", "default", "important"); // Default cursor for crop mode
   } else {
-    // Not crop mode - show resize handle if selected, normal blue border
-    if (isSelected && resizeHandle) resizeHandle.style.display = "flex";
+    // Not crop mode - show resize handle if selected and not frozen, normal blue border
+    if (isSelected && resizeHandle && !isImageFrozen(container.id)) {
+      resizeHandle.style.display = "flex";
+    }
     if (selectionBorder) selectionBorder.style.borderColor = "#4a9eff";
   }
 }
@@ -4224,6 +4865,14 @@ function updateImageSelectionBorderGlobal(container) {
   if (!imageElement || !selectionBorder) return;
 
   updateImageBorder(selectionBorder, imageElement, data.maskType, data.crop, data.circleOffset, data.circleRadius, data.scale);
+}
+
+// Global function for updating mask type toggle buttons with actual data
+function updateMaskTypeToggleGlobal(container, maskType) {
+  // Update the control panel mask type buttons if panel exists
+  if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.updatePanelState === 'function') {
+    window.wbeImageControlPanel.updatePanelState(maskType);
+  }
 }
 
 // Глобальная функция для обновления позиции resize handle с актуальными данными
@@ -4528,6 +5177,57 @@ async function handleImagePasteFromClipboard(file) {
   }
 }
 
+// Utility function to clean up broken images from scene flags
+async function cleanupBrokenImages() {
+  if (!game.user.isGM) {
+    ui.notifications.warn("Only GMs can clean up broken images");
+    return;
+  }
+
+  const images = await getAllImages();
+  const brokenImages = [];
+
+  // Check each image in the scene flags
+  for (const [id, data] of Object.entries(images)) {
+    const element = document.getElementById(id);
+    if (element) {
+      const img = element.querySelector('.wbe-canvas-image');
+      if (img && (img.style.background.includes('#ffcccc') || !img.complete || img.naturalWidth === 0)) {
+        brokenImages.push(id);
+      }
+    } else if (!data.src || typeof data.src !== 'string') {
+      brokenImages.push(id);
+    }
+  }
+
+  if (brokenImages.length === 0) {
+    ui.notifications.info("No broken images found");
+    return;
+  }
+
+  // Ask for confirmation
+  const confirmed = await Dialog.confirm({
+    title: "Clean Up Broken Images",
+    content: `<p>Found ${brokenImages.length} broken image(s). Remove them from the scene?</p>
+              <p><small>IDs: ${brokenImages.join(', ')}</small></p>`,
+    yes: () => true,
+    no: () => false
+  });
+
+  if (confirmed) {
+    // Remove broken images from scene flags
+    for (const id of brokenImages) {
+      delete images[id];
+      // Also remove from DOM if present
+      const element = document.getElementById(id);
+      if (element) element.remove();
+    }
+
+    await setAllImages(images);
+    ui.notifications.info(`Removed ${brokenImages.length} broken image(s)`);
+  }
+}
+
 export const ImageTools = {
   // create/update
   createImageElement,
@@ -4563,6 +5263,20 @@ export const ImageTools = {
   setImageFrozen,
   isImageFrozen,
 
-  clearImageCaches
+  // frozen selection functions
+  showFrozenSelection,
+  hideFrozenSelection,
+
+  // frozen panel functions
+  createFrozenControlPanel,
+  showFrozenControlPanel,
+  killFrozenControlPanel,
+  handleUnfreezeAction,
+  updateFrozenPanelPosition,
+
+  clearImageCaches,
+
+  // utility functions
+  cleanupBrokenImages
 
 };
