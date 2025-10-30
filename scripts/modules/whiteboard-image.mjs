@@ -16,7 +16,7 @@ import {
 const SCALE_SENSITIVITY = 0.005; // Sensitivity for image scaling
 
 // Freeze animation constants
-const FREEZE_FADE_DURATION = 0.5; // Duration in seconds for freeze fade animation
+const FREEZE_FADE_DURATION = 0.5; // Duration in seconds for normal panel fade when freezing
 
 // Inject CSS for frozen selection styling
 if (!document.querySelector('#wbe-frozen-selection-styles')) {
@@ -59,26 +59,133 @@ let removalObserver = null;
 
 // ======================== Image Freeze Management ========================
 
-function setImageFrozen(id, frozen) {
+function setImageFrozen(id, frozen, sync = false) {
   const imageData = imageRegistry.get(id);
-  if (imageData) {
-    imageData.isFrozen = frozen;
-    imageData.container.dataset.frozen = frozen ? "true" : "false";
+  if (!imageData) return;
 
-    // NEW: Allow clicks but block drag/resize through controller validation
-    // Remove blanket pointer-events blocking to enable click interactions
-    if (frozen) {
-      // Don't set pointer-events: none - let controllers handle interaction blocking
-      imageData.container.style.pointerEvents = "";
-    } else {
-      imageData.container.style.pointerEvents = "";
+  // Check if image is currently selected before applying freeze state
+  const wasSelected = imageData.container.dataset.selected === "true";
+
+  // Handle sync logic for players (non-GM users)
+  if (sync && !game.user.isGM) {
+    try {
+      // Player: request GM to sync
+      game.socket.emit(`module.${MODID}`, {
+        type: 'gm-request',
+        action: 'freeze-image',
+        data: { imageId: id, frozen: frozen, userId: game.user.id }
+      });
+      return;
+    } catch (error) {
+      console.error('[WB-E] Failed to send freeze request to GM, falling back to local-only:', error);
+      // Continue with local-only freeze as fallback
     }
+  }
 
-    // Update visual indicator
+  // Apply freeze state locally
+  imageData.isFrozen = frozen;
+  imageData.container.dataset.frozen = frozen ? "true" : "false";
+
+  // Ensure frozen images have the same deselected state as normal deselected images
+  // This allows canvas pan/zoom to work through them (container and click target have pointer-events: none)
+  if (frozen) {
+    // Ensure container and click target are set to pointer-events: none (same as deselected)
+    // This is already handled by the deselection process, but ensure it stays that way
+    const clickTarget = imageData.container.querySelector('.wbe-image-click-target');
+    if (clickTarget) {
+      clickTarget.style.setProperty("pointer-events", "none", "important");
+    }
+    // Container should already be deselected, but ensure it stays deselected
+    imageData.container.style.setProperty("pointer-events", "none", "important");
+    
+    // Setup canvas pass-through handlers (for cleanup)
+    setupFrozenImageCanvasPassThrough(imageData.container);
+  } else {
+    // Remove canvas pass-through when unfreezing
+    // Pointer events will be restored when image is selected
+    removeFrozenImageCanvasPassThrough(imageData.container);
+  }
+
+  // Update visual indicator
+  if (frozen) {
+    imageData.container.classList.add("wbe-image-frozen");
+    // Show unfreeze icon in top-left corner
+    // If image was selected, wait for fade animation; otherwise show immediately
+    const delay = wasSelected ? (FREEZE_FADE_DURATION * 1000 + 100) : 0;
+    setTimeout(() => {
+      showUnfreezeIcon(imageData.container);
+    }, delay);
+  } else {
+    imageData.container.classList.remove("wbe-image-frozen");
+    // Always clean up frozen visual elements when unfreezing
+    hideFrozenSelection(imageData.container);
+    hideUnfreezeIcon(imageData.container);
+  }
+
+  // Handle visual transition for selected images when freeze state changes via sync
+  if (!sync && wasSelected) {
+    // This is a sync update and the image was selected - handle the transition
     if (frozen) {
-      imageData.container.classList.add("wbe-image-frozen");
+      // Image was selected and is now being frozen - transition to frozen state
+      
+      // Hide normal control panel
+      if (typeof killImageControlPanel !== 'undefined') {
+        killImageControlPanel();
+      }
+      
+      // Deselect normally first to clean up normal selection state
+      if (imageData.deselectFn) {
+        imageData.deselectFn();
+      }
+      
+      // Show unfreeze icon (no frozen selection/panel anymore)
+      setTimeout(() => {
+        showUnfreezeIcon(imageData.container);
+      }, 100);
+      
     } else {
-      imageData.container.classList.remove("wbe-image-frozen");
+      // Image was selected and is now being unfrozen - transition to normal selection
+      
+      // Hide unfreeze icon
+      hideUnfreezeIcon(imageData.container);
+      hideFrozenSelection(imageData.container);
+      
+      // Select normally
+      setTimeout(() => {
+        if (imageData.selectFn) {
+          imageData.selectFn();
+        }
+      }, 100);
+    }
+  }
+
+  // Persist freeze state to scene flags (GM only)
+  if (game.user.isGM) {
+    // Directly update scene flags with freeze state
+    (async () => {
+      try {
+        const images = await getAllImages();
+        if (images[id]) {
+          images[id].isFrozen = frozen;
+          await setAllImages(images);
+        }
+      } catch (error) {
+        console.error('[WB-E] Failed to persist freeze state:', error);
+      }
+    })();
+  }
+
+  // Handle sync logic for GM users
+  if (sync && game.user.isGM) {
+    try {
+      // GM: broadcast to all clients
+      game.socket.emit(`module.${MODID}`, {
+        type: 'freeze-sync',
+        data: { imageId: id, frozen: frozen, userId: game.user.id }
+      });
+    } catch (error) {
+      console.error('[WB-E] Failed to broadcast freeze sync:', error);
+      // Local freeze still applied, just no sync
     }
   }
 }
@@ -87,6 +194,8 @@ function isImageFrozen(id) {
   const imageData = imageRegistry.get(id);
   return imageData ? imageData.isFrozen : false;
 }
+
+
 
 /**
  * @typedef {Object} DragState
@@ -281,8 +390,8 @@ class ImageDragController {
       return false;
     }
 
-    // Check if in crop mode (assuming global isCropping variable exists)
-    if (typeof isCropping !== 'undefined' && isCropping) {
+    // Check if in crop mode - if so, let circle drag handle it instead of image drag
+    if (this.container.dataset.lockedBy === game.user.id) {
       return false;
     }
 
@@ -1104,237 +1213,325 @@ function hideFrozenSelection(container) {
 
 /* ======================== End Frozen Selection Functions ======================== */
 
-/* ======================== Frozen Control Panel Functions ======================== */
+/* ======================== Frozen Unfreeze Icon Functions ======================== */
 
 /**
- * Create frozen control panel component with specialized styling
+ * Show unfreeze icon in top-left corner of frozen image
+ * Icon requires 1.5s hold to activate unfreeze
  * @param {HTMLElement} container - The .wbe-canvas-image-container element
- * @returns {HTMLElement} The created frozen panel element
  */
-function createFrozenControlPanel(container) {
+function showUnfreezeIcon(container) {
   try {
     if (!container) {
-      console.error('[createFrozenControlPanel] Invalid container provided');
-      return null;
-    }
-
-    const panel = document.createElement("div");
-    panel.className = "wbe-image-control-panel wbe-frozen-panel";
-    panel.style.cssText = `
-      position: fixed;
-      background: #f8f8f8;
-      border: 2px solid #666666;
-      border-radius: 14px;
-      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
-      padding: 8px;
-      z-index: 10000;
-      pointer-events: auto;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 12px;
-      
-      aspect-ratio: 3 / 1;
-      transform: translateX(-50%) scale(.9) translateY(12px);
-      opacity: 0;
-      transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
-    `;
-
-    const toolbar = document.createElement("div");
-    toolbar.style.cssText = `
-      display: flex;
-      gap: 12px;
-      position: relative;
-    `;
-
-    // Create unfreeze button with unlock icon
-    const unfreezeBtn = document.createElement("button");
-    unfreezeBtn.type = "button";
-    unfreezeBtn.className = "wbe-frozen-unfreeze-btn";
-    unfreezeBtn.style.cssText = `
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 44px;
-      height: 40px;
-      padding: 0;
-      border-radius: 10px;
-      border: 2px solid #666666;
-      background: #ffffff;
-      font-size: 16px;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
-    `;
-    unfreezeBtn.title = "Unfreeze image";
-
-    const unfreezeIcon = document.createElement("i");
-    unfreezeIcon.className = "fas fa-unlock";
-    unfreezeIcon.style.cssText = "font-size: 18px; color: #666666;";
-    unfreezeBtn.appendChild(unfreezeIcon);
-
-    // Add hover effects
-    unfreezeBtn.addEventListener("mouseenter", () => {
-      unfreezeBtn.style.background = "#e6e6e6";
-      unfreezeIcon.style.color = "#333333";
-    });
-    unfreezeBtn.addEventListener("mouseleave", () => {
-      unfreezeBtn.style.background = "#ffffff";
-      unfreezeIcon.style.color = "#666666";
-    });
-
-    toolbar.appendChild(unfreezeBtn);
-    panel.appendChild(toolbar);
-
-    // Store reference to unfreeze button for external access
-    panel.unfreezeBtn = unfreezeBtn;
-
-    console.log('[createFrozenControlPanel] Created frozen panel for:', container.id);
-    return panel;
-
-  } catch (error) {
-    console.error('[createFrozenControlPanel] Failed to create frozen panel:', error);
-    return null;
-  }
-}
-
-/**
- * Show frozen control panel for a frozen image
- * @param {HTMLElement} container - The .wbe-canvas-image-container element
- * @param {Function} onUnfreeze - Callback function for unfreeze action
- */
-function showFrozenControlPanel(container, onUnfreeze) {
-  try {
-    if (!container) {
-      console.error('[showFrozenControlPanel] Invalid container provided');
+      console.error('[showUnfreezeIcon] Invalid container provided');
       return;
     }
 
+    // Remove existing icon if present
+    hideUnfreezeIcon(container);
+
     const imageElement = container.querySelector('.wbe-canvas-image');
     if (!imageElement) {
-      console.error('[showFrozenControlPanel] Image element not found');
+      console.error('[showUnfreezeIcon] Image element not found');
       return;
     }
 
     // Check if image is actually frozen
     if (!isImageFrozen(container.id)) {
-      console.warn('[showFrozenControlPanel] Image is not frozen:', container.id);
+      console.warn('[showUnfreezeIcon] Image is not frozen:', container.id);
       return;
     }
 
-    // Kill any existing panel first
-    killFrozenControlPanel();
+    // Create unfreeze icon element
+    const icon = document.createElement('div');
+    icon.className = 'wbe-unfreeze-icon';
+    // Base styles - position will be calculated by updateUnfreezeIconPosition
+    icon.style.cssText = `
+      position: absolute;
+      background: rgba(255, 255, 255, 0.9);
+      border: none;
+      border-radius: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 1004;
+      pointer-events: auto !important;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+      transition: all 0.2s ease;
+      opacity: .5;
+    `;
 
-    // Create the frozen panel
-    const panel = createFrozenControlPanel(container);
-    if (!panel) {
-      console.error('[showFrozenControlPanel] Failed to create panel');
-      return;
+    // Create unlock icon
+    const unlockIcon = document.createElement('i');
+    unlockIcon.className = 'fas fa-unlock';
+    unlockIcon.style.cssText = 'color: #666666;';
+    icon.appendChild(unlockIcon);
+
+    // Create progress ring (hidden initially)
+    const progressRing = document.createElement('div');
+    progressRing.className = 'wbe-unfreeze-progress';
+    progressRing.style.cssText = `
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) rotate(-90deg);
+      border: 3px solid transparent;
+      border-top-color: #4a9eff;
+      border-radius: 50%;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+    `;
+    icon.appendChild(progressRing);
+
+    // Hold-to-activate state
+    let holdTimer = null;
+    let holdStartTime = 0;
+    const HOLD_DURATION = 1500; // 1.5 seconds
+    let isHolding = false;
+
+    // CSS animation for progress ring
+    if (!document.getElementById('wbe-unfreeze-styles')) {
+      const style = document.createElement('style');
+      style.id = 'wbe-unfreeze-styles';
+      style.textContent = `
+        @keyframes wbe-unfreeze-rotate {
+          0% { transform: translate(-50%, -50%) rotate(-90deg); }
+          100% { transform: translate(-50%, -50%) rotate(270deg); }
+        }
+        .wbe-unfreeze-icon.active .wbe-unfreeze-progress {
+          animation: wbe-unfreeze-rotate 1.5s linear forwards;
+        }
+      `;
+      document.head.appendChild(style);
     }
 
-    // Set up unfreeze button click handler
-    if (panel.unfreezeBtn) {
-      panel.unfreezeBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        console.log('[showFrozenControlPanel] Unfreeze button clicked for:', container.id);
-        
-        // Add visual feedback during unfreeze process
-        panel.unfreezeBtn.style.opacity = '0.6';
-        panel.unfreezeBtn.style.transform = 'scale(0.95)';
-        
-        // Use the provided callback or default to handleUnfreezeAction
-        const unfreezeHandler = onUnfreeze || handleUnfreezeAction;
-        
-        // Execute unfreeze with slight delay for visual feedback
-        setTimeout(() => {
-          unfreezeHandler(container);
-        }, 100);
-      });
-    }
-
-    // Position panel relative to image
-    const updatePanelPosition = () => {
-      const rect = imageElement.getBoundingClientRect();
-      panel.style.left = `${rect.left + rect.width / 2}px`;
-      panel.style.top = `${rect.top - 110}px`;
+    // Mouse down - start hold timer
+    const onMouseDown = (e) => {
+      if (e.button !== 0) return; // Only left button
+      e.preventDefault();
+      e.stopPropagation();
+      
+      isHolding = true;
+      holdStartTime = Date.now();
+      icon.classList.add('active');
+      progressRing.style.opacity = '1';
+      
+      // Start hold timer
+      holdTimer = setTimeout(() => {
+        if (isHolding && isImageFrozen(container.id)) {
+          // Hold completed - unfreeze
+          handleUnfreezeAction(container);
+        }
+      }, HOLD_DURATION);
     };
 
-    // Add panel to DOM
-    document.body.appendChild(panel);
-    updatePanelPosition();
+    // Mouse up - cancel hold
+    const onMouseUp = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+      
+      isHolding = false;
+      icon.classList.remove('active');
+      progressRing.style.opacity = '0';
+      progressRing.style.animation = 'none';
+      
+      // Reset animation by reflow
+      void progressRing.offsetWidth;
+      progressRing.style.animation = '';
+    };
 
-    // Animate panel in
-    requestAnimationFrame(() => {
-      panel.style.transform = "translateX(-50%) scale(1) translateY(32px)";
-      panel.style.opacity = "1";
+    // Mouse leave - cancel hold
+    const onMouseLeave = () => {
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+      
+      isHolding = false;
+      icon.classList.remove('active');
+      progressRing.style.opacity = '0';
+      progressRing.style.animation = 'none';
+      
+      // Reset animation by reflow
+      void progressRing.offsetWidth;
+      progressRing.style.animation = '';
+    };
+
+    // Add event listeners
+    icon.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('mouseup', onMouseUp);
+    icon.addEventListener('mouseleave', onMouseLeave);
+
+    // Hover effects
+    icon.addEventListener('mouseenter', () => {
+      icon.style.background = 'rgba(255, 255, 255, 1)';
+      icon.style.borderColor = '#4a9eff';
+      unlockIcon.style.color = '#4a9eff';
+    });
+    
+    icon.addEventListener('mouseleave', () => {
+      if (!isHolding) {
+        icon.style.background = 'rgba(255, 255, 255, 0.9)';
+        icon.style.borderColor = '#666666';
+        unlockIcon.style.color = '#666666';
+      }
     });
 
-    // Set up click outside handler
-    const onOutsideClick = (ev) => {
-      if (panel.contains(ev.target)) return;
-      if (container?.contains(ev.target)) return;
-      
-      // Clicking outside - hide panel
-      killFrozenControlPanel();
-    };
-
-    // Set up escape key handler
-    const onEscapeKey = (ev) => {
-      if (ev.key === "Escape") {
-        killFrozenControlPanel();
+    // Store cleanup function
+    icon.cleanup = () => {
+      if (holdTimer) {
+        clearTimeout(holdTimer);
       }
+      document.removeEventListener('mouseup', onMouseUp);
+      icon.remove();
     };
 
-    // Prevent panel clicks from bubbling
-    panel.addEventListener("mousedown", (ev) => ev.stopPropagation());
+    // Add icon to container first
+    container.appendChild(icon);
+    
+    // Store reference
+    container._unfreezeIcon = icon;
 
-    // Install event listeners with delay to avoid immediate triggering
-    setTimeout(() => {
-      document.addEventListener("mousedown", onOutsideClick, true);
-      document.addEventListener("keydown", onEscapeKey);
-    }, 0);
+    // Update position based on visible cropped area
+    updateUnfreezeIconPosition(container);
 
-    // Store cleanup function and position updater
-    panel.cleanup = () => {
-      try {
-        document.removeEventListener("mousedown", onOutsideClick, true);
-        document.removeEventListener("keydown", onEscapeKey);
-        panel.remove();
-        window.wbeFrozenControlPanel = null;
-        window.wbeFrozenControlPanelUpdate = null;
-      } catch (error) {
-        console.error('[showFrozenControlPanel] Cleanup failed:', error);
-      }
-    };
-
-    // Store global references
-    window.wbeFrozenControlPanel = panel;
-    window.wbeFrozenControlPanelUpdate = updatePanelPosition;
-
-    console.log('[showFrozenControlPanel] Shown frozen panel for:', container.id);
+    console.log('[showUnfreezeIcon] Added unfreeze icon to:', container.id);
 
   } catch (error) {
-    console.error('[showFrozenControlPanel] Failed to show frozen panel:', error);
+    console.error('[showUnfreezeIcon] Failed to show unfreeze icon:', error);
   }
 }
 
 /**
- * Hide and cleanup frozen control panel
+ * Update unfreeze icon position based on visible cropped area
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
  */
-function killFrozenControlPanel() {
-  const panel = window.wbeFrozenControlPanel;
-  if (panel && typeof panel.cleanup === "function") {
-    try {
-      panel.cleanup();
-    } catch (error) {
-      console.error('[killFrozenControlPanel] Cleanup failed:', error);
-    }
+function updateUnfreezeIconPosition(container) {
+  if (!container) return;
+  
+  const icon = container._unfreezeIcon || container.querySelector('.wbe-unfreeze-icon');
+  if (!icon) return;
+
+  const imageElement = container.querySelector('.wbe-canvas-image');
+  if (!imageElement) return;
+
+  const imageId = container.id;
+  const data = getImageData(imageId);
+  if (!data) return;
+
+  const { maskType, crop, circleOffset, circleRadius, scale } = data;
+  const width = imageElement.offsetWidth;
+  const height = imageElement.offsetHeight;
+
+  if (width === 0 || height === 0) return;
+
+  let offsetLeft, offsetTop;
+  let iconSize = 12; // Base size
+  let iconOffset = 8; // Offset from visible area edge
+
+  if (maskType === 'rect') {
+    // Rectangular mask - position at top-left of visible area
+    offsetLeft = crop.left * scale;
+    offsetTop = crop.top * scale;
+  } else if (maskType === 'circle') {
+    // Circular mask - position at top-left of visible circle
+    const fallback = Math.min(width, height) / 2;
+    const currentRadius = (circleRadius == null) ? fallback : circleRadius;
+    const centerX = width / 2 + circleOffset.x;
+    const centerY = height / 2 + circleOffset.y;
+    offsetLeft = (centerX - currentRadius) * scale;
+    offsetTop = (centerY - currentRadius) * scale;
+    
+    // Scale icon size based on circle diameter
+    const diameter = currentRadius * 2;
+    const scaledDiameter = diameter * scale;
+    // Scale icon proportionally to circle size (minimum 12px, scale with diameter)
+    iconSize = Math.max(12, Math.min(32, scaledDiameter * 0.1));
   }
-  // Ensure global reference is cleared even if cleanup fails
-  window.wbeFrozenControlPanel = null;
-  window.wbeFrozenControlPanelUpdate = null;
+
+  // Position icon at top-left of visible area with offset
+  icon.style.left = `${offsetLeft - iconOffset}px`;
+  icon.style.top = `${offsetTop - iconOffset}px`;
+  icon.style.width = `${iconSize}px`;
+  icon.style.height = `${iconSize}px`;
+
+  // Update unlock icon size
+  const unlockIcon = icon.querySelector('.fas.fa-unlock');
+  if (unlockIcon) {
+    unlockIcon.style.fontSize = `${iconSize * 0.67}px`; // ~2/3 of icon size
+  }
+
+  // Update progress ring size
+  const progressRing = icon.querySelector('.wbe-unfreeze-progress');
+  if (progressRing) {
+    progressRing.style.width = `${iconSize * 1.25}px`; // Slightly larger than icon
+    progressRing.style.height = `${iconSize * 1.25}px`;
+  }
 }
+
+/**
+ * Hide unfreeze icon
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ */
+function hideUnfreezeIcon(container) {
+  if (!container) return;
+  
+  const icon = container._unfreezeIcon || container.querySelector('.wbe-unfreeze-icon');
+  if (icon) {
+    if (typeof icon.cleanup === 'function') {
+      icon.cleanup();
+    } else {
+      icon.remove();
+    }
+    container._unfreezeIcon = null;
+  }
+}
+
+/* ======================== End Frozen Unfreeze Icon Functions ======================== */
+
+/* ======================== Frozen Canvas Pass-Through Functions ======================== */
+
+/**
+ * Setup canvas pass-through for frozen images
+ * NOTE: Since frozen images have pointer-events: none on container and click target,
+ * canvas pan/zoom already works through them. This function mainly tracks state for cleanup.
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ */
+function setupFrozenImageCanvasPassThrough(container) {
+  if (!container) return;
+  
+  // Frozen images already have pointer-events: none set (same as deselected images)
+  // No special handlers needed - canvas pan/zoom works automatically
+  // This function exists for cleanup tracking if needed in the future
+}
+
+/**
+ * Remove canvas pass-through for frozen images
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ */
+function removeFrozenImageCanvasPassThrough(container) {
+  if (!container) return;
+  
+  // No cleanup needed since we don't install special handlers
+  // Pointer events will be restored when image is selected after unfreezing
+}
+
+/* ======================== End Frozen Canvas Pass-Through Functions ======================== */
+
+
+
+
+
+
+
 
 /**
  * Handle unfreeze action from frozen control panel
@@ -1355,22 +1552,24 @@ function handleUnfreezeAction(container) {
 
     console.log('[handleUnfreezeAction] Unfreezing image:', container.id);
 
-    // Hide frozen panel first
-    killFrozenControlPanel();
-
     // Hide frozen selection state
     hideFrozenSelection(container);
 
-    // Remove frozen state from registry
-    setImageFrozen(container.id, false);
+    // Hide unfreeze icon
+    hideUnfreezeIcon(container);
 
-    // Transition to normal selection state
-    const imageData = imageRegistry.get(container.id);
-    if (imageData && imageData.selectFn) {
-      // Select the image with normal selection
-      // The selectFn() will handle showing the normal control panel via SelectionController
-      imageData.selectFn();
-    }
+    // Remove frozen state from registry with synchronization
+    setImageFrozen(container.id, false, true);
+
+    // Immediately select the image after unfreezing
+    setTimeout(() => {
+      const imageData = imageRegistry.get(container.id);
+      if (imageData && imageData.selectFn) {
+        // Select the image with normal selection
+        // The selectFn() will handle showing the normal control panel via SelectionController
+        imageData.selectFn();
+      }
+    }, 50);  // Small delay to allow sync to process
 
     console.log('[handleUnfreezeAction] Successfully unfroze image:', container.id);
 
@@ -1379,19 +1578,7 @@ function handleUnfreezeAction(container) {
   }
 }
 
-/**
- * Update frozen panel position when image moves or canvas changes
- * Integrates with existing panel management system
- */
-function updateFrozenPanelPosition() {
-  if (window.wbeFrozenControlPanelUpdate) {
-    try {
-      window.wbeFrozenControlPanelUpdate();
-    } catch (error) {
-      console.error('[updateFrozenPanelPosition] Failed to update position:', error);
-    }
-  }
-}
+
 
 /* ======================== End Frozen Control Panel Functions ======================== */
 
@@ -1605,7 +1792,7 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
   const panel = document.createElement("div");
   panel.className = "wbe-image-control-panel";
   panel.style.cssText = `
-    position: fixed;
+  position: fixed;
   background: white;
   border: 1px solid #d7d7d7;
   border-radius: 14px;
@@ -1927,32 +2114,36 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
         }
       });
 
-      // Set image as frozen in registry
-      setImageFrozen(container.id, true);
-
-      // Start fade animation for panel only
+      // Start fade animation for regular panel and border
       const fadeDuration = FREEZE_FADE_DURATION * 1000; // Convert to milliseconds
 
-      // Fade out the panel
+      // Fade out the regular control panel
       panel.style.transition = `opacity ${FREEZE_FADE_DURATION}s ease-out`;
       panel.style.opacity = "0";
 
-      // After fade animation completes, just deselect peacefully
-      setTimeout(() => {
+      // After fade animation completes, deselect and then freeze
+      setTimeout(async () => {
         // Kill the normal panel
         killImageControlPanel();
 
-        // Deselect the image - it should stay deselected after freeze
+        // Deselect the image first - it should stay deselected after freeze
         const imageData = imageRegistry.get(container.id);
         if (imageData && imageData.deselectFn) {
-          imageData.deselectFn();
+          await imageData.deselectFn(); // Wait for deselection to complete
         }
+
+        // Small delay to ensure deselection state is fully applied
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        // Now set image as frozen (after deselection is complete)
+        // This will show the unfreeze icon immediately since image is now deselected
+        setImageFrozen(container.id, true, true);
       }, fadeDuration);
 
     } else {
       // This branch should not be reached in the new system
-      // Unfreezing is now handled by the frozen panel's unfreeze button
-      console.warn('[lockBtn] Unfreeze action should be handled by frozen panel');
+      // Unfreezing is now handled by the unfreeze icon
+      console.warn('[lockBtn] Unfreeze action should be handled by unfreeze icon');
       
       // Fallback: use the new unfreeze handler
       handleUnfreezeAction(container);
@@ -2099,11 +2290,8 @@ function installGlobalMaskPanHooks() {
   document.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
 
-    // Hide panel without destroying it
-    const panel = window.wbeImageControlPanel;
-    if (panel) {
-      panel.style.display = "none";
-    }
+    // Kill panels completely (like text panels do)
+    killImageControlPanel();
     isCanvasPanningGlobal = true;
   }, true);
 
@@ -2113,10 +2301,16 @@ function installGlobalMaskPanHooks() {
     if (!isCanvasPanningGlobal) return;
     isCanvasPanningGlobal = false;
 
-    // Show panel again
-    const panel = window.wbeImageControlPanel;
-    if (panel) {
-      panel.style.display = "flex";
+    // Recreate appropriate panel after canvas settles (like text panels do)
+    if (selectedImageId) {
+      // Check if the selected image is frozen to show the right panel
+      if (isImageFrozen(selectedImageId)) {
+        // Show frozen panel for frozen images
+        safeReshowFrozenPanel(selectedImageId, 100);
+      } else if (!window.wbeImageControlPanel) {
+        // Show normal panel for normal images
+        safeReshowImagePanel(selectedImageId, 100);
+      }
     }
   }, true);
 
@@ -2125,13 +2319,17 @@ function installGlobalMaskPanHooks() {
     if (e.deltaY === 0) return;
     if (!selectedImageId) return;
 
-    // Hide panel without destroying it
-    const panel = window.wbeImageControlPanel;
-    if (panel) {
-      panel.style.display = "none";
-      setTimeout(() => {
-        if (panel) panel.style.display = "flex";
-      }, 200);
+    // Kill and recreate appropriate panel (like text panels do)
+    killImageControlPanel();
+    if (selectedImageId) {
+      // Check if the selected image is frozen to show the right panel
+      if (isImageFrozen(selectedImageId)) {
+        // Show frozen panel for frozen images
+        safeReshowFrozenPanel(selectedImageId, 200);
+      } else {
+        // Show normal panel for normal images
+        safeReshowImagePanel(selectedImageId, 200);
+      }
     }
   }, { passive: true });
 }
@@ -2152,6 +2350,41 @@ function safeReshowImagePanel(targetId, delayMs = 0) {
     selectedImageId = targetId;
 
     showImageControlPanel(imageElement, container, currentMaskType);
+  };
+
+  if (delayMs <= 0) {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        open();
+      });
+    });
+  } else {
+    setTimeout(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          open();
+        });
+      });
+    }, delayMs);
+  }
+}
+
+function safeReshowFrozenPanel(targetId, delayMs = 0) {
+  const open = async () => {
+    const container = document.getElementById(targetId);
+    if (!container) return;
+
+    const imageElement = container.querySelector(".wbe-canvas-image");
+    if (!imageElement) return;
+
+    // NOTE: Frozen panel is disabled - frozen images use unfreeze icon instead
+    // showFrozenSelection(container);
+    // showFrozenControlPanel(container);
+    
+    // Just ensure unfreeze icon is visible (should already be there)
+    if (isImageFrozen(targetId)) {
+      showUnfreezeIcon(container);
+    }
   };
 
   if (delayMs <= 0) {
@@ -2271,7 +2504,8 @@ document.addEventListener("copy", (e) => {
     crop: { ...crop },
     maskType,
     circleOffset: { ...circleOffset },
-    circleRadius
+    circleRadius,
+    isFrozen: isImageFrozen(selectedImageId)
   };
 
   e.clipboardData?.setData("text/plain", `[wbe-IMAGE-COPY:${selectedImageId}]`);
@@ -2661,9 +2895,12 @@ function installGlobalImageSelectionHandler() {
     for (const [id, imageData] of sortedImages) {
       const container = imageData.container;
 
-      // NEW: Allow frozen images to be clicked for status display
-      // Frozen images can be clicked but drag/resize is blocked in controllers
-      // (No early exit for frozen images)
+      // NEW: Skip frozen images - they cannot be selected
+      // Only the unfreeze icon is clickable on frozen images
+      if (isImageFrozen(id)) {
+        // Frozen images cannot be selected - skip selection logic
+        continue;
+      }
 
       // Skip locked images
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
@@ -2806,7 +3043,7 @@ function installGlobalImageSelectionHandler() {
 
 /* ----------------------- Canvas Text/Image Functions ------------------ */
 
-function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, right: 0, bottom: 0, left: 0 }, maskType = 'rect', circleOffset = { x: 0, y: 0 }, circleRadiusParam = null, existingZIndex = null) {
+function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, right: 0, bottom: 0, left: 0 }, maskType = 'rect', circleOffset = { x: 0, y: 0 }, circleRadiusParam = null, existingZIndex = null, isFrozen = false) {
   console.log('[DEBUG] Creating image element:', { id, src, left, top, scale, crop, maskType });
   const layer = getOrCreateLayer();
   if (!layer) return;
@@ -3298,10 +3535,12 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       killImageControlPanel();
     },
     showControlPanel: (imageElement, container) => {
-      // Check if image is frozen and show appropriate panel
+      // NOTE: Frozen images cannot be selected, so this callback won't be called for them
+      // But keeping the check for safety
       if (isImageFrozen(container.id)) {
-        // Show frozen control panel for frozen images
-        showFrozenControlPanel(container);
+        // Frozen images don't show control panel - they have unfreeze icon instead
+        // showFrozenControlPanel(container); // COMMENTED OUT - using unfreeze icon
+        return;
       } else {
         // Show normal control panel for non-frozen images
         showImageControlPanel(imageElement, container, currentMaskType, {
@@ -3328,7 +3567,6 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     hideControlPanel: () => {
       // Hide both normal and frozen panels
       killImageControlPanel();
-      killFrozenControlPanel();
     },
     clearMassSelection: () => {
       if (window.MassSelection && window.MassSelection.selectedCount > 0) {
@@ -4068,49 +4306,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
 
   // Function for selecting/deselecting
   function selectImage() {
-    // Check if image is frozen and handle differently
+    // Check if image is frozen - frozen images cannot be selected
     if (isImageFrozen(id)) {
-      // For frozen images, show frozen selection state instead of normal selection
-      
-      // ✅ FIX: Only kill text color panel and deselect text elements, don't kill image panels
-      if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
-        try {
-          window.wbeColorPanel.cleanup();
-        } catch { }
-      }
-
-      // Deselect text elements manually without killing image panels
-      document.querySelectorAll(".wbe-canvas-text-container").forEach(container => {
-        if (container.id === id) return; // Skip current (shouldn't match anyway)
-
-        const textElement = container.querySelector(".wbe-canvas-text");
-        const resizeHandle = container.querySelector(".wbe-text-resize-handle");
-        if (textElement && resizeHandle) {
-          delete container.dataset.selected;
-          container.style.removeProperty("pointer-events");
-          textElement.style.removeProperty("outline");
-          textElement.style.removeProperty("outline-offset");
-          container.style.removeProperty("cursor");
-          resizeHandle.style.display = "none";
-        }
-      });
-
-      // Update global state for backward compatibility
-      selectedImageId = id;
-
-      // Update global selection state - other elements should listen to this
-      if (typeof setSelectedImageId === 'function') {
-        setSelectedImageId(id); // This notifies other modules to deselect themselves
-      }
-
-      // Show frozen selection state and frozen panel
-      showFrozenSelection(container);
-      showFrozenControlPanel(container);
-      
-      // Ensure resize handle is hidden for frozen images
-      resizeController.hide();
-      
-      return; // Exit early for frozen images
+      // Frozen images cannot be selected - only unfreeze icon is interactive
+      console.log('[selectImage] Attempted to select frozen image - blocked:', id);
+      return; // Exit early - frozen images remain deselected
     }
 
     // Normal selection behavior for non-frozen images
@@ -4175,24 +4375,10 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
   }
 
   async function deselectImage() {
-    // Check if image is frozen and handle differently
+    // Check if image is frozen - frozen images cannot be deselected (they're already deselected)
     if (isImageFrozen(id)) {
-      // For frozen images, hide frozen selection state and panel
-      hideFrozenSelection(container);
-      killFrozenControlPanel();
-      
-      // Hide resize handle for frozen images
-      resizeController.hide();
-      
-      // Update global state for backward compatibility
-      if (selectedImageId === id) {
-        selectedImageId = null;
-        // Clear global selection state
-        if (typeof setSelectedImageId === 'function') {
-          setSelectedImageId(null);
-        }
-      }
-      
+      // Frozen images are always deselected - only unfreeze icon is interactive
+      // No action needed
       return; // Exit early for frozen images
     }
 
@@ -4308,7 +4494,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     const maskTypeData = copiedImageData.maskType || 'rect';
     const circleOffsetData = copiedImageData.circleOffset || { x: 0, y: 0 };
     const circleRadiusData = copiedImageData.circleRadius || null;
-    createImageElement(newImageId, copiedImageData.src, worldX, worldY, copiedImageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData);
+    createImageElement(newImageId, copiedImageData.src, worldX, worldY, copiedImageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, copiedImageData.isFrozen || false);
 
     const images = await getAllImages();
     images[newImageId] = {
@@ -4320,6 +4506,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       maskType: maskTypeData,
       circleOffset: circleOffsetData,
       circleRadius: circleRadiusData,
+      isFrozen: copiedImageData.isFrozen || false,
       zIndex: ZIndexManager.getImage(newImageId)
     };
     await setAllImages(images);
@@ -4423,6 +4610,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       circleOffset: useCircleOffset,
       circleRadius: useCircleRadius,
       isCropping: isCropping,
+      isFrozen: isFrozen,
       zIndex: ZIndexManager.getImage(id)
     };
 
@@ -4451,11 +4639,16 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     container: container,
     selectFn: selectImage,
     deselectFn: deselectImage,
-    isFrozen: false,
+    isFrozen: isFrozen,
     dragController: dragController,
     resizeController: resizeController,
     selectionController: selectionController
   });
+
+  // Apply freeze state if needed (without sync to avoid loops during loading)
+  if (isFrozen) {
+    setImageFrozen(id, true, false);
+  }
 
   // Install global handler if not already installed
   installGlobalImageSelectionHandler();
@@ -4516,7 +4709,7 @@ async function setAllImages(images) {
             const maskTypeData = imageData.maskType || 'rect';
             const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
             const circleRadiusData = imageData.circleRadius || null;
-            createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex);
+            createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
           }
 
           // Update global variables for each image
@@ -4865,6 +5058,11 @@ function updateImageSelectionBorderGlobal(container) {
   if (!imageElement || !selectionBorder) return;
 
   updateImageBorder(selectionBorder, imageElement, data.maskType, data.crop, data.circleOffset, data.circleRadius, data.scale);
+  
+  // Update unfreeze icon position if image is frozen
+  if (isImageFrozen(imageId)) {
+    updateUnfreezeIconPosition(container);
+  }
 }
 
 // Global function for updating mask type toggle buttons with actual data
@@ -4886,6 +5084,11 @@ function updateImageResizeHandleGlobal(container) {
   if (!imageElement || !resizeHandle) return;
 
   updateImageResizeHandle(resizeHandle, imageElement, data.maskType, data.crop, data.circleOffset, data.circleRadius, data.scale);
+  
+  // Update unfreeze icon position if image is frozen
+  if (isImageFrozen(imageId)) {
+    updateUnfreezeIconPosition(container);
+  }
 }
 
 // Функция для обновления рамок картинки
@@ -5084,7 +5287,7 @@ async function globalPasteImage() {
   const maskTypeData = copiedImageData.maskType || 'rect';
   const circleOffsetData = copiedImageData.circleOffset || { x: 0, y: 0 };
   const circleRadiusData = copiedImageData.circleRadius || null;
-  createImageElement(newImageId, copiedImageData.src, worldPos.x, worldPos.y, copiedImageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData);
+  createImageElement(newImageId, copiedImageData.src, worldPos.x, worldPos.y, copiedImageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, copiedImageData.isFrozen || false);
 
   const images = await getAllImages();
   images[newImageId] = {
@@ -5096,6 +5299,7 @@ async function globalPasteImage() {
     maskType: maskTypeData,
     circleOffset: circleOffsetData,
     circleRadius: circleRadiusData,
+    isFrozen: copiedImageData.isFrozen || false,
     zIndex: ZIndexManager.getImage(newImageId)
   };
   await setAllImages(images);
@@ -5163,6 +5367,7 @@ async function handleImagePasteFromClipboard(file) {
         top: worldPos.y,
         scale: 1,
         crop: defaultCrop,
+        isFrozen: false,
         zIndex: ZIndexManager.getImage(imageId)
       };
       await setAllImages(images);
@@ -5267,12 +5472,18 @@ export const ImageTools = {
   showFrozenSelection,
   hideFrozenSelection,
 
-  // frozen panel functions
-  createFrozenControlPanel,
-  showFrozenControlPanel,
-  killFrozenControlPanel,
+  // frozen panel functions (kept for backward compatibility, but not used)
+ 
+ 
   handleUnfreezeAction,
-  updateFrozenPanelPosition,
+
+  // frozen unfreeze icon functions
+  showUnfreezeIcon,
+  hideUnfreezeIcon,
+
+  // frozen canvas pass-through functions
+  setupFrozenImageCanvasPassThrough,
+  removeFrozenImageCanvasPassThrough,
 
   clearImageCaches,
 

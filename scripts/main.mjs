@@ -410,7 +410,7 @@ Hooks.once("ready", async () => {
               const maskTypeData = imageData.maskType || 'rect';
               const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
               const circleRadiusData = imageData.circleRadius || null;
-              ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex);
+              ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
             }
 
             // ✨ Обновляем глобальные переменные для каждой картинки
@@ -466,7 +466,7 @@ Hooks.once("ready", async () => {
             const maskTypeData = imageData.maskType || 'rect';
             const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
             const circleRadiusData = imageData.circleRadius || null;
-            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex);
+            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
           }
 
           // ✨ Обновляем глобальные переменные для каждой картинки
@@ -522,6 +522,29 @@ Hooks.once("ready", async () => {
           // Эмитим всем (включая отправителя) только изменения
           game.socket.emit(`module.${MODID}`, { type: "cardUpdate", id: data.id, state: data.patch });
         }
+      }
+    }
+
+    // GM request handler for freeze actions
+    if (data.type === "gm-request") {
+      if (game.user.isGM && data.action === 'freeze-image') {
+        try {
+          console.log("[WB-E] GM received freeze request:", data.data);
+          // Process freeze request authoritatively
+          ImageTools.setImageFrozen(data.data.imageId, data.data.frozen, true);
+        } catch (error) {
+          console.error('[WB-E] Failed to process GM freeze request:', error);
+        }
+      }
+    }
+
+    // Freeze sync message handler
+    if (data.type === "freeze-sync") {
+      try {
+        // Apply synchronized freeze state
+        ImageTools.setImageFrozen(data.data.imageId, data.data.frozen, false);
+      } catch (error) {
+        console.error('[WB-E] Failed to apply freeze sync:', error);
       }
     }
 
@@ -1253,7 +1276,7 @@ async function pasteMultiSelection() {
     const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
     const circleRadiusData = imageData.circleRadius || null;
 
-    ImageTools.createImageElement(newId, imageData.src, newLeft, newTop, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex);
+    ImageTools.createImageElement(newId, imageData.src, newLeft, newTop, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
 
     // Save the new image
     await ImageTools.persistImageState(newId, document.getElementById(newId)?.querySelector(".wbe-canvas-image"), document.getElementById(newId));
@@ -1446,7 +1469,7 @@ async function loadCanvasElements() {
     const circleRadiusData = data.circleRadius || null;
 
     try {
-      ImageTools.createImageElement(id, data.src, data.left, data.top, data.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, data.zIndex);
+      ImageTools.createImageElement(id, data.src, data.left, data.top, data.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, data.zIndex, data.isFrozen || false);
     } catch (error) {
       console.error(`[WB-E] Failed to restore image ${id}:`, error);
     }

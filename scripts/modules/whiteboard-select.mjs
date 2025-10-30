@@ -1089,6 +1089,7 @@ async function saveSelectedObjects() {
             left: parseFloat(container.style.left) || 0,
             top: parseFloat(container.style.top) || 0,
             scale: parseFloat(imageElement.style.transform?.match(/scale\(([\d.]+)\)/)?.[1]) || 1,
+            isFrozen: ImageTools.isImageFrozen(id),
             zIndex: ZIndexManager.getImage(id),
             // Add other properties as needed
           };
@@ -1169,6 +1170,7 @@ function copySelectedObjects() {
           left: parseFloat(container.style.left) || 0,
           top: parseFloat(container.style.top) || 0,
           scale: parseFloat(imageElement.style.transform?.match(/scale\(([\d.]+)\)/)?.[1]) || 1,
+          isFrozen: ImageTools.isImageFrozen(id),
         };
       }
     }
