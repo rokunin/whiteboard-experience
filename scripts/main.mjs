@@ -1815,6 +1815,12 @@ const OTHER_CSS = `
 
 /* ----------------------- Expose (optional) --------------- */
 window.FateTableCardApp = FateTableCardApp;
+// Expose ImageTools and TextTools for browser console access and testing
+window.ImageTools = ImageTools;
+window.TextTools = TextTools;
+// Expose utility functions for testing
+window.screenToWorld = screenToWorld;
+window.worldToScreen = worldToScreen;
 window.WhiteboardExperience = {
   getAllStates, setAllStates, createCardState, updateCardState, deleteCardState,
   startContinuousSync, stopContinuousSync, syncCardsWithCanvas,

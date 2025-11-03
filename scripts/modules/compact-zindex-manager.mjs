@@ -198,7 +198,7 @@ export class CompactZIndexManager {
       }
       
       // Check if automatic compaction is needed after removal (skip during group operations)
-      // TEMPORARILY DISABLED FOR TESTING
+      // TEMPORARILY DISABLED FOR TESTING - prevents compaction from resetting swapped z-indexes
       // if (!this.isGroupOperation && this._shouldCompact()) {
       //   //console.log(`[CompactZIndexManager] Automatic compaction triggered after object removal`);
       //   this.compact();
