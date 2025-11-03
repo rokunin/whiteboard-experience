@@ -156,9 +156,16 @@ Hooks.once("ready", async () => {
     if (data.type === "textUpdateRequest") {
       // Игрок просит GM сохранить изменения
       if (game.user.isGM) {
+        const isEmpty = Object.keys(data.texts || {}).length === 0;
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
         await new Promise(resolve => setTimeout(resolve, 50));
         await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, data.texts);
+        if (isEmpty) {
+          // Also clear ZIndexManager completely when clearing all
+          if (window.ZIndexManager && typeof window.ZIndexManager.clear === "function") {
+            window.ZIndexManager.clear();
+          }
+        }
 
         // Обновляем локально для немедленной реакции UI у GM
         const layer = getOrCreateLayer();
@@ -172,7 +179,7 @@ Hooks.once("ready", async () => {
             existingIds.add(id);
             const existing = document.getElementById(id);
             if (existing) {
-              // 🔥 CRITICAL FIX: Skip locked text elements (GM socket handler)
+              // CRITICAL FIX: Skip locked text elements (GM socket handler)
               if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
                 console.log(`[WB-E] GM skipping socket update for ${id} - locked by user ${existing.dataset.lockedBy}`);
                 continue; // Don't update! This prevents cursor reset!
@@ -181,7 +188,7 @@ Hooks.once("ready", async () => {
               // Обновляем существующий элемент
               const textElement = existing.querySelector(".wbe-canvas-text");
               if (textElement) {
-                // ✅ ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
+                // ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
                 if (textElement.contentEditable === "true") {
                   console.log(`[WB-E] GM skipping socket update for ${id} - actively being edited`);
                   continue;
@@ -200,7 +207,7 @@ Hooks.once("ready", async () => {
                 TextTools.applyFontSizeToElement?.(textElement, textData.fontSize || TextTools.DEFAULT_FONT_SIZE);
                 TextTools.applyBorderDataToElement?.(textElement, textData.borderColor, textData.borderWidth);
 
-                // ✅ FIX: Apply width if present
+                // FIX: Apply width if present
                 if (textData.width && textData.width > 0) {
                   textElement.style.width = `${textData.width}px`;
                   textElement.dataset.manualWidth = "true";
@@ -229,7 +236,8 @@ Hooks.once("ready", async () => {
                 textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
                 textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
                 textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
-                textData.width
+                textData.width,
+                textData.zIndex ?? null // Use null instead of undefined so default parameter works
               );
 
               // Apply color and background to newly created element
@@ -253,7 +261,7 @@ Hooks.once("ready", async () => {
           // Удаляем элементы, которых больше нет в texts
           existingElements.forEach(element => {
             if (!existingIds.has(element.id)) {
-              // ✅ FIX: Clean up color panel before removing element
+              // FIX: Clean up color panel before removing element
               if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
                 try {
                   window.wbeColorPanel.cleanup();
@@ -261,6 +269,10 @@ Hooks.once("ready", async () => {
               }
               // Clean up color pickers before removing element
               document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
+              // Clean up ZIndexManager
+              if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                window.ZIndexManager.remove(element.id);
+              }
               element.remove();
             }
           });
@@ -274,7 +286,7 @@ Hooks.once("ready", async () => {
     if (data.type === "textUpdate") {
       // Обновляем UI у всех (включая отправителя)
       // Умное обновление: обновляем только измененные тексты
-      // ✅ FIX: Skip update if this is the sender's own update
+      // FIX: Skip update if this is the sender's own update
       if (data.senderId && data.senderId === game.user.id) {
         console.log("[WB-E] Skipping own textUpdate");
         return;
@@ -290,7 +302,7 @@ Hooks.once("ready", async () => {
           existingIds.add(id);
           const existing = document.getElementById(id);
           if (existing) {
-            // 🔥 CRITICAL FIX: Skip locked text elements
+            // CRITICAL FIX: Skip locked text elements
             if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
               console.log(`[WB-E] Skipping socket update for ${id} - locked by user ${existing.dataset.lockedBy}`);
               continue; // Don't update! This prevents cursor reset!
@@ -299,7 +311,7 @@ Hooks.once("ready", async () => {
             // Обновляем существующий элемент
             const textElement = existing.querySelector(".wbe-canvas-text");
             if (textElement) {
-              // ✅ ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
+              // ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
               if (textElement.contentEditable === "true") {
                 console.log(`[WB-E] Skipping socket update for ${id} - actively being edited`);
                 continue;
@@ -345,7 +357,8 @@ Hooks.once("ready", async () => {
               textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
               textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
               textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
-              textData.width
+              textData.width,
+              textData.zIndex ?? null // Use null instead of undefined so default parameter works
             );
 
             // Apply color and background to newly created element
@@ -369,7 +382,7 @@ Hooks.once("ready", async () => {
         // Удаляем элементы, которых больше нет в texts
         existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
-            // ✅ FIX: Clean up color panel before removing element
+            // FIX: Clean up color panel before removing element
             if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
               try {
                 window.wbeColorPanel.cleanup();
@@ -377,6 +390,10 @@ Hooks.once("ready", async () => {
             }
             // Clean up color pickers before removing element
             document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
+            // Clean up ZIndexManager
+            if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+              window.ZIndexManager.remove(element.id);
+            }
             element.remove();
           }
         });
@@ -386,6 +403,7 @@ Hooks.once("ready", async () => {
     if (data.type === "imageUpdateRequest") {
       // Игрок просит GM сохранить изменения
       if (game.user.isGM) {
+        const isEmpty = Object.keys(data.images || {}).length === 0;
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
         await new Promise(resolve => setTimeout(resolve, 50));
         await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, data.images);
@@ -413,7 +431,7 @@ Hooks.once("ready", async () => {
               ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
             }
 
-            // ✨ Обновляем глобальные переменные для каждой картинки
+            // Обновляем глобальные переменные для каждой картинки
             ImageTools.updateImageLocalVars(id, {
               maskType: imageData.maskType || 'rect',
               circleOffset: imageData.circleOffset || { x: 0, y: 0 },
@@ -427,7 +445,7 @@ Hooks.once("ready", async () => {
           // Удаляем элементы, которых больше нет в images
           existingElements.forEach(element => {
             if (!existingIds.has(element.id)) {
-              // ✅ FIX: Clean up image control panel before removing element
+              // FIX: Clean up image control panel before removing element
               if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.cleanup === "function") {
                 try {
                   window.wbeImageControlPanel.cleanup();
@@ -435,6 +453,10 @@ Hooks.once("ready", async () => {
               }
               // Clear runtime caches to prevent resurrection
               ImageTools.clearImageCaches(element.id);
+              // Clean up ZIndexManager
+              if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                window.ZIndexManager.remove(element.id);
+              }
               element.remove();
             }
           });
@@ -469,7 +491,7 @@ Hooks.once("ready", async () => {
             ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
           }
 
-          // ✨ Обновляем глобальные переменные для каждой картинки
+          // Обновляем глобальные переменные для каждой картинки
           ImageTools.updateImageLocalVars(id, {
             maskType: imageData.maskType || 'rect',
             circleOffset: imageData.circleOffset || { x: 0, y: 0 },
@@ -483,7 +505,7 @@ Hooks.once("ready", async () => {
         // Удаляем элементы, которых больше нет в images
         existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
-            // ✅ FIX: Clean up image control panel before removing element
+            // FIX: Clean up image control panel before removing element
             if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.cleanup === "function") {
               try {
                 window.wbeImageControlPanel.cleanup();
@@ -491,6 +513,10 @@ Hooks.once("ready", async () => {
             }
             // Clear runtime caches to prevent resurrection
             ImageTools.clearImageCaches(element.id);
+            // Clean up ZIndexManager
+            if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+              window.ZIndexManager.remove(element.id);
+            }
             element.remove();
           }
         });
@@ -709,7 +735,7 @@ Hooks.once("ready", async () => {
       }
     }
 
-    // ✅ NEW: Handle text lock
+    // NEW: Handle text lock
     if (data.type === "textLock") {
       console.log(`[WB-E] Received textLock for ${data.textId} from ${data.userName}`);
       const container = document.getElementById(data.textId);
@@ -718,7 +744,7 @@ Hooks.once("ready", async () => {
       }
     }
 
-    // ✅ NEW: Handle text unlock
+    // NEW: Handle text unlock
     if (data.type === "textUnlock") {
       console.log(`[WB-E] Received textUnlock for ${data.textId}`);
       const container = document.getElementById(data.textId);
@@ -985,122 +1011,141 @@ let lastClickY = window.innerHeight / 2;
 let lastMouseX = window.innerWidth / 2;
 let lastMouseY = window.innerHeight / 2;
 
-// Z-Index Manager - Global for both text and image objects
-const ZIndexManager = {
-  // Track z-indexes for each object
-  textZIndexes: new Map(), // id -> zIndex
-  imageZIndexes: new Map(), // id -> zIndex
-  nextTextZIndex: 1000,    // Text range: 1000+
-  nextImageZIndex: 2000,   // Image range: 2000+
-
-  // Get next available z-index for text
-  getNextText() {
-    return ++this.nextTextZIndex;
-  },
-
-  // Get next available z-index for image
-  getNextImage() {
-    return ++this.nextImageZIndex;
-  },
-
-  // Sync with existing z-index values to avoid conflicts
-  syncWithExisting(existingZIndexes) {
-    if (!Array.isArray(existingZIndexes)) return;
-
-    let maxTextZIndex = this.nextTextZIndex;
-    let maxImageZIndex = this.nextImageZIndex;
-
-    existingZIndexes.forEach(([id, zIndex]) => {
-      if (typeof zIndex === 'number') {
-        if (id.startsWith('wbe-text-') && zIndex >= 1000 && zIndex < 2000) {
-          // Text z-index (1000-1999 range)
-          if (zIndex > maxTextZIndex) {
-            maxTextZIndex = zIndex;
-          }
-        } else if (id.startsWith('wbe-image-') && zIndex >= 2000) {
-          // Image z-index (2000+ range)
-          if (zIndex > maxImageZIndex) {
-            maxImageZIndex = zIndex;
-          }
-        }
-      }
-    });
-
-    // Update nextZIndex values to be higher than any existing values
-    this.nextTextZIndex = maxTextZIndex;
-    this.nextImageZIndex = maxImageZIndex;
-  },
-
-  // Assign z-index to text
-  assignText(textId) {
-    const zIndex = this.getNextText();
-    this.textZIndexes.set(textId, zIndex);
-    return zIndex;
-  },
-
-  // Assign z-index to image
-  assignImage(imageId) {
-    const zIndex = this.getNextImage();
-    this.imageZIndexes.set(imageId, zIndex);
-    return zIndex;
-  },
-
-  // Get z-index for text
-  getText(textId) {
-    return this.textZIndexes.get(textId) || 1000;
-  },
-
-  // Get z-index for image
-  getImage(imageId) {
-    return this.imageZIndexes.get(imageId) || 2000;
-  },
-
-  // Get z-index for any object (tries both text and image)
-  get(id) {
-    if (id.startsWith('wbe-text-')) {
-      return this.getText(id);
-    } else if (id.startsWith('wbe-image-')) {
-      return this.getImage(id);
-    }
-    return 1000; // Default fallback
-  },
-
-  // Remove z-index for text
-  removeText(textId) {
-    this.textZIndexes.delete(textId);
-  },
-
-  // Remove z-index for image
-  removeImage(imageId) {
-    this.imageZIndexes.delete(imageId);
-  },
-
-  // Remove z-index for any object
-  remove(id) {
-    this.removeText(id);
-    this.removeImage(id);
-  },
-
-  // Check if text has z-index
-  hasText(textId) {
-    return this.textZIndexes.has(textId);
-  },
-
-  // Check if image has z-index
-  hasImage(imageId) {
-    return this.imageZIndexes.has(imageId);
-  },
-
-  // Get all tracked texts
-  getAllTexts() {
-    return Array.from(this.textZIndexes.entries());
-  },
-
-  // Get all tracked images
-  getAllImages() {
-    return Array.from(this.imageZIndexes.entries());
-  }
+// Z-Index Ranges - Reserved ranges for different element types
+const ZIndexRanges = {
+  // Editable content objects (text, images, cards) - shared range
+  EDITABLE_MIN: 1000,
+  EDITABLE_MAX: 8999,
+  
+  // UI Gizmos & Overlays (immutable, always on top)
+  UI_GIZMOS_MIN: 10000,
+  UI_GIZMOS_MAX: 19999,
+  
+  // Control Panels & Dialogs (immutable, always on top)
+  UI_PANELS_MIN: 20000,
+  UI_PANELS_MAX: 29999,
+  
+  // Mass Selection UI (immutable, always on top)
+  UI_MASS_SELECTION_MIN: 30000,
 };
+
+// Z-Index Constants - Specific values for UI elements
+const ZIndexConstants = {
+  // Selection borders
+  SELECTION_BORDER: 10000,
+  SELECTION_BORDER_ACTIVE: 10001,
+  SELECTION_BORDER_FROZEN: 10200,
+  
+  // Resize handles
+  RESIZE_HANDLE: 10100,
+  TEXT_RESIZE_HANDLE: 10101,
+  CROP_HANDLE: 10102,
+  
+  // Lock overlays
+  LOCK_OVERLAY: 10200,
+  UNFREEZE_ICON: 10201,
+  
+  // Control panels
+  IMAGE_CONTROL_PANEL: 20000,
+  TEXT_COLOR_PICKER: 20100,
+  FROZEN_CONTROL_PANEL: 20200,
+  
+  // Mass selection
+  SELECTION_BOX: 30000,
+  SELECTION_INDICATOR: 30001,
+  BOUNDING_BOX: 30002,
+};
+
+// Import the compact z-index management system directly
+import { CompactZIndexManager } from "./modules/compact-zindex-manager.mjs";
+
+// Z-Index Manager - Direct usage of CompactZIndexManager (no wrapper!)
+const ZIndexManager = new CompactZIndexManager();
+
+// ===== Utility Functions =====
+// Helper functions for prefix-based filtering and migration
+
+let migrationCompleted = false;
+
+/**
+ * Get all text objects with their z-indexes
+ * @returns {Array} Array of [id, zIndex] tuples for text objects
+ */
+function getAllTexts() {
+  const texts = [];
+  for (const [id, zIndex] of ZIndexManager.objectZIndexes) {
+    if (id.startsWith('wbe-text-')) {
+      texts.push([id, zIndex]);
+    }
+  }
+  return texts;
+}
+
+/**
+ * Get all image objects with their z-indexes
+ * @returns {Array} Array of [id, zIndex] tuples for image objects
+ */
+function getAllImages() {
+  const images = [];
+  for (const [id, zIndex] of ZIndexManager.objectZIndexes) {
+    if (id.startsWith('wbe-image-')) {
+      images.push([id, zIndex]);
+    }
+  }
+  return images;
+}
+
+/**
+ * Check if a text object exists
+ * @param {string} textId - The text object ID
+ * @returns {boolean} True if object exists
+ */
+function hasText(textId) {
+  return ZIndexManager.objectZIndexes.has(textId);
+}
+
+/**
+ * Check if an image object exists
+ * @param {string} imageId - The image object ID
+ * @returns {boolean} True if object exists
+ */
+function hasImage(imageId) {
+  return ZIndexManager.objectZIndexes.has(imageId);
+}
+
+/**
+ * Sync manager with existing z-index values (one-time migration)
+ * @param {Array} existingZIndexes - Array of [id, zIndex] tuples
+ */
+function syncWithExisting(existingZIndexes) {
+  if (!Array.isArray(existingZIndexes)) return;
+  
+  // Only migrate once
+  if (migrationCompleted) {
+    //console.log('[ZIndexManager] Migration already completed, skipping');
+    return;
+  }
+  
+  console.log(`[ZIndexManager] Starting one-time migration of ${existingZIndexes.length} objects`);
+  
+  const migrationData = existingZIndexes.map(([id, zIndex]) => ({
+    id,
+    zIndex,
+    type: id.startsWith('wbe-text-') ? 'text' : 
+          id.startsWith('wbe-image-') ? 'image' : 'editable'
+  }));
+  
+  ZIndexManager.migrateFromLegacy(migrationData);
+  migrationCompleted = true;
+  console.log('[ZIndexManager] Migration completed and locked');
+}
+
+// Attach utility functions to ZIndexManager for backward compatibility
+ZIndexManager.getAllTexts = getAllTexts;
+ZIndexManager.getAllImages = getAllImages;
+ZIndexManager.hasText = hasText;
+ZIndexManager.hasImage = hasImage;
+ZIndexManager.syncWithExisting = syncWithExisting;
 
 
 
@@ -1116,11 +1161,86 @@ export function getSharedVars() {
   };
 }
 
-// Export ZIndexManager for use by text and image modules
-export { ZIndexManager };
+// Export ZIndexManager, ZIndexRanges, and ZIndexConstants for use by text and image modules
+export { ZIndexManager, ZIndexRanges, ZIndexConstants, fixInteractionIssues };
 
 // Make ZIndexManager globally accessible for console debugging
 window.ZIndexManager = ZIndexManager;
+window.ZIndexRanges = ZIndexRanges;
+window.ZIndexConstants = ZIndexConstants;
+
+/**
+ * Fix interaction issues after z-index system changes
+ * Call this to restore proper functionality after major z-index operations
+ */
+function fixInteractionIssues() {
+  console.log('[WB-E] Fixing interaction issues after z-index changes...');
+  
+  // Fix 1: Sync all DOM z-index values with manager
+  const syncCount = ZIndexManager.syncAllDOMZIndexes();
+  
+  // Fix 2: Re-initialize unfreeze icons
+  let unfreezeCount = 0;
+  if (typeof ImageTools !== 'undefined' && ImageTools.reinitializeUnfreezeIcons) {
+    unfreezeCount = ImageTools.reinitializeUnfreezeIcons();
+  }
+  
+  // Fix 3: Reset pointer-events for interactive objects
+  let pointerFixCount = 0;
+  
+  // Fix image containers
+  const imageContainers = document.querySelectorAll('.wbe-canvas-image-container');
+  imageContainers.forEach(container => {
+    const isFrozen = container.classList.contains('wbe-image-frozen');
+    const isSelected = container.classList.contains('selected');
+    const clickTarget = container.querySelector('.wbe-image-click-target');
+    
+    if (!isFrozen) {
+      // Non-frozen images should be interactive
+      if (isSelected) {
+        // Selected images: container has pointer-events: none, click target has auto
+        container.style.setProperty("pointer-events", "none", "important");
+        if (clickTarget) {
+          clickTarget.style.setProperty("pointer-events", "auto", "important");
+        }
+      } else {
+        // Deselected images: both have pointer-events: none for canvas pass-through
+        container.style.setProperty("pointer-events", "none", "important");
+        if (clickTarget) {
+          clickTarget.style.setProperty("pointer-events", "none", "important");
+        }
+      }
+      pointerFixCount++;
+    }
+  });
+  
+  // Fix text containers
+  const textContainers = document.querySelectorAll('.wbe-canvas-text-container');
+  textContainers.forEach(container => {
+    const isSelected = container.dataset.selected === 'true';
+    const textElement = container.querySelector('.wbe-canvas-text');
+    
+    if (isSelected) {
+      // Selected text: container auto, text element auto
+      container.style.setProperty("pointer-events", "auto", "important");
+      if (textElement) {
+        textElement.style.setProperty("pointer-events", "auto", "important");
+      }
+    } else {
+      // Deselected text: both have pointer-events: none
+      container.style.setProperty("pointer-events", "none", "important");
+      if (textElement) {
+        textElement.style.setProperty("pointer-events", "none", "important");
+      }
+    }
+    pointerFixCount++;
+  });
+  
+  console.log(`[WB-E] Fixed interactions: ${syncCount} z-indexes synced, ${unfreezeCount} unfreeze icons, ${pointerFixCount} pointer-events fixed`);
+}
+
+// Make fix function globally accessible
+window.fixInteractionIssues = fixInteractionIssues;
 
 export function setSelectedImageId(value) {
   ImageTools.selectedImageId = value;
@@ -1144,12 +1264,12 @@ export function setLastClickY(value) {
 // Функция для снятия выделения со ВСЕХ элементов (кроме exceptId)
 function deselectAllElements(exceptId = null) {
 
-  // ✅ CLEAR MASS SELECTION when deselecting all elements
+  // CLEAR MASS SELECTION when deselecting all elements
   if (window.MassSelection && window.MassSelection.selectedCount > 0) {
     window.MassSelection.clear();
   }
 
-  // ✅ FIX: Clean up all panels before deselecting elements
+  // FIX: Clean up all panels before deselecting elements
   // Kill color panel for text elements
   if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
     try {
@@ -1707,7 +1827,7 @@ window.WhiteboardExperience = {
   // Хелпер для очистки текстов и картинок
   async clearCanvasElements() {
 
-    // ✅ FIX: Clean up all panels before removing elements
+    // FIX: Clean up all panels before removing elements
     if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
       try {
         window.wbeColorPanel.cleanup();
@@ -1735,15 +1855,33 @@ window.WhiteboardExperience = {
 
     }
 
-    // Очищаем флаги (только GM)
-    if (game.user.isGM) {
+    // FIX: Clear ZIndexManager state to prevent accumulation and collisions
+    if (window.ZIndexManager && typeof window.ZIndexManager.clear === "function") {
       try {
-        await canvas.scene?.unsetFlag("whiteboard-experience", "texts");
-        await canvas.scene?.unsetFlag("whiteboard-experience", "images");
+        window.ZIndexManager.clear();
+        console.log('[clearCanvasElements] ZIndexManager cleared');
       } catch (e) {
-        console.error("  ❌ Ошибка очистки флагов:", e);
+        console.error('[clearCanvasElements] Error clearing ZIndexManager:', e);
       }
-    } else {
+    }
+
+    // FIX: Clear MassSelection state
+    if (window.MassSelection && typeof window.MassSelection.clear === "function") {
+      try {
+        window.MassSelection.clear();
+        console.log('[clearCanvasElements] MassSelection cleared');
+      } catch (e) {
+        console.error('[clearCanvasElements] Error clearing MassSelection:', e);
+      }
+    }
+
+    // Очищаем флаги - используем setAllTexts/setAllImages для автоматической синхронизации
+    // Это отправляет socket запрос для non-GM, или очищает напрямую для GM
+    try {
+      await TextTools.setAllTexts({});
+      await ImageTools.setAllImages({});
+    } catch (e) {
+      console.error("[clearCanvasElements] Ошибка очистки флагов:", e);
     }
 
   },
@@ -1752,5 +1890,5 @@ window.WhiteboardExperience = {
   get massSelection() { return MassSelection; }
 };
 
-// ✅ NEW: Expose MassSelection globally for integration with text/image handlers
+// NEW: Expose MassSelection globally for integration with text/image handlers
 window.MassSelection = MassSelection;

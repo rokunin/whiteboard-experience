@@ -1,2 +1,16 @@
 *.md
 .vscode/settings.json
+/.kiro
+/.testsuite
+/node_modules
+package-lock.json
+package.json
+/playwright-report
+playwright.config.js
+/tests
+/test-results
+debug-zindex.mjs
+/.serena
+test-result.txt
+scripts/test-z-index.js
+test.txt

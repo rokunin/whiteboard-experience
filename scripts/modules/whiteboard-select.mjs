@@ -31,7 +31,8 @@ import {
   deselectAllElements,
   getOrCreateLayer,
   getSharedVars,
-  ZIndexManager
+  ZIndexManager,
+  ZIndexConstants
 } from "../main.mjs";
 
 // Import frozen image functions from image module
@@ -56,14 +57,15 @@ let massDragState = {
 };
 
 // Visual styles for mass selection
-const MASS_SELECTION_CSS = `
-
+// Generate mass selection CSS (called after imports resolve)
+function generateMassSelectionCSS() {
+  return `
   .wbe-mass-selection-box {
     position: fixed;
     border: 2px dashed #4a9eff;
     background: rgba(74, 158, 255, 0.1);
     pointer-events: none;
-    z-index: 10000;
+    z-index: ${ZIndexConstants.SELECTION_BOX};
     display: none;
   }
   
@@ -88,7 +90,7 @@ const MASS_SELECTION_CSS = `
     border: 1px solid #2c5aa0;
     background: rgba(44, 90, 160, 0.05);
     pointer-events: none;
-    z-index: 99999;
+    z-index: ${ZIndexConstants.BOUNDING_BOX};
     display: none;
     box-shadow: 0 0 0 1px rgba(44, 90, 160, 0.3);
   }
@@ -113,7 +115,7 @@ const MASS_SELECTION_CSS = `
     border-radius: 4px;
     font-size: 14px;
     font-weight: bold;
-    z-index: 10001;
+    z-index: ${ZIndexConstants.SELECTION_INDICATOR};
     display: none;
   }
   
@@ -128,14 +130,20 @@ const MASS_SELECTION_CSS = `
     outline: none !important;
   }
 `;
-
-// Inject CSS
-if (!document.getElementById("wbe-mass-selection-style")) {
-  const style = document.createElement("style");
-  style.id = "wbe-mass-selection-style";
-  style.textContent = MASS_SELECTION_CSS;
-  document.head.appendChild(style);
 }
+
+// Inject CSS (called after imports resolve)
+function injectMassSelectionStyles() {
+  if (!document.getElementById("wbe-mass-selection-style")) {
+    const style = document.createElement("style");
+    style.id = "wbe-mass-selection-style";
+    style.textContent = generateMassSelectionCSS();
+    document.head.appendChild(style);
+  }
+}
+
+// Inject CSS after imports resolve (init runs after imports but before ready)
+Hooks.once("init", injectMassSelectionStyles);
 
 /**
  * Initialize mass selection system
@@ -291,7 +299,7 @@ function updateBoundingBox() {
   boundingBox.style.display = "block";
   
   // Ensure highest z-index to appear above all objects
-  boundingBox.style.zIndex = "99999";
+  boundingBox.style.zIndex = String(ZIndexConstants.BOUNDING_BOX);
 }
 
 /**
@@ -358,7 +366,7 @@ function installGlobalClickHandler() {
     if (e.button !== 0) return;
     if (massSelectionMode || isSelecting) return;
     
-    // ✅ FIRST: Check if clicking inside mass selection bounding box
+    // FIRST: Check if clicking inside mass selection bounding box
     if (selectedObjects.size > 0) {
       const boundingBox = document.getElementById("wbe-bounding-box");
       if (boundingBox && boundingBox.style.display !== "none") {
@@ -381,11 +389,11 @@ function installGlobalClickHandler() {
       }
     }
     
-    // ✅ SECOND: Check if clicking on mass-selected objects (fallback)
+    // SECOND: Check if clicking on mass-selected objects (fallback)
     const clickedContainer = e.target.closest(".wbe-canvas-text-container, .wbe-canvas-image-container");
     if (!clickedContainer) {
       if (selectedObjects.size > 0) {
-        // ✨ FIX: Only deselect if clicking OUTSIDE bounding box
+        // FIX: Only deselect if clicking OUTSIDE bounding box
         const boundingBox = document.getElementById("wbe-bounding-box");
         if (boundingBox && boundingBox.style.display !== "none") {
           const rect = boundingBox.getBoundingClientRect();
@@ -540,7 +548,7 @@ async function handleMassDragEnd(e) {
 
 
 
-// ✅ REMOVED: Object click handlers - now integrated into existing text/image selection systems
+// REMOVED: Object click handlers - now integrated into existing text/image selection systems
 // The existing onDocMouseDown (text) and installGlobalImageSelectionHandler (image) 
 // now check for mass selection and clear it before proceeding with normal selection
 
@@ -630,41 +638,60 @@ function releaseBoundingBox(e) {
     const container = document.getElementById(selectedId);
     
     if (container) {
-      // Clear mass selection first
-      clearMassSelection();
+      // Remove mass-selected class BEFORE clearing to allow selection
+      container.classList.remove("wbe-mass-selected");
       
-      // Trigger regular selection based on object type
-      if (container.classList.contains("wbe-canvas-text-container")) {
-        // For text, we need to find and call the selectText function
-        // Since we can't directly access it, we'll simulate a click on the text element
-        const textElement = container.querySelector(".wbe-canvas-text");
-        if (textElement) {
-          // Create a synthetic click event
-          const clickEvent = new MouseEvent("mousedown", {
-            bubbles: true,
-            cancelable: true,
-            clientX: e.clientX,
-            clientY: e.clientY,
-            button: 0
-          });
-          textElement.dispatchEvent(clickEvent);
-        }
-      } else if (container.classList.contains("wbe-canvas-image-container")) {
-        // For images, we need to find and call the selectImage function
-        // Since we can't directly access it, we'll simulate a click on the click target
-        const clickTarget = container.querySelector(".wbe-image-click-target");
-        if (clickTarget) {
-          // Create a synthetic click event
-          const clickEvent = new MouseEvent("mousedown", {
-            bubbles: true,
-            cancelable: true,
-            clientX: e.clientX,
-            clientY: e.clientY,
-            button: 0
-          });
-          clickTarget.dispatchEvent(clickEvent);
-        }
+      // Clean up any active mass drag
+      if (massDragState.isDragging) {
+        massDragState.isDragging = false;
+        massDragState.startPositions.clear();
+        document.removeEventListener("mousemove", handleMassDragMove, true);
+        document.removeEventListener("mouseup", handleMassDragEnd, true);
+        document.body.style.cursor = "";
       }
+      
+      // Clear mass selection state (but container class already removed above)
+      selectedObjects.clear();
+      updateSelectionIndicator();
+      updateBoundingBox();
+      
+      // Use setTimeout to ensure DOM updates and event handlers are ready
+      setTimeout(() => {
+        // Trigger regular selection based on object type
+        if (container.classList.contains("wbe-canvas-text-container")) {
+          // For text, simulate a click on the text element
+          const textElement = container.querySelector(".wbe-canvas-text");
+          if (textElement) {
+            // Create a synthetic click event with proper coordinates
+            const rect = container.getBoundingClientRect();
+            const clickEvent = new MouseEvent("mousedown", {
+              bubbles: true,
+              cancelable: true,
+              clientX: rect.left + rect.width / 2,
+              clientY: rect.top + rect.height / 2,
+              button: 0,
+              view: window
+            });
+            textElement.dispatchEvent(clickEvent);
+          }
+        } else if (container.classList.contains("wbe-canvas-image-container")) {
+          // For images, simulate a click on the click target
+          const clickTarget = container.querySelector(".wbe-image-click-target");
+          if (clickTarget) {
+            // Create a synthetic click event with proper coordinates
+            const rect = container.getBoundingClientRect();
+            const clickEvent = new MouseEvent("mousedown", {
+              bubbles: true,
+              cancelable: true,
+              clientX: rect.left + rect.width / 2,
+              clientY: rect.top + rect.height / 2,
+              button: 0,
+              view: window
+            });
+            clickTarget.dispatchEvent(clickEvent);
+          }
+        }
+      }, 0);
     }
   } else {
     // Multiple objects selected - keep mass selection
@@ -769,9 +796,250 @@ function updateSelectionFromBox(left, top, width, height) {
 /**
  * Handle keyboard shortcuts
  */
-function handleKeyDown(e) {
+async function handleKeyDown(e) {
   // Only handle if we have selected objects
   if (selectedObjects.size === 0) return;
+  
+  // Z-index controls for mass selection
+  if (e.key === '[' || e.key === 'PageDown') {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    const objectIds = Array.from(selectedObjects);
+    
+    // For single selection, use moveDown() instead of moveDownGroup()
+    if (objectIds.length === 1) {
+      const objectId = objectIds[0];
+      const oldZIndex = ZIndexManager.get(objectId);
+      const result = ZIndexManager.moveDown(objectId);
+      
+      if (result.success) {
+        const change = result.changes[0];
+        const objectType = objectId.startsWith('wbe-text-') ? 'TEXT' : objectId.startsWith('wbe-image-') ? 'IMAGE' : 'UNKNOWN';
+        console.log(`[Z-Index] SINGLE SELECTION | ${objectType} | ID: ${objectId} | z-index: ${oldZIndex} → ${change.newZIndex}`);
+        
+        if (result.swappedWith) {
+          console.log(`    ↳ Swapped with: ${result.swappedWith.id} → z-index: ${result.swappedWith.newZIndex}`);
+        }
+        
+        // Persist swapped occupant if any
+        const { TextTools } = await import("./whiteboard-text.mjs");
+        const { ImageTools } = await import("./whiteboard-image.mjs");
+        
+        if (result.swappedWith) {
+          const swappedContainer = document.getElementById(result.swappedWith.id);
+          if (swappedContainer) {
+            if (swappedContainer.classList.contains("wbe-canvas-text-container")) {
+              const swappedTextElement = swappedContainer.querySelector(".wbe-canvas-text");
+              if (swappedTextElement) {
+                const texts = await TextTools.getAllTexts();
+                if (texts[result.swappedWith.id]) {
+                  texts[result.swappedWith.id].zIndex = result.swappedWith.newZIndex;
+                  await TextTools.persistTextState(result.swappedWith.id, swappedTextElement, swappedContainer);
+                }
+              }
+            } else if (swappedContainer.classList.contains("wbe-canvas-image-container")) {
+              const images = await ImageTools.getAllImages();
+              if (images[result.swappedWith.id]) {
+                images[result.swappedWith.id].zIndex = result.swappedWith.newZIndex;
+                await ImageTools.setAllImages(images);
+              }
+            }
+          }
+        }
+        
+        // Save selected object
+        await saveSelectedObjectsWithUpdates();
+      }
+      return;
+    }
+    
+    // Multi-selection: use moveDownGroup()
+    const oldZIndexes = objectIds.map(id => ZIndexManager.get(id));
+    const results = ZIndexManager.moveDownGroup(objectIds);
+    
+    // Collect all swapped objects
+    const swappedObjects = new Map(); // id -> newZIndex
+    
+    // Log all objects and collect swaps
+    console.log(`[Z-Index] MASS SELECTION | ${objectIds.length} object(s) | (moved down):`);
+    objectIds.forEach((id, index) => {
+      const result = results[index];
+      const objectType = id.startsWith('wbe-text-') ? 'TEXT' : id.startsWith('wbe-image-') ? 'IMAGE' : 'UNKNOWN';
+      
+      if (result.success) {
+        const change = result.changes[0];
+        console.log(`  ${objectType} | ID: ${id} | z-index: ${oldZIndexes[index]} → ${change.newZIndex}`);
+        
+        // FIX #2 & #3: Track swapped objects for DOM update and persistence
+        if (result.swappedWith) {
+          swappedObjects.set(result.swappedWith.id, result.swappedWith.newZIndex);
+          console.log(`    ↳ Swapped with: ${result.swappedWith.id} → z-index: ${result.swappedWith.newZIndex}`);
+        }
+      } else {
+        console.log(`  ${objectType} | ID: ${id} | Cannot move down - ${result.reason}`);
+      }
+    });
+    
+    // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+    // No need to manually update DOM
+    
+    // FIX #2: Update DOM for all swapped objects
+    // FIX #3: Persist all swapped objects
+    const { TextTools } = await import("./whiteboard-text.mjs");
+    const { ImageTools } = await import("./whiteboard-image.mjs");
+    
+    const texts = await TextTools.getAllTexts();
+    const images = await ImageTools.getAllImages();
+    
+    for (const [swappedId, swappedZIndex] of swappedObjects) {
+      const swappedContainer = document.getElementById(swappedId);
+      if (swappedContainer) {
+        // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+        // Persist swapped object
+        if (swappedContainer.classList.contains("wbe-canvas-text-container")) {
+          const swappedTextElement = swappedContainer.querySelector(".wbe-canvas-text");
+          if (swappedTextElement && texts[swappedId]) {
+            texts[swappedId].zIndex = swappedZIndex;
+            await TextTools.persistTextState(swappedId, swappedTextElement, swappedContainer);
+          }
+        } else if (swappedContainer.classList.contains("wbe-canvas-image-container")) {
+          if (images[swappedId]) {
+            images[swappedId].zIndex = swappedZIndex;
+          }
+        }
+      }
+    }
+    
+    // Save images if any were swapped
+    if (swappedObjects.size > 0 && Array.from(swappedObjects.keys()).some(id => id.startsWith('wbe-image-'))) {
+      await ImageTools.setAllImages(images);
+    }
+    
+    // Save selected objects
+    await saveSelectedObjectsWithUpdates();
+    return;
+  }
+  
+  if (e.key === ']' || e.key === 'PageUp') {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    const objectIds = Array.from(selectedObjects);
+    
+    // For single selection, use moveUp() instead of moveUpGroup()
+    if (objectIds.length === 1) {
+      const objectId = objectIds[0];
+      const oldZIndex = ZIndexManager.get(objectId);
+      const result = ZIndexManager.moveUp(objectId);
+      
+      if (result.success) {
+        const change = result.changes[0];
+        const objectType = objectId.startsWith('wbe-text-') ? 'TEXT' : objectId.startsWith('wbe-image-') ? 'IMAGE' : 'UNKNOWN';
+        console.log(`[Z-Index] SINGLE SELECTION | ${objectType} | ID: ${objectId} | z-index: ${oldZIndex} → ${change.newZIndex}`);
+        
+        if (result.swappedWith) {
+          console.log(`    ↳ Swapped with: ${result.swappedWith.id} → z-index: ${result.swappedWith.newZIndex}`);
+        }
+        
+        // Persist swapped occupant if any
+        const { TextTools } = await import("./whiteboard-text.mjs");
+        const { ImageTools } = await import("./whiteboard-image.mjs");
+        
+        if (result.swappedWith) {
+          const swappedContainer = document.getElementById(result.swappedWith.id);
+          if (swappedContainer) {
+            if (swappedContainer.classList.contains("wbe-canvas-text-container")) {
+              const swappedTextElement = swappedContainer.querySelector(".wbe-canvas-text");
+              if (swappedTextElement) {
+                const texts = await TextTools.getAllTexts();
+                if (texts[result.swappedWith.id]) {
+                  texts[result.swappedWith.id].zIndex = result.swappedWith.newZIndex;
+                  await TextTools.persistTextState(result.swappedWith.id, swappedTextElement, swappedContainer);
+                }
+              }
+            } else if (swappedContainer.classList.contains("wbe-canvas-image-container")) {
+              const images = await ImageTools.getAllImages();
+              if (images[result.swappedWith.id]) {
+                images[result.swappedWith.id].zIndex = result.swappedWith.newZIndex;
+                await ImageTools.setAllImages(images);
+              }
+            }
+          }
+        }
+        
+        // Save selected object
+        await saveSelectedObjectsWithUpdates();
+      }
+      return;
+    }
+    
+    // Multi-selection: use moveUpGroup()
+    const oldZIndexes = objectIds.map(id => ZIndexManager.get(id));
+    const results = ZIndexManager.moveUpGroup(objectIds);
+    
+    // Collect all swapped objects
+    const swappedObjects = new Map(); // id -> newZIndex
+    
+    // Log all objects and collect swaps
+    console.log(`[Z-Index] MASS SELECTION | ${objectIds.length} object(s) | (moved up):`);
+    objectIds.forEach((id, index) => {
+      const result = results[index];
+      const objectType = id.startsWith('wbe-text-') ? 'TEXT' : id.startsWith('wbe-image-') ? 'IMAGE' : 'UNKNOWN';
+      
+      if (result.success) {
+        const change = result.changes[0];
+        console.log(`  ${objectType} | ID: ${id} | z-index: ${oldZIndexes[index]} → ${change.newZIndex}`);
+        
+        // FIX #2 & #3: Track swapped objects for DOM update and persistence
+        if (result.swappedWith) {
+          swappedObjects.set(result.swappedWith.id, result.swappedWith.newZIndex);
+          console.log(`    ↳ Swapped with: ${result.swappedWith.id} → z-index: ${result.swappedWith.newZIndex}`);
+        }
+      } else {
+        console.log(`  ${objectType} | ID: ${id} | Cannot move up - ${result.reason}`);
+      }
+    });
+    
+    // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+    // No need to manually update DOM
+    
+    // FIX #2: Update DOM for all swapped objects
+    // FIX #3: Persist all swapped objects
+    const { TextTools } = await import("./whiteboard-text.mjs");
+    const { ImageTools } = await import("./whiteboard-image.mjs");
+    
+    const texts = await TextTools.getAllTexts();
+    const images = await ImageTools.getAllImages();
+    
+    for (const [swappedId, swappedZIndex] of swappedObjects) {
+      const swappedContainer = document.getElementById(swappedId);
+      if (swappedContainer) {
+        // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+        // Persist swapped object
+        if (swappedContainer.classList.contains("wbe-canvas-text-container")) {
+          const swappedTextElement = swappedContainer.querySelector(".wbe-canvas-text");
+          if (swappedTextElement && texts[swappedId]) {
+            texts[swappedId].zIndex = swappedZIndex;
+            await TextTools.persistTextState(swappedId, swappedTextElement, swappedContainer);
+          }
+        } else if (swappedContainer.classList.contains("wbe-canvas-image-container")) {
+          if (images[swappedId]) {
+            images[swappedId].zIndex = swappedZIndex;
+          }
+        }
+      }
+    }
+    
+    // Save images if any were swapped
+    if (swappedObjects.size > 0 && Array.from(swappedObjects.keys()).some(id => id.startsWith('wbe-image-'))) {
+      await ImageTools.setAllImages(images);
+    }
+    
+    // Save selected objects
+    await saveSelectedObjectsWithUpdates();
+    return;
+  }
   
   // Delete selected objects
   if (e.key === "Delete") {
@@ -831,7 +1099,7 @@ function registerObjectsForMassSelection() {
   const imageContainers = layer.querySelectorAll(".wbe-canvas-image-container");
   const allContainers = [...textContainers, ...imageContainers];
   
-  // ✅ REMOVED: Object click handlers - now handled by existing text/image selection systems
+  // REMOVED: Object click handlers - now handled by existing text/image selection systems
   // The existing onDocMouseDown (text) and installGlobalImageSelectionHandler (image) 
   // now check for mass selection and clear it before proceeding with normal selection
 }
@@ -954,14 +1222,14 @@ async function massDeleteSelected() {
         // Remove from texts data
         delete texts[id];
         // Clean up z-index
-        ZIndexManager.removeText(id);
+        ZIndexManager.remove(id);
         // Remove from DOM
         container.remove();
       } else if (container.classList.contains("wbe-canvas-image-container")) {
         // Remove from images data
         delete images[id];
         // Clean up z-index
-        ZIndexManager.removeImage(id);
+        ZIndexManager.remove(id);
         // Remove from DOM
         container.remove();
       }
@@ -1030,16 +1298,18 @@ async function saveSelectedObjectsWithUpdates() {
       if (container.classList.contains("wbe-canvas-text-container")) {
         const textElement = container.querySelector(".wbe-canvas-text");
         if (textElement && texts[id]) {
-          // Update the text data with new position
+          // Update the text data with new position and z-index
           texts[id].left = parseFloat(container.style.left) || 0;
           texts[id].top = parseFloat(container.style.top) || 0;
+          texts[id].zIndex = parseInt(container.style.zIndex) || ZIndexManager.get(id);
         }
       } else if (container.classList.contains("wbe-canvas-image-container")) {
         const imageElement = container.querySelector(".wbe-canvas-image");
         if (imageElement && images[id]) {
-          // Update the image data with new position
+          // Update the image data with new position and z-index
           images[id].left = parseFloat(container.style.left) || 0;
           images[id].top = parseFloat(container.style.top) || 0;
+          images[id].zIndex = parseInt(container.style.zIndex) || ZIndexManager.get(id);
         }
       }
     });
@@ -1090,7 +1360,7 @@ async function saveSelectedObjects() {
             top: parseFloat(container.style.top) || 0,
             scale: parseFloat(imageElement.style.transform?.match(/scale\(([\d.]+)\)/)?.[1]) || 1,
             isFrozen: ImageTools.isImageFrozen(id),
-            zIndex: ZIndexManager.getImage(id),
+            zIndex: ZIndexManager.get(id),
             // Add other properties as needed
           };
         }
@@ -1287,6 +1557,17 @@ export const MassSelection = {
   
   // Bounding box functions
   updateBoundingBox: updateBoundingBox,
+  
+  // Add single object to selection (for individual selections)
+  addObject: (objectId) => {
+    const container = document.getElementById(objectId);
+    if (container && !selectedObjects.has(objectId)) {
+      selectedObjects.add(objectId);
+      container.classList.add("wbe-mass-selected");
+      updateSelectionIndicator();
+      updateBoundingBox();
+    }
+  },
   
   // Getters
   get isActive() { return massSelectionMode; },

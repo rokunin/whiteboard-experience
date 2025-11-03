@@ -13,7 +13,8 @@ import {
   createCardsLayer,
   deselectAllElements,
   getOrCreateLayer,
-  ZIndexManager
+  ZIndexManager,
+  ZIndexConstants
 } from "../main.mjs";
 
 let copiedTextData = null; // Буфер для копирования текста
@@ -86,7 +87,7 @@ function applyTextLockVisual(container, lockerId, lockerName) {
     height: ${height}px;
     background: rgba(183, 6, 199, 0.54);
     pointer-events: none;
-    z-index: 1001;
+    z-index: ${ZIndexConstants.LOCK_OVERLAY};
     display: flex;
     align-items: center;
     justify-content: center;
@@ -415,7 +416,7 @@ function extractTextState(id, textElement, container) {
   const left = parseFloat(container.style.left);
   const top = parseFloat(container.style.top);
   const width = textElement.style.width ? parseFloat(textElement.style.width) : null;
-  const zIndex = ZIndexManager.getText(id);
+  const zIndex = ZIndexManager.get(id);
 
   return {
     text: textElement.textContent,
@@ -464,8 +465,8 @@ function destroyTextElementById(id) {
   const el = document.getElementById(id);
   if (el) el.remove();
   
-  // ✅ FIX: Remove z-index from manager
-  ZIndexManager.removeText(id);
+  // FIX: Remove z-index from manager
+  ZIndexManager.remove(id);
   
   killColorPanel(); // ensure stray panel listeners are gone
 }
@@ -507,7 +508,7 @@ async function showColorPicker() {
     border-radius: 14px;
     box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
     padding: 6px;
-    z-index: 10000;
+    z-index: ${ZIndexConstants.TEXT_COLOR_PICKER};
     pointer-events: auto;
     display: flex;
     align-items: center;
@@ -1142,6 +1143,7 @@ function safeReshowColorPicker(targetId, delayMs = 0) {
     if (!el) return;
     // Reassert selection target in case other handlers nulled it
     selectedTextId = targetId;
+
     await showColorPicker();
   };
 
@@ -1223,7 +1225,14 @@ function installTextModeKeys() {
     if (e.keyCode === 84) { // KeyCode 84 is 'T' in any language
       if (e.ctrlKey || e.metaKey || e.altKey) return; // Don't interfere with shortcuts
       
-      // 🔥 CRITICAL FIX: Ignore T-key when user is editing text
+      // CRITICAL FIX: Ignore T-key when user is editing text
+      // Check if any text element is currently being edited
+      const activeElement = document.activeElement;
+      if (activeElement && activeElement.contentEditable === "true") {
+        return; // Don't interfere with text editing!
+      }
+      
+      // Also check selected text element as backup
       if (selectedTextId) {
         const container = document.getElementById(selectedTextId);
         const textElement = container?.querySelector(".wbe-canvas-text");
@@ -1359,8 +1368,9 @@ async function globalPasteText() {
     if (!textEl) return;
     await persistTextState(newTextId, textEl, container);
     
-    // ✅ LOG: Track global text paste with z-index
-    const zIndex = ZIndexManager.getText(newTextId);
+    // LOG: Track global text paste with z-index
+    const zIndex = ZIndexManager.get(newTextId);
+    console.log(`[Text Paste] ID: ${newTextId} | z-index: ${zIndex} (global paste)`);
     
     ui.notifications.info("Текст вставлен");
 }
@@ -1384,8 +1394,9 @@ async function handleTextPasteFromClipboard(text) {
     if (!textEl) return;
     await persistTextState(textId, textEl, container);
     
-    // ✅ LOG: Track clipboard text paste with z-index
-    const zIndex = ZIndexManager.getText(textId);
+    // LOG: Track clipboard text paste with z-index
+    const zIndex = ZIndexManager.get(textId);
+    console.log(`[Text Paste] ID: ${textId} | z-index: ${zIndex} (clipboard paste)`);
     
     // Update container dimensions after paste
     updateTextUI(container);
@@ -1471,15 +1482,16 @@ function createTextElement(
     container.id = id;
     container.className = "wbe-canvas-text-container";
     
-    // ✅ FIX: Get z-index from manager or use existing
-    const zIndex = existingZIndex || ZIndexManager.assignText(id);
+    // FIX: Get z-index from manager or use existing
+    const zIndex = existingZIndex || ZIndexManager.assign(id);
     
-    // If using existing z-index, make sure it's registered in the manager
+    // If using existing z-index, make sure it's registered
     if (existingZIndex) {
-      ZIndexManager.textZIndexes.set(id, existingZIndex);
+      ZIndexManager.set(id, existingZIndex);
     }
     
-    // ✅ LOG: Track text creation with z-index
+    // LOG: Track text creation with z-index
+    console.log(`[Text Creation] ID: ${id} | z-index: ${zIndex} ${existingZIndex ? '(from existing)' : '(newly assigned)'}`);
     
     container.style.cssText = `
       position: absolute;
@@ -1547,7 +1559,7 @@ function createTextElement(
       border: 1px solid #4a9eff;
       border-radius: 50%;
       cursor: nwse-resize;
-      z-index: 3002;
+      z-index: ${ZIndexConstants.TEXT_RESIZE_HANDLE};
       pointer-events: auto;
       user-select: none;
       transform-origin: right center;
@@ -1604,7 +1616,7 @@ function createTextElement(
       await exitEditMode();
     };
     
-    // ✅ NEW: Add exitEditMode function
+    // NEW: Add exitEditMode function
     async function exitEditMode() {
       if (!isEditing) return;
       
@@ -1631,7 +1643,7 @@ function createTextElement(
       await persistTextState(id, textElement, container);
       
       // Return to selected state
-      // ✅ CLEAR MASS SELECTION when exiting edit mode
+      // CLEAR MASS SELECTION when exiting edit mode
       if (window.MassSelection && window.MassSelection.selectedCount > 0) {
         window.MassSelection.clear();
       }
@@ -1660,20 +1672,20 @@ function createTextElement(
       e.preventDefault();
       e.stopPropagation();
       
-      // ✅ NEW: Check if locked by another user
+      // NEW: Check if locked by another user
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
         ui.notifications.warn("This text is being edited by another user");
         return;
       }
       
-      // ✅ NEW: Toggle edit mode
+      // NEW: Toggle edit mode
       if (isEditing) {
         // Already editing - exit edit mode
         await exitEditMode();
         return;
       }
       
-      // ✅ NEW: Enter edit mode with lock
+      // NEW: Enter edit mode with lock
       isEditing = true;
       
       // Broadcast lock to all users
@@ -1764,14 +1776,25 @@ function createTextElement(
     
     // Функция выделения/снятия выделения
     function selectText() {
-      // ✅ PREVENT SELECTION OF MASS-SELECTED TEXT
+      // PREVENT SELECTION OF MASS-SELECTED TEXT
       if (container.classList.contains("wbe-mass-selected")) {
         return; // Don't select mass-selected text individually
       }
       
       isSelected = true;
       selectedTextId = id; // Устанавливаем глобальный ID
+
       setSelectedImageId(null); // Сбрасываем выделение картинки
+      
+      // Clear any existing mass selection before individual selection
+      if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+        window.MassSelection.clear();
+      }
+      
+      // Register with mass selection system for keyboard handlers
+      if (window.MassSelection && typeof window.MassSelection.addObject === 'function') {
+        window.MassSelection.addObject(id);
+      }
       
       // Снимаем выделение со ВСЕХ других элементов (кроме текущего)
       deselectAllElements(id);
@@ -1795,10 +1818,23 @@ function createTextElement(
         resizeHandle.style.transform = "scale(1)";
       });
       
+      
       // Automatically show color pickers when text is selected (but not during editing)
       if (!isEditing) {
-        // ✅ FIX: Always ensure fresh panel
+        // FIX: Always ensure fresh panel
         killColorPanel(); // Clean up any existing panel
+        
+        // FIX: Ensure selection state is maintained during color panel creation
+        const maintainSelection = () => {
+          if (selectedTextId === id && !isEditing) {
+            textElement.style.setProperty("outline", "1px solid #4a9eff", "important");
+            textElement.style.setProperty("outline-offset", "0px", "important");
+            resizeHandle.style.display = "flex";
+          }
+        };
+        
+        // Maintain selection state during panel creation delay
+        setTimeout(maintainSelection, 50);
         safeReshowColorPicker(id, 100); // Show fresh panel for this text
       }
       
@@ -1808,7 +1844,8 @@ function createTextElement(
       range.selectNodeContents(textElement);
       selection.removeAllRanges();
       selection.addRange(range);
-      
+      console.log("zindex of text element from dom", container.style.zIndex);
+      console.log("zindex of text element from zindex manager",ZIndexManager.get(id));
     }
     
     function deselectText() {
@@ -1816,6 +1853,7 @@ function createTextElement(
         isSelected = false;
         delete container.dataset.selected; // Убираем метку
         if (selectedTextId === id) selectedTextId = null; // Сбрасываем глобальный ID только если это МЫ
+
         
         container.style.removeProperty("pointer-events");
         textElement.style.removeProperty("outline");
@@ -1895,8 +1933,9 @@ function createTextElement(
       const textEl = container.querySelector(".wbe-canvas-text");
       if (textEl) await persistTextState(newTextId, textEl, container);
       
-      // ✅ LOG: Track text paste with z-index
-      const zIndex = ZIndexManager.getText(newTextId);
+      // LOG: Track text paste with z-index
+      const zIndex = ZIndexManager.get(newTextId);
+      console.log(`[Text Paste] ID: ${newTextId} | z-index: ${zIndex} (pasteText closure)`);
       
       // Update container dimensions after paste
       updateTextUI(container);
@@ -1906,8 +1945,79 @@ function createTextElement(
     }
     
     // ---- Document-level handlers bound to this element ----
-    const keydownHandler = (e) => {
+    const keydownHandler = async (e) => {
       if (selectedTextId !== id) return;
+      
+      // Z-index controls - raise/lower z-index
+      // Skip if mass selection is active (let whiteboard-select handle it)
+      if (!isEditing && globalThis.selectedObjects?.size > 1) return;
+      
+      if (!isEditing && (e.key === '[' || e.key === 'PageDown')) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        const oldZIndex = ZIndexManager.get(id);
+        const result = ZIndexManager.moveDown(id);
+        if (result.success) {
+          const change = result.changes[0];
+          // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+          
+          // FIX #3: Persist swapped occupant to database
+          if (result.swappedWith) {
+            const swappedContainer = document.getElementById(result.swappedWith.id);
+            if (swappedContainer) {
+              // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+              const swappedTextElement = swappedContainer.querySelector(".wbe-canvas-text");
+              if (swappedTextElement) {
+                await persistTextState(result.swappedWith.id, swappedTextElement, swappedContainer);
+              }
+            }
+            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
+          } else {
+            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down to next object)`);
+          }
+          
+          await persistTextState(id, textElement, container);
+        } else {
+          // At boundary - provide feedback
+          console.log(`[Z-Index] TEXT | ID: ${id} | Cannot move down - ${result.reason}`);
+        }
+        return;
+      }
+      
+      if (!isEditing && (e.key == ']' || e.key === 'PageUp')) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        const oldZIndex = ZIndexManager.get(id);
+        const result = ZIndexManager.moveUp(id);
+        if (result.success) {
+          const change = result.changes[0];
+          // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+          
+          // FIX #3: Persist swapped occupant to database
+          if (result.swappedWith) {
+            const swappedContainer = document.getElementById(result.swappedWith.id);
+            if (swappedContainer) {
+              // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+              const swappedTextElement = swappedContainer.querySelector(".wbe-canvas-text");
+              if (swappedTextElement) {
+                await persistTextState(result.swappedWith.id, swappedTextElement, swappedContainer);
+              }
+            }
+            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
+          } else {
+            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up to next object)`);
+          }
+          
+          await persistTextState(id, textElement, container);
+        } else {
+          // At boundary - provide feedback
+          console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} | Cannot move up - ${result.reason}`);
+        }
+        return;
+      }
+      
       if (!isEditing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault(); e.stopPropagation();
         deleteText();
@@ -1966,7 +2076,7 @@ function createTextElement(
       }
       if (e.button !== 0) return;
       
-      // ✅ PREVENT SINGLE CLICK SELECTION OF MASS-SELECTED TEXT
+      // PREVENT SINGLE CLICK SELECTION OF MASS-SELECTED TEXT
       if (container.classList.contains("wbe-mass-selected")) {
         e.preventDefault();
         e.stopPropagation();
@@ -1978,8 +2088,20 @@ function createTextElement(
         return; // Let everything pass through to canvas
       }
       container.style.setProperty("pointer-events", "auto", "important");
-      const hit = document.elementFromPoint(e.clientX, e.clientY);
-      if (hit === container || container.contains(hit)) {
+      // FIX: Check elementsFromPoint to see if text is actually on top
+      // Use elementsFromPoint (not elementFromPoint) to check z-order when overlapping with images
+      const elementsAtPoint = document.elementsFromPoint(e.clientX, e.clientY);
+      const textInStack = elementsAtPoint.some(el => el === container || container.contains(el));
+      const textIndex = elementsAtPoint.findIndex(el => el === container || container.contains(el));
+      const imageIndex = elementsAtPoint.findIndex(el => 
+        el.classList.contains('wbe-image-click-target') || 
+        el.classList.contains('wbe-canvas-image-container')
+      );
+      
+      // Only proceed if text is on top (or no image found)
+      const textIsOnTop = textInStack && (imageIndex === -1 || textIndex < imageIndex);
+      
+      if (textIsOnTop) {
         if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
           e.preventDefault(); e.stopPropagation();
           return; // Don't select locked text
@@ -1987,12 +2109,27 @@ function createTextElement(
         if (!isSelected) {
           e.preventDefault(); e.stopPropagation();
           
-          // ✅ CLEAR MASS SELECTION when selecting individual text
+          // CLEAR MASS SELECTION when selecting individual text
           if (window.MassSelection && window.MassSelection.selectedCount > 0) {
             window.MassSelection.clear();
           }
           
           selectText();
+          
+      // FIX: Ensure drag works and visual feedback is applied immediately after selection
+      // Re-apply styles to prevent async image deselection from removing them
+      container.style.setProperty("pointer-events", "auto", "important");
+      textElement.style.setProperty("outline", "1px solid #4a9eff", "important");
+      textElement.style.setProperty("outline-offset", "0px", "important");
+      
+      // FIX: Ensure border persists even if image handler runs after
+      // Use requestAnimationFrame to re-apply after any pending DOM updates
+      requestAnimationFrame(() => {
+        if (container.dataset.selected === "true") {
+          textElement.style.setProperty("outline", "1px solid #4a9eff", "important");
+          textElement.style.setProperty("outline-offset", "0px", "important");
+        }
+      });
         } else if (!window.wbeColorPanel) {
           safeReshowColorPicker(id, 0);
         }
@@ -2073,14 +2210,12 @@ function createTextElement(
       container.style.left = `${newLeft}px`;
       container.style.top = `${newTop}px`;
       
-      // Update panel position if it exists
-      if (window.wbeColorPanelUpdate) {
-        window.wbeColorPanelUpdate();
-      }
+      // Panel should be killed during drag, don't update it
     }
   
     async function handleMouseUp() {
       if (dragging) {
+        const wasDragging = dragInitialized; // Remember if we actually dragged
         dragging = false;
         dragInitialized = false;
         document.removeEventListener("mousemove", handleMouseMove);
@@ -2094,13 +2229,19 @@ function createTextElement(
         // Сохранить позицию КОНТЕЙНЕРА
         await persistTextState(id, textElement, container);
         
-        // Re-assert selection and refresh panel positioning
-        // ✅ CLEAR MASS SELECTION when re-asserting after resize
+        // Re-assert selection and restore panel after drag
+        // CLEAR MASS SELECTION when re-asserting after drag
         if (window.MassSelection && window.MassSelection.selectedCount > 0) {
           window.MassSelection.clear();
         }
-        selectText();            // keeps outline, selection state, id
-        window.wbeColorPanelUpdate?.();
+        
+        // Only restore panel if we actually dragged (not just a click)
+        if (wasDragging) {
+          selectText();            // keeps outline, selection state, id, restores panel
+        } else {
+          // Just a click on already selected text - don't kill/restore panel
+          // Panel update already handled in onDocMouseDown
+        }
       }
     }
     
@@ -2109,6 +2250,9 @@ function createTextElement(
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
+      
+      // Kill color panel during resize
+      killColorPanel();
       
       resizing = true;
       resizeStartX = e.clientX;
@@ -2152,6 +2296,9 @@ function createTextElement(
         e.preventDefault();
         e.stopPropagation();
         
+        // Kill color panel during width resize
+        killColorPanel();
+        
         resizing = true;
         resizeStartX = e.clientX;
         resizeStartScale = textElement.offsetWidth;
@@ -2174,6 +2321,9 @@ function createTextElement(
       else if (x >= width - 8) {
         e.preventDefault();
         e.stopPropagation();
+        
+        // Kill color panel during width resize
+        killColorPanel();
         
         resizing = true;
         resizeStartX = e.clientX;
@@ -2213,9 +2363,7 @@ function createTextElement(
       // Update container dimensions after scale change
       updateTextUI(container);
       
-      if (window.wbeColorPanelUpdate) {
-        window.wbeColorPanelUpdate();
-      }
+      // Panel should be killed during resize, don't update it
     }
     
     function handleLeftResize(e) {
@@ -2227,9 +2375,7 @@ function createTextElement(
       textElement.style.width = `${newWidth}px`;
       textElement.dataset.manualWidth = "true"; // Mark as manually set
       
-      if (window.wbeColorPanelUpdate) {
-        window.wbeColorPanelUpdate();
-      }
+      // Panel should be killed during resize, don't update it
     }
     
     function handleRightResize(e) {
@@ -2241,9 +2387,7 @@ function createTextElement(
       textElement.style.width = `${newWidth}px`;
       textElement.dataset.manualWidth = "true"; // Mark as manually set
       
-      if (window.wbeColorPanelUpdate) {
-        window.wbeColorPanelUpdate();
-      }
+      // Panel should be killed during resize, don't update it
     }
     
     async function handleResizeUp() {
@@ -2279,13 +2423,12 @@ function createTextElement(
         // Сохранить позицию контейнера + scale textElement
         await persistTextState(id, textElement, container);
         
-        // Re-assert selection and refresh panel positioning
-        // ✅ CLEAR MASS SELECTION when re-asserting after resize
+        // Re-assert selection and restore panel after resize
+        // CLEAR MASS SELECTION when re-asserting after resize
         if (window.MassSelection && window.MassSelection.selectedCount > 0) {
           window.MassSelection.clear();
         }
-        selectText();            // keeps outline, selection state, id
-        window.wbeColorPanelUpdate?.();
+        selectText();            // keeps outline, selection state, id, restores panel
       }
     }
     
@@ -2319,8 +2462,9 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
     if (!textEl) return;
     await persistTextState(textId, textEl, container);
     
-    // ✅ LOG: Track main text creation with z-index
-    const zIndex = ZIndexManager.getText(textId);
+    // LOG: Track main text creation with z-index
+    const zIndex = ZIndexManager.get(textId);
+    console.log(`[Text Creation] ID: ${textId} | z-index: ${zIndex} (addTextToCanvas)`);
     
     // Update container dimensions after creation
     updateTextUI(container);
@@ -2389,7 +2533,7 @@ async function setAllTexts(texts) {
             existingIds.add(id);
             const existing = document.getElementById(id);
             if (existing) {
-              // 🔥 CRITICAL FIX: Skip locked text elements
+              // CRITICAL FIX: Skip locked text elements
               if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
                 continue; // Don't update! This prevents cursor reset!
               }
@@ -2397,7 +2541,7 @@ async function setAllTexts(texts) {
               // Обновляем существующий элемент
               const textElement = existing.querySelector(".wbe-canvas-text");
               if (textElement) {
-                // ✅ ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
+                // ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
                 if (textElement.contentEditable === "true") {
                   continue;
                 }
@@ -2432,10 +2576,11 @@ async function setAllTexts(texts) {
                   textElement.dataset.manualWidth = "false"; // Mark as auto
                 }
                 
-                // ✅ FIX: Update z-index from database
+                // FIX: Update z-index from database
                 if (textData.zIndex) {
                   existing.style.zIndex = textData.zIndex;
-                  ZIndexManager.textZIndexes.set(id, textData.zIndex);
+                  // TEMPORARILY DISABLED: Don't overwrite manager with potentially stale DB values
+                  // ZIndexManager.set(id, textData.zIndex);
                 }
                 
                 // Clamp container to scaled dimensions
@@ -2483,10 +2628,11 @@ async function setAllTexts(texts) {
                     textElement.dataset.manualWidth = "false";
                   }
                   
-                  // ✅ FIX: Update z-index from database for new elements
+                  // FIX: Update z-index from database for new elements
                   if (textData.zIndex) {
                     createdContainer.style.zIndex = textData.zIndex;
-                    ZIndexManager.textZIndexes.set(id, textData.zIndex);
+                    // TEMPORARILY DISABLED: Don't overwrite manager with potentially stale DB values
+                    // ZIndexManager.set(id, textData.zIndex);
                   }
                   
                   // Clamp container to scaled dimensions for new elements
