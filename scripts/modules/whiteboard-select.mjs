@@ -807,6 +807,12 @@ async function handleKeyDown(e) {
     e.stopImmediatePropagation();
     const objectIds = Array.from(selectedObjects);
     
+    // Prevent mass-select z-index changes
+    if (objectIds.length > 1) {
+      ui.notifications.info("Mass-select layers will be supported later.");
+      return;
+    }
+    
     // For single selection, use moveDown() instead of moveDownGroup()
     if (objectIds.length === 1) {
       const objectId = objectIds[0];
@@ -926,6 +932,12 @@ async function handleKeyDown(e) {
     e.stopPropagation();
     e.stopImmediatePropagation();
     const objectIds = Array.from(selectedObjects);
+    
+    // Prevent mass-select z-index changes
+    if (objectIds.length > 1) {
+      ui.notifications.info("Mass-select layers will be supported later.");
+      return;
+    }
     
     // For single selection, use moveUp() instead of moveUpGroup()
     if (objectIds.length === 1) {
