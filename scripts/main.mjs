@@ -740,7 +740,7 @@ Hooks.once("ready", async () => {
       console.log(`[WB-E] Received textLock for ${data.textId} from ${data.userName}`);
       const container = document.getElementById(data.textId);
       if (container && data.userId !== game.user.id) {
-        TextTools.applyTextLockVisual(container, data.userId, data.userName);
+        TextTools.applyTextLockVisual(container, data.userId, data.userName, data.width, data.height);
       }
     }
 

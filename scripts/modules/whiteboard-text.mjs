@@ -50,7 +50,7 @@ const disposers = new Map();
 /**
  * Apply visual lock overlay when another user is editing text
  */
-function applyTextLockVisual(container, lockerId, lockerName) {
+function applyTextLockVisual(container, lockerId, lockerName, providedWidth = null, providedHeight = null) {
   if (!container) return;
   
   // Auto-deselect if we're viewing a locked element
@@ -67,9 +67,10 @@ function applyTextLockVisual(container, lockerId, lockerName) {
   const textElement = container.querySelector(".wbe-canvas-text");
   if (!textElement) return;
   
+  // Use provided dimensions if available, otherwise calculate
   const scale = getTextScale(textElement);
-  const width = textElement.offsetWidth * scale;
-  const height = textElement.offsetHeight * scale;
+  const width = providedWidth !== null && providedWidth > 0 ? providedWidth : (textElement.offsetWidth * scale);
+  const height = providedHeight !== null && providedHeight > 0 ? providedHeight : (textElement.offsetHeight * scale);
   
   // Create or update lock overlay
   let lockOverlay = container.querySelector(".wbe-text-lock-overlay");
@@ -1620,6 +1621,36 @@ function createTextElement(
     async function exitEditMode() {
       if (!isEditing) return;
       
+      // Check if text is empty - delete if so
+      const textContent = textElement.textContent.trim();
+      if (textContent === "") {
+        // Text is empty - delete it
+        isEditing = false;
+        textElement.contentEditable = "false";
+        textElement.style.userSelect = "none";
+        
+        // Remove the blur handler
+        document.removeEventListener("mousedown", editBlurHandler, true);
+        
+        // Remove lock locally
+        delete container.dataset.lockedBy;
+        
+        // Broadcast unlock before deletion
+        game.socket.emit(`module.${MODID}`, {
+          type: "textUnlock",
+          textId: id
+        });
+        
+        // Delete the text element
+        const texts = await getAllTexts();
+        delete texts[id];
+        await setAllTexts(texts);
+        
+        // Destroy the element
+        destroyTextElementById(id);
+        
+        return;
+      }
       
       isEditing = false;
       textElement.contentEditable = "false";
@@ -1688,12 +1719,19 @@ function createTextElement(
       // NEW: Enter edit mode with lock
       isEditing = true;
       
-      // Broadcast lock to all users
+      // Get current dimensions for lock overlay
+      const scale = getTextScale(textElement);
+      const width = textElement.offsetWidth * scale;
+      const height = textElement.offsetHeight * scale;
+      
+      // Broadcast lock to all users with dimensions
       game.socket.emit(`module.${MODID}`, {
         type: "textLock",
         textId: id,
         userId: game.user.id,
-        userName: game.user.name
+        userName: game.user.name,
+        width: width,
+        height: height
       });
       
       // Mark locked locally
@@ -1733,6 +1771,38 @@ function createTextElement(
     textElement.addEventListener("keydown", async (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
+        
+        // Check if text is empty before exiting
+        const textContent = textElement.textContent.trim();
+        if (textContent === "") {
+          // Text is empty - delete it
+          isEditing = false;
+          textElement.contentEditable = "false";
+          textElement.style.userSelect = "none";
+          
+          // Remove the blur handler
+          document.removeEventListener("mousedown", editBlurHandler, true);
+          
+          // Remove lock locally
+          delete container.dataset.lockedBy;
+          
+          // Broadcast unlock before deletion
+          game.socket.emit(`module.${MODID}`, {
+            type: "textUnlock",
+            textId: id
+          });
+          
+          // Delete the text element
+          const texts = await getAllTexts();
+          delete texts[id];
+          await setAllTexts(texts);
+          
+          // Destroy the element
+          destroyTextElementById(id);
+          
+          return;
+        }
+        
         await exitEditMode();
       }
     });
@@ -2460,14 +2530,29 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
     if (!container) return;
     const textEl = container.querySelector(".wbe-canvas-text");
     if (!textEl) return;
+    
+    // Force layout recalculation to get proper dimensions
+    // This ensures the text element has real dimensions before we persist
+    textEl.offsetHeight; // Force reflow
+    const scale = getTextScale(textEl);
+    const currentWidth = textEl.offsetWidth || 100; // Default to 100px if still 0
+    const currentHeight = textEl.offsetHeight || 20; // Default to 20px if still 0
+    
+    // Set explicit width if not already set (for proper initial sizing)
+    if (!textEl.style.width || textEl.style.width === 'auto') {
+      textEl.style.width = `${Math.max(currentWidth, 100)}px`;
+      textEl.dataset.manualWidth = "false"; // Mark as auto
+    }
+    
+    // Update container dimensions after creation
+    updateTextUI(container);
+    
+    // Persist state with proper dimensions
     await persistTextState(textId, textEl, container);
     
     // LOG: Track main text creation with z-index
     const zIndex = ZIndexManager.get(textId);
     console.log(`[Text Creation] ID: ${textId} | z-index: ${zIndex} (addTextToCanvas)`);
-    
-    // Update container dimensions after creation
-    updateTextUI(container);
     
     // If in text mode, automatically enter edit mode
     if (autoEdit) {
