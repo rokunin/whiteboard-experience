@@ -62,6 +62,10 @@ Hooks.once("ready", async () => {
   // Поднять все тексты и картинки
   await loadCanvasElements();
 
+  // Request active locks from all users after loading elements
+  // This restores locks after page refresh (F5)
+  requestActiveLocks();
+
   // Initialize mass selection system
   MassSelection.initialize();
   MassSelection.setToggleState(massSelectionToggleState);
@@ -180,9 +184,13 @@ Hooks.once("ready", async () => {
             const existing = document.getElementById(id);
             if (existing) {
               // CRITICAL FIX: Skip locked text elements (GM socket handler)
-              if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
-                console.log(`[WB-E] GM skipping socket update for ${id} - locked by user ${existing.dataset.lockedBy}`);
-                continue; // Don't update! This prevents cursor reset!
+              // Check both dataset.lockedBy AND lock overlay (more reliable - works even if lock restored after socket update)
+              const hasLockOverlay = existing.querySelector(".wbe-text-lock-overlay") !== null;
+              const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
+              if (hasLockOverlay || isLockedByOther) {
+                const lockedBy = existing.dataset.lockedBy || "unknown";
+                console.log(`[WB-E] GM skipping socket update for ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
+                continue; // Don't update! This prevents cursor reset and size changes!
               }
 
               // Обновляем существующий элемент
@@ -207,13 +215,18 @@ Hooks.once("ready", async () => {
                 TextTools.applyFontSizeToElement?.(textElement, textData.fontSize || TextTools.DEFAULT_FONT_SIZE);
                 TextTools.applyBorderDataToElement?.(textElement, textData.borderColor, textData.borderWidth);
 
-                // FIX: Apply width if present
-                if (textData.width && textData.width > 0) {
-                  textElement.style.width = `${textData.width}px`;
-                  textElement.dataset.manualWidth = "true";
+                // CRITICAL FIX: Don't update width if element is locked (lockedSize prevents size changes)
+                if (!textElement.dataset.lockedSize) {
+                  // FIX: Apply width if present
+                  if (textData.width && textData.width > 0) {
+                    textElement.style.width = `${textData.width}px`;
+                    textElement.dataset.manualWidth = "true";
+                  } else {
+                    textElement.style.width = "";
+                    textElement.dataset.manualWidth = "false";
+                  }
                 } else {
-                  textElement.style.width = "";
-                  textElement.dataset.manualWidth = "false";
+                  console.log(`[WB-E] GM skipping width update for ${id} - element is locked (lockedSize=true)`);
                 }
 
                 // Update resize handle position after scale/size changes
@@ -303,9 +316,13 @@ Hooks.once("ready", async () => {
           const existing = document.getElementById(id);
           if (existing) {
             // CRITICAL FIX: Skip locked text elements
-            if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
-              console.log(`[WB-E] Skipping socket update for ${id} - locked by user ${existing.dataset.lockedBy}`);
-              continue; // Don't update! This prevents cursor reset!
+            // Check both dataset.lockedBy AND lock overlay (more reliable - works even if lock restored after socket update)
+            const hasLockOverlay = existing.querySelector(".wbe-text-lock-overlay") !== null;
+            const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
+            if (hasLockOverlay || isLockedByOther) {
+              const lockedBy = existing.dataset.lockedBy || "unknown";
+              console.log(`[WB-E] Skipping socket update for ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
+              continue; // Don't update! This prevents cursor reset and size changes!
             }
 
             // Обновляем существующий элемент
@@ -330,11 +347,28 @@ Hooks.once("ready", async () => {
               TextTools.applyFontSizeToElement?.(textElement, textData.fontSize || TextTools.DEFAULT_FONT_SIZE);
               TextTools.applyBorderDataToElement?.(textElement, textData.borderColor, textData.borderWidth);
 
-              // Apply width if it was set
-              if (textData.width && textData.width > 0) {
-                textElement.style.width = `${textData.width}px`;
+              // CRITICAL FIX: Don't update width if element is locked (lockedSize prevents size changes)
+              if (!textElement.dataset.lockedSize) {
+                // Apply width if it was set
+                if (textData.width && textData.width > 0) {
+                  textElement.style.width = `${textData.width}px`;
+                } else {
+                  textElement.style.width = "";
+                }
               } else {
-                textElement.style.width = "";
+                console.log(`[WB-E] Skipping width update for ${id} - element is locked (lockedSize=true)`);
+              }
+
+              // CRITICAL FIX: Update z-index in DOM when receiving socket updates
+              if (textData.zIndex !== undefined && textData.zIndex !== null) {
+                const currentDOMZIndex = parseInt(existing.style.zIndex) || 0;
+                if (currentDOMZIndex !== textData.zIndex) {
+                  existing.style.zIndex = textData.zIndex;
+                  // Also sync with ZIndexManager to keep state consistent
+                  if (window.ZIndexManager && typeof window.ZIndexManager.set === 'function') {
+                    window.ZIndexManager.set(id, textData.zIndex);
+                  }
+                }
               }
 
               // Update resize handle position after scale/size changes
@@ -379,9 +413,22 @@ Hooks.once("ready", async () => {
           }
         }
 
-        // Удаляем элементы, которых больше нет в texts
+        // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
+        // AND not actively being edited/manipulated (to prevent race conditions during rapid updates)
         existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
+            // Don't remove if element is locked/being edited
+            if (element.dataset.lockedBy) {
+              console.log(`[WB-E] Preserving ${element.id} - locked by user ${element.dataset.lockedBy}`);
+              return;
+            }
+            
+            const textElement = element.querySelector(".wbe-canvas-text");
+            if (textElement && textElement.contentEditable === "true") {
+              console.log(`[WB-E] Preserving ${element.id} - actively being edited`);
+              return;
+            }
+            
             // FIX: Clean up color panel before removing element
             if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
               try {
@@ -419,17 +466,38 @@ Hooks.once("ready", async () => {
           for (const [id, imageData] of Object.entries(data.images)) {
             existingIds.add(id);
             const existing = document.getElementById(id);
-            if (existing) {
-              // Обновляем существующий элемент
-              ImageTools.updateImageElement(existing, imageData);
-            } else {
-              // Создаем новый элемент
-              const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-              const maskTypeData = imageData.maskType || 'rect';
-              const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
-              const circleRadiusData = imageData.circleRadius || null;
-              ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
+          if (existing) {
+            // CRITICAL FIX: Skip locked image elements (GM socket handler)
+            // Check both dataset.lockedBy AND lock overlay (more reliable - works even if lock restored after socket update)
+            const hasLockOverlay = existing.querySelector(".wbe-image-lock-overlay") !== null;
+            const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
+            if (hasLockOverlay || isLockedByOther) {
+              const lockedBy = existing.dataset.lockedBy || "unknown";
+              console.log(`[WB-E] GM skipping socket update for image ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
+              continue; // Don't update! This prevents crop changes!
             }
+            // Обновляем существующий элемент
+            ImageTools.updateImageElement(existing, imageData);
+            
+            // CRITICAL FIX: Update z-index in DOM when receiving socket updates
+            if (imageData.zIndex !== undefined && imageData.zIndex !== null) {
+              const currentDOMZIndex = parseInt(existing.style.zIndex) || 0;
+              if (currentDOMZIndex !== imageData.zIndex) {
+                existing.style.zIndex = imageData.zIndex;
+                // Also sync with ZIndexManager to keep state consistent
+                if (window.ZIndexManager && typeof window.ZIndexManager.set === 'function') {
+                  window.ZIndexManager.set(id, imageData.zIndex);
+                }
+              }
+            }
+          } else {
+            // Создаем новый элемент
+            const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+            const maskTypeData = imageData.maskType || 'rect';
+            const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
+            const circleRadiusData = imageData.circleRadius || null;
+            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
+          }
 
             // Обновляем глобальные переменные для каждой картинки
             ImageTools.updateImageLocalVars(id, {
@@ -442,9 +510,16 @@ Hooks.once("ready", async () => {
             });
           }
 
-          // Удаляем элементы, которых больше нет в images
+          // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
+          // AND not actively being edited/manipulated (to prevent race conditions during rapid updates)
           existingElements.forEach(element => {
             if (!existingIds.has(element.id)) {
+              // Don't remove if element is locked/being manipulated
+              if (element.dataset.lockedBy) {
+                console.log(`[WB-E] Preserving ${element.id} - locked by user ${element.dataset.lockedBy}`);
+                return;
+              }
+              
               // FIX: Clean up image control panel before removing element
               if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.cleanup === "function") {
                 try {
@@ -480,8 +555,29 @@ Hooks.once("ready", async () => {
           existingIds.add(id);
           const existing = document.getElementById(id);
           if (existing) {
+            // CRITICAL FIX: Skip locked image elements
+            // Check both dataset.lockedBy AND lock overlay (more reliable - works even if lock restored after socket update)
+            const hasLockOverlay = existing.querySelector(".wbe-image-lock-overlay") !== null;
+            const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
+            if (hasLockOverlay || isLockedByOther) {
+              const lockedBy = existing.dataset.lockedBy || "unknown";
+              console.log(`[WB-E] Skipping socket update for image ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
+              continue; // Don't update! This prevents crop changes!
+            }
             // Обновляем существующий элемент
             ImageTools.updateImageElement(existing, imageData);
+            
+            // CRITICAL FIX: Update z-index in DOM when receiving socket updates
+            if (imageData.zIndex !== undefined && imageData.zIndex !== null) {
+              const currentDOMZIndex = parseInt(existing.style.zIndex) || 0;
+              if (currentDOMZIndex !== imageData.zIndex) {
+                existing.style.zIndex = imageData.zIndex;
+                // Also sync with ZIndexManager to keep state consistent
+                if (window.ZIndexManager && typeof window.ZIndexManager.set === 'function') {
+                  window.ZIndexManager.set(id, imageData.zIndex);
+                }
+              }
+            }
           } else {
             // Создаем новый элемент
             const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
@@ -502,9 +598,16 @@ Hooks.once("ready", async () => {
           });
         }
 
-        // Удаляем элементы, которых больше нет в images
+        // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
+        // AND not actively being edited/manipulated (to prevent race conditions during rapid updates)
         existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
+            // Don't remove if element is locked/being manipulated
+            if (element.dataset.lockedBy) {
+              console.log(`[WB-E] Preserving ${element.id} - locked by user ${element.dataset.lockedBy}`);
+              return;
+            }
+            
             // FIX: Clean up image control panel before removing element
             if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.cleanup === "function") {
               try {
@@ -750,6 +853,45 @@ Hooks.once("ready", async () => {
       const container = document.getElementById(data.textId);
       if (container) {
         TextTools.removeTextLockVisual(container);
+      }
+    }
+
+    // NEW: Handle lock request - respond with our active locks
+    if (data.type === "requestLocks") {
+      const activeLocks = getActiveLocks();
+      if (activeLocks.textLocks.length > 0 || activeLocks.imageLocks.length > 0) {
+        game.socket.emit(`module.${MODID}`, {
+          type: "locksResponse",
+          userId: game.user.id,
+          userName: game.user.name,
+          textLocks: activeLocks.textLocks,
+          imageLocks: activeLocks.imageLocks
+        });
+      }
+    }
+
+    // NEW: Handle lock response - apply received locks to elements
+    if (data.type === "locksResponse") {
+      // Only apply locks from other users
+      if (data.userId !== game.user.id) {
+        // Apply text locks
+        if (data.textLocks && Array.isArray(data.textLocks)) {
+          data.textLocks.forEach(lock => {
+            const container = document.getElementById(lock.textId);
+            if (container) {
+              TextTools.applyTextLockVisual(container, lock.userId, lock.userName, lock.width, lock.height);
+            }
+          });
+        }
+        // Apply image locks
+        if (data.imageLocks && Array.isArray(data.imageLocks)) {
+          data.imageLocks.forEach(lock => {
+            const container = document.getElementById(lock.imageId);
+            if (container) {
+              ImageTools.applyImageLockVisual(container, lock.userId, lock.userName);
+            }
+          });
+        }
       }
     }
   });
@@ -1536,6 +1678,64 @@ function setupGlobalPasteHandler() {
 
 
 
+
+/**
+ * Get all currently active locks from DOM
+ * Returns locks that are currently set (user is actively editing/cropping)
+ */
+function getActiveLocks() {
+  const textLocks = [];
+  const imageLocks = [];
+  
+  const layer = getOrCreateLayer();
+  if (!layer) return { textLocks, imageLocks };
+  
+  // Find all locked text elements (only return if actively editing)
+  const textContainers = layer.querySelectorAll('.wbe-canvas-text-container');
+  textContainers.forEach(container => {
+    const textElement = container.querySelector('.wbe-canvas-text');
+    // Only return locks if user is actively editing (contentEditable === 'true')
+    if (textElement && textElement.contentEditable === 'true') {
+      const scale = parseFloat(textElement.style.transform?.match(/scale\(([\d.]+)\)/)?.[1]) || 1;
+      const width = textElement.offsetWidth * scale;
+      const height = textElement.offsetHeight * scale;
+      textLocks.push({
+        textId: container.id,
+        userId: game.user.id,
+        userName: game.user.name,
+        width: width,
+        height: height
+      });
+    }
+  });
+  
+  // Find all locked image elements (only return if actively cropping)
+  const imageContainers = layer.querySelectorAll('.wbe-canvas-image-container');
+  imageContainers.forEach(container => {
+    // Only return locks if user is actively cropping (data-cropping === 'true')
+    if (container.dataset.cropping === 'true') {
+      imageLocks.push({
+        imageId: container.id,
+        userId: game.user.id,
+        userName: game.user.name
+      });
+    }
+  });
+  
+  return { textLocks, imageLocks };
+}
+
+/**
+ * Request active locks from all connected users
+ * This is called after page load to restore locks after refresh (F5)
+ */
+function requestActiveLocks() {
+  // Broadcast request to all users
+  game.socket.emit(`module.${MODID}`, {
+    type: "requestLocks",
+    userId: game.user.id
+  });
+}
 
 async function loadCanvasElements() {
   const texts = await TextTools.getAllTexts();

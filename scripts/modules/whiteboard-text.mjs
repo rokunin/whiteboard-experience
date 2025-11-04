@@ -72,6 +72,21 @@ function applyTextLockVisual(container, lockerId, lockerName, providedWidth = nu
   const width = providedWidth !== null && providedWidth > 0 ? providedWidth : (textElement.offsetWidth * scale);
   const height = providedHeight !== null && providedHeight > 0 ? providedHeight : (textElement.offsetHeight * scale);
   
+  // CRITICAL FIX: Snap text element to pre-edit size and keep it fixed until unlock
+  // This prevents reflow/resizing when locked, even after F5 refresh
+  const textWidth = width / scale; // Convert container width to text element width (accounting for scale)
+  const textHeight = height / scale; // Convert container height to text element height
+  // Store original manualWidth state BEFORE locking (to restore correctly on unlock)
+  const wasManualWidth = textElement.dataset.manualWidth === "true";
+  textElement.style.width = `${textWidth}px`;
+  textElement.style.height = `${textHeight}px`;
+  textElement.style.minWidth = `${textWidth}px`; // Prevent shrinking
+  textElement.style.maxWidth = `${textWidth}px`; // Prevent growing
+  textElement.style.overflow = "hidden"; // Prevent content overflow from changing size
+  textElement.dataset.manualWidth = wasManualWidth ? "true" : "false"; // Preserve original state
+  textElement.dataset.lockedSize = "true"; // Mark as locked size (prevents auto-resize)
+  textElement.dataset.preLockManualWidth = wasManualWidth ? "true" : "false"; // Store for unlock
+  
   // Create or update lock overlay
   let lockOverlay = container.querySelector(".wbe-text-lock-overlay");
   if (!lockOverlay) {
@@ -129,6 +144,28 @@ function applyTextLockVisual(container, lockerId, lockerName, providedWidth = nu
 function removeTextLockVisual(container) {
   if (!container) return;
   
+  const textElement = container.querySelector(".wbe-canvas-text");
+  if (textElement) {
+    // CRITICAL FIX: Restore auto-sizing when unlock (remove locked size constraints)
+    if (textElement.dataset.lockedSize === "true") {
+      // Restore original manualWidth state (before lock was applied)
+      const preLockManualWidth = textElement.dataset.preLockManualWidth === "true";
+      // Only restore auto width if it wasn't manually set before lock
+      if (!preLockManualWidth) {
+        textElement.style.width = ""; // Restore auto width
+        textElement.style.height = ""; // Restore auto height
+        textElement.dataset.manualWidth = "false";
+      } else {
+        // Keep manual width if it was set before lock
+        textElement.dataset.manualWidth = "true";
+      }
+      textElement.style.minWidth = ""; // Remove min constraint
+      textElement.style.maxWidth = ""; // Remove max constraint
+      textElement.style.overflow = ""; // Restore overflow behavior
+      delete textElement.dataset.lockedSize;
+      delete textElement.dataset.preLockManualWidth;
+    }
+  }
   
   delete container.dataset.lockedBy;
   
@@ -417,7 +454,9 @@ function extractTextState(id, textElement, container) {
   const left = parseFloat(container.style.left);
   const top = parseFloat(container.style.top);
   const width = textElement.style.width ? parseFloat(textElement.style.width) : null;
-  const zIndex = ZIndexManager.get(id);
+  // CRITICAL FIX: Read z-index from DOM first (source of truth), then fall back to manager
+  // This matches image pattern and prevents wrong z-index during rapid updates
+  const zIndex = parseInt(container.style.zIndex) || ZIndexManager.get(id);
 
   return {
     text: textElement.textContent,
@@ -438,13 +477,96 @@ function extractTextState(id, textElement, container) {
   };
 }
 
+// Debounce function for batching rapid updates
+function debounce(func, wait) {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+}
+
+// Pending state updates queue (keyed by object ID)
+const pendingTextUpdates = new Map();
+
+// Debounced function to flush all pending text updates
+const debouncedFlushTextUpdates = debounce(async () => {
+  if (pendingTextUpdates.size === 0) return;
+  
+  const pendingIds = Array.from(pendingTextUpdates.keys());
+  console.log(`[WB-E] debouncedFlushTextUpdates: Flushing ${pendingTextUpdates.size} pending updates:`, pendingIds.slice(0, 5));
+  
+  // CRITICAL FIX: Build complete state from DOM FIRST (source of truth during rapid updates)
+  // Then merge with DB state, then apply pending updates
+  const texts = {};
+  
+  // First, extract ALL texts from DOM (most reliable source during rapid updates)
+  const layer = document.getElementById('whiteboard-experience-layer') ||
+                document.querySelector('.wbe-layer') || 
+                document.getElementById('board')?.parentElement?.querySelector('#whiteboard-experience-layer') ||
+                document.querySelector('[class*="wbe-layer"]');
+  let domExtractedCount = 0;
+  if (layer) {
+    const existingContainers = layer.querySelectorAll('.wbe-canvas-text-container');
+    const domIds = Array.from(existingContainers).map(c => c.id);
+    console.log(`[WB-E] debouncedFlushTextUpdates: DOM has ${domIds.length} elements:`, domIds.slice(0, 5));
+    
+    existingContainers.forEach(existingContainer => {
+      const existingId = existingContainer.id;
+      if (existingId) {
+        const existingTextElement = existingContainer.querySelector('.wbe-canvas-text');
+        if (existingTextElement) {
+          const existingState = extractTextState(existingId, existingTextElement, existingContainer);
+          if (existingState) {
+            texts[existingId] = existingState;
+            domExtractedCount++;
+          }
+        }
+      }
+    });
+  }
+  
+  // Then merge with DB state (in case DOM is missing something)
+  const dbTexts = await getAllTexts();
+  const dbIds = Object.keys(dbTexts);
+  console.log(`[WB-E] debouncedFlushTextUpdates: DB has ${dbIds.length} texts:`, dbIds.slice(0, 5));
+  
+  // Merge DB into texts (DOM takes precedence, but DB fills gaps)
+  Object.keys(dbTexts).forEach(id => {
+    if (!texts[id]) {
+      texts[id] = dbTexts[id];
+    }
+  });
+  
+  // Apply all pending updates (these override both DOM and DB)
+  pendingTextUpdates.forEach((state, id) => {
+    texts[id] = state;
+  });
+  
+  const finalIds = Object.keys(texts);
+  console.log(`[WB-E] debouncedFlushTextUpdates: Final state has ${finalIds.length} texts (${domExtractedCount} from DOM, ${Object.keys(dbTexts).length} from DB):`, finalIds.slice(0, 5));
+  
+  // Clear pending updates
+  pendingTextUpdates.clear();
+  
+  // Send complete state
+  await setAllTexts(texts);
+}, 200); // 200ms debounce for rapid z-index changes
+
 async function persistTextState(id, textElement, container) {
   if (!id || !textElement || !container) return;
   const state = extractTextState(id, textElement, container);
   if (!state) return;
-  const texts = await getAllTexts();
-  texts[id] = state;
-  await setAllTexts(texts);
+  
+  // Queue the update for debounced batching
+  pendingTextUpdates.set(id, state);
+  
+  // Trigger debounced flush (will batch multiple rapid changes)
+  debouncedFlushTextUpdates();
 }
 
 /* ======================== Color Picker System ======================== */
@@ -2157,7 +2279,19 @@ function createTextElement(
         container.style.setProperty("pointer-events", "none", "important");
         return; // Let everything pass through to canvas
       }
+      
+      // CRITICAL FIX: Enable pointer-events BEFORE checking elementsFromPoint
+      // This ensures clicks register even when container has pointer-events: none
+      // Must be done before elementsFromPoint to get accurate z-order
       container.style.setProperty("pointer-events", "auto", "important");
+      
+      // CRITICAL FIX: Also check if click target is directly on text element/container
+      // This handles cases where elementsFromPoint might not include elements with pointer-events: none
+      const clickedDirectlyOnText = container.contains(e.target) || 
+                                     e.target === container || 
+                                     e.target === textElement ||
+                                     textElement.contains(e.target);
+      
       // FIX: Check elementsFromPoint to see if text is actually on top
       // Use elementsFromPoint (not elementFromPoint) to check z-order when overlapping with images
       const elementsAtPoint = document.elementsFromPoint(e.clientX, e.clientY);
@@ -2168,8 +2302,9 @@ function createTextElement(
         el.classList.contains('wbe-canvas-image-container')
       );
       
-      // Only proceed if text is on top (or no image found)
-      const textIsOnTop = textInStack && (imageIndex === -1 || textIndex < imageIndex);
+      // Only proceed if text is on top (or no image found) OR if clicked directly on text
+      // Direct click check handles cases where pointer-events was none initially
+      const textIsOnTop = clickedDirectlyOnText || (textInStack && (imageIndex === -1 || textIndex < imageIndex));
       
       if (textIsOnTop) {
         if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
@@ -2337,9 +2472,22 @@ function createTextElement(
       document.addEventListener("mouseup", handleResizeUp);
     });
     
-    // Show resize cursor when hovering over borders
+    // Show resize cursor when hovering over borders - ONLY if text is selected (blue border visible)
     textElement.addEventListener("mousemove", (e) => {
       if (isEditing || resizing) return;
+      
+      // CRITICAL FIX: Only show ew-resize cursor if text is selected (blue outline visible in DOM)
+      // Check if blue selection outline is present (text must be selected to resize)
+      const isTextSelected = container.dataset.selected === "true" || 
+                             selectedTextId === id ||
+                             textElement.style.outline.includes("#4a9eff") ||
+                             getComputedStyle(textElement).outline.includes("rgb(74, 158, 255)");
+      
+      if (!isTextSelected) {
+        // Text not selected - no blue border, no resize cursor
+        textElement.style.cursor = "";
+        return;
+      }
       
       const rect = textElement.getBoundingClientRect();
       const x = e.clientX - rect.left;
@@ -2356,6 +2504,17 @@ function createTextElement(
     // Border dragging functionality - detect when dragging left or right border
     textElement.addEventListener("mousedown", (e) => {
       if (isEditing || e.button !== 0) return;
+      
+      // CRITICAL FIX: Only allow border resize if text is selected (blue outline visible)
+      const isTextSelected = container.dataset.selected === "true" || 
+                             selectedTextId === id ||
+                             textElement.style.outline.includes("#4a9eff") ||
+                             getComputedStyle(textElement).outline.includes("rgb(74, 158, 255)");
+      
+      if (!isTextSelected) {
+        // Text not selected - no blue border, no border resize
+        return;
+      }
       
       const rect = textElement.getBoundingClientRect();
       const x = e.clientX - rect.left;

@@ -47,6 +47,102 @@ function injectFrozenSelectionStyles() {
 // Inject CSS after imports resolve (init runs after imports but before ready)
 Hooks.once("init", injectFrozenSelectionStyles);
 
+// Debounce function for batching rapid image updates
+function debounce(func, wait) {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+}
+
+// Pending image state updates queue (keyed by object ID)
+const pendingImageUpdates = new Map();
+
+// Debounced function to flush all pending image updates
+const debouncedFlushImageUpdates = debounce(async () => {
+  if (pendingImageUpdates.size === 0) return;
+  
+  const pendingIds = Array.from(pendingImageUpdates.keys());
+  console.log(`[WB-E] debouncedFlushImageUpdates: Flushing ${pendingImageUpdates.size} pending updates:`, pendingIds.slice(0, 5));
+  
+  // CRITICAL FIX: Build complete state from DOM FIRST (source of truth during rapid updates)
+  // Then merge with DB state, then apply pending updates
+  const images = {};
+  
+  // First, extract ALL images from DOM (most reliable source during rapid updates)
+  const layer = document.getElementById('whiteboard-experience-layer') ||
+                document.querySelector('.wbe-layer') || 
+                document.getElementById('board')?.parentElement?.querySelector('#whiteboard-experience-layer') ||
+                document.querySelector('[class*="wbe-layer"]');
+  let domExtractedCount = 0;
+  if (layer) {
+    const existingContainers = layer.querySelectorAll('.wbe-canvas-image-container');
+    const domIds = Array.from(existingContainers).map(c => c.id);
+    console.log(`[WB-E] debouncedFlushImageUpdates: DOM has ${domIds.length} elements:`, domIds.slice(0, 5));
+    
+    existingContainers.forEach(existingContainer => {
+      const existingId = existingContainer.id;
+      if (existingId) {
+        const existingImageElement = existingContainer.querySelector('.wbe-canvas-image');
+        if (existingImageElement) {
+          const existingCropData = getImageCropData(existingImageElement);
+          const existingImageData = {
+            src: existingImageElement.src,
+            left: parseFloat(existingContainer.style.left) || 0,
+            top: parseFloat(existingContainer.style.top) || 0,
+            scale: existingCropData.scale || 1,
+            crop: existingCropData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+            maskType: existingCropData.maskType || 'rect',
+            circleOffset: existingCropData.circleOffset || { x: 0, y: 0 },
+            circleRadius: existingCropData.circleRadius || null,
+            isFrozen: existingContainer.dataset.frozen === 'true' || false,
+            // CRITICAL FIX: Read z-index from DOM first (source of truth), then fall back to manager
+            // This prevents wrong z-index during rapid updates and matches text pattern
+            zIndex: parseInt(existingContainer.style.zIndex) || ZIndexManager.get(existingId)
+          };
+          images[existingId] = existingImageData;
+          domExtractedCount++;
+        }
+      }
+    });
+  }
+  
+  // Then merge with DB state (in case DOM is missing something)
+  const dbImages = await getAllImages();
+  const dbIds = Object.keys(dbImages);
+  console.log(`[WB-E] debouncedFlushImageUpdates: DB has ${dbIds.length} images:`, dbIds.slice(0, 5));
+  
+  // Merge DB into images (DOM takes precedence, but DB fills gaps)
+  Object.keys(dbImages).forEach(id => {
+    if (!images[id]) {
+      images[id] = dbImages[id];
+    }
+  });
+  
+  // Apply all pending updates (these override both DOM and DB)
+  pendingImageUpdates.forEach((imageData, id) => {
+    images[id] = imageData;
+  });
+  
+  const finalIds = Object.keys(images);
+  console.log(`[WB-E] debouncedFlushImageUpdates: Final state has ${finalIds.length} images (${domExtractedCount} from DOM, ${Object.keys(dbImages).length} from DB):`, finalIds.slice(0, 5));
+  
+  // Clear pending updates
+  pendingImageUpdates.clear();
+  
+  // Send complete state
+  await setAllImages(images);
+}, 200); // 200ms debounce for rapid z-index changes
+
+// Expose to window for closure access
+window.wbePendingImageUpdates = pendingImageUpdates;
+window.wbeDebouncedFlushImageUpdates = debouncedFlushImageUpdates;
+
 let copiedImageData = null; // Буфер для копирования картинок
 let selectedImageId = null; // ID выделенного изображения
 let isScalingImage = false; // Flag to prevent deselection during scaling
@@ -4841,9 +4937,16 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       return;
     }
 
-    const images = await getAllImages();
-    images[id] = imageData;
-    await setAllImages(images);
+    // Queue the update for debounced batching (handled by module-level debounce)
+    if (window.wbePendingImageUpdates) {
+      window.wbePendingImageUpdates.set(id, imageData);
+      window.wbeDebouncedFlushImageUpdates?.();
+    } else {
+      // Fallback: direct save if debounce system not initialized
+      const images = await getAllImages();
+      images[id] = imageData;
+      await setAllImages(images);
+    }
   }
 
   // Register this image in the global registry for selection management
@@ -4886,17 +4989,31 @@ async function getAllImages() {
 
 async function setAllImages(images) {
   try {
+    const imageIds = Object.keys(images);
+    console.log(`[WB-E] setAllImages: Sending ${imageIds.length} images:`, imageIds.slice(0, 5));
+    
     // Sync ZIndexManager with existing z-index values to avoid conflicts
     const existingZIndexes = Object.entries(images).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
     ZIndexManager.syncWithExisting(existingZIndexes);
 
     if (game.user.isGM) {
+      // CRITICAL FIX: Read current state BEFORE unsetFlag to prevent race conditions
+      // If another setAllImages is running concurrently, we need to merge states
+      const currentImages = await getAllImages();
+      const mergedImages = { ...currentImages, ...images }; // Merge: current state + our updates
+      const mergedIds = Object.keys(mergedImages);
+      
+      if (mergedIds.length !== imageIds.length) {
+        console.log(`[WB-E] setAllImages: Merged ${imageIds.length} updates with ${Object.keys(currentImages).length} existing = ${mergedIds.length} total`);
+      }
+      
       // GM saves to database
       await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
       await new Promise(resolve => setTimeout(resolve, 50));
-      await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, images);
-      // Emit to all
-      game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images });
+      await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, mergedImages);
+      // Emit to all (merged state, not just our updates)
+      console.log(`[WB-E] setAllImages: GM emitting socket update with ${mergedIds.length} images`);
+      game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: mergedImages });
     } else {
       const layer = getOrCreateLayer();
       // Player sends request GM through socket
