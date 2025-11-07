@@ -5,12 +5,9 @@ import {
   FLAG_SCOPE,
   FLAG_KEY_IMAGES,
   screenToWorld,
-  worldToScreen,
   getSharedVars,          // lastMouseX/lastMouseY etc. — only call inside functions
   setSelectedImageId,
-  setCopiedImageData,
-  deselectAllElements,
-  createCardsLayer,
+
   
 } from "../main.mjs";
 
@@ -62,6 +59,44 @@ function debounce(func, wait) {
 
 // Pending image state updates queue (keyed by object ID)
 const pendingImageUpdates = new Map();
+
+function logDuplicateZIndexesInImagePayload(prefix, payload) {
+  const debugEnabled = typeof window !== 'undefined' && !!window.WBE_DEBUG_ZINDEX;
+  if (!debugEnabled) {
+    return;
+  }
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+
+  const buckets = new Map();
+  Object.entries(payload).forEach(([id, data]) => {
+    if (!data) return;
+    const zIndex = Number(data.zIndex);
+    if (!Number.isFinite(zIndex)) return;
+    if (!buckets.has(zIndex)) {
+      buckets.set(zIndex, []);
+    }
+    buckets.get(zIndex).push(id);
+  });
+
+  const collisions = [];
+  buckets.forEach((ids, zIndex) => {
+    if (ids.length > 1) {
+      collisions.push({ zIndex, ids, sample: ids.slice(0, 5) });
+    }
+  });
+
+  if (collisions.length > 0) {
+    console.error(`[WB-E] ${prefix}: 🚨 Payload contains duplicate z-index assignments`, {
+      timestamp: Date.now(),
+      collisions,
+      totalCollisions: collisions.length
+    });
+  }
+}
+
+// Z-index operations are now queued at the ZIndexManager level in main.mjs
 
 // Debounced function to flush all pending image updates
 const debouncedFlushImageUpdates = debounce(async () => {
@@ -132,12 +167,77 @@ const debouncedFlushImageUpdates = debounce(async () => {
   const finalIds = Object.keys(images);
   console.log(`[WB-E] debouncedFlushImageUpdates: Final state has ${finalIds.length} images (${domExtractedCount} from DOM, ${Object.keys(dbImages).length} from DB):`, finalIds.slice(0, 5));
   
+  logDuplicateZIndexesInImagePayload('debouncedFlushImageUpdates', images);
+
   // Clear pending updates
   pendingImageUpdates.clear();
   
   // Send complete state
   await setAllImages(images);
-}, 200); // 200ms debounce for rapid z-index changes
+}, 200); // 300ms debounce - reduced to minimize flicker during rapid z-index changes
+
+// Persist image state using debounced batching (similar to persistTextState)
+async function persistImageState(id, imageElement, container, options = {}) {
+  if (!id || !imageElement || !container) return;
+  
+  const cropData = getImageCropData(imageElement);
+  
+  // OPTIMIZATION: Only read z-index if not skipping (for high-speed operations)
+  // If skipping, use cached value from pending updates or fall back to manager
+  let zIndex;
+  if (options.skipZIndex) {
+    // Skip z-index read - use cached value from pending updates or manager
+    const cached = pendingImageUpdates.get(id);
+    zIndex = cached?.zIndex || ZIndexManager.get(id);
+  } else {
+    // Read z-index from DOM first (source of truth), then fall back to manager
+    // This prevents wrong z-index during rapid updates and matches text pattern
+    zIndex = parseInt(container.style.zIndex) || ZIndexManager.get(id);
+  }
+  
+  const imageData = {
+    src: imageElement.src,
+    left: parseFloat(container.style.left) || 0,
+    top: parseFloat(container.style.top) || 0,
+    scale: cropData.scale || 1,
+    crop: cropData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+    maskType: cropData.maskType || 'rect',
+    circleOffset: cropData.circleOffset || { x: 0, y: 0 },
+    circleRadius: cropData.circleRadius || null,
+    isFrozen: container.dataset.frozen === 'true' || false,
+    zIndex: zIndex
+  };
+  
+  // Queue the update for debounced batching
+  pendingImageUpdates.set(id, imageData);
+  
+  // Trigger debounced flush (will batch multiple rapid changes)
+  debouncedFlushImageUpdates();
+}
+
+async function persistSwappedLayerTarget(swappedInfo) {
+  if (!swappedInfo || !swappedInfo.id) return;
+
+  const swappedId = swappedInfo.id;
+  const swappedContainer = document.getElementById(swappedId);
+  if (!swappedContainer) return;
+
+  if (swappedId.startsWith('wbe-image-')) {
+    const swappedImageElement = swappedContainer.querySelector('.wbe-canvas-image');
+    if (swappedImageElement) {
+      await persistImageState(swappedId, swappedImageElement, swappedContainer);
+    }
+    return;
+  }
+
+  if (swappedId.startsWith('wbe-text-')) {
+    const swappedTextElement = swappedContainer.querySelector('.wbe-canvas-text');
+    const persistText = window.TextTools?.persistTextState;
+    if (swappedTextElement && typeof persistText === 'function') {
+      await persistText(swappedId, swappedTextElement, swappedContainer);
+    }
+  }
+}
 
 // Expose to window for closure access
 window.wbePendingImageUpdates = pendingImageUpdates;
@@ -2571,7 +2671,7 @@ installGlobalMaskPanHooks();
 
 
 function ensureRemovalObserver() {
-  const layer = createCardsLayer();
+  const layer = getOrCreateLayer();
   if (!layer) return;
   if (removalObserver) return;
 
@@ -2619,33 +2719,31 @@ document.addEventListener("keydown", async (e) => {
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
+    
+    // Z-index operations are queued at ZIndexManager level
     const oldZIndex = ZIndexManager.get(selectedImageId);
-    const result = ZIndexManager.moveDown(selectedImageId);
+    const result = await ZIndexManager.moveDown(selectedImageId);
     
     if (result.success) {
       const change = result.changes[0];
       // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
       
-      // FIX #2: Update DOM for swapped occupant
-      // FIX #3: Persist swapped occupant to database
-      const images = await getAllImages();
-      if (images[selectedImageId]) {
-        images[selectedImageId].zIndex = change.newZIndex;
+      const imageElement = container.querySelector('.wbe-canvas-image');
+      if (!imageElement) {
+        console.error(`[Z-Index] IMAGE | PageDown: Image element not found for ${selectedImageId}`);
+        return;
       }
       
+      // Persist swapped occupant if any (cross-type aware)
       if (result.swappedWith) {
-        // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
-        // Persist swapped occupant
-        if (images[result.swappedWith.id]) {
-          images[result.swappedWith.id].zIndex = result.swappedWith.newZIndex;
-        }
+        await persistSwappedLayerTarget(result.swappedWith);
         console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
       } else {
         console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down to next object)`);
       }
       
-      // Save both objects
-      await setAllImages(images);
+      // Persist selected image using debounced batching
+      await persistImageState(selectedImageId, imageElement, container);
     } else {
       // At boundary - provide feedback
       console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | Cannot move down - ${result.reason}`);
@@ -2657,36 +2755,31 @@ document.addEventListener("keydown", async (e) => {
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
+    
+    // Z-index operations are queued at ZIndexManager level
     const oldZIndex = ZIndexManager.get(selectedImageId);
-    const result = ZIndexManager.moveUp(selectedImageId);
+    const result = await ZIndexManager.moveUp(selectedImageId);
     
     if (result.success) {
       const change = result.changes[0];
       // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
       
-      // FIX #2: Update DOM for swapped occupant
-      // FIX #3: Persist swapped occupant to database
-      const images = await getAllImages();
-      if (images[selectedImageId]) {
-        images[selectedImageId].zIndex = change.newZIndex;
+      const imageElement = container.querySelector('.wbe-canvas-image');
+      if (!imageElement) {
+        console.error(`[Z-Index] IMAGE | PageUp: Image element not found for ${selectedImageId}`);
+        return;
       }
       
+      // Persist swapped occupant if any (cross-type aware)
       if (result.swappedWith) {
-        const swappedContainer = document.getElementById(result.swappedWith.id);
-        if (swappedContainer) {
-          swappedContainer.style.zIndex = result.swappedWith.newZIndex;
-        }
-        // Persist swapped occupant
-        if (images[result.swappedWith.id]) {
-          images[result.swappedWith.id].zIndex = result.swappedWith.newZIndex;
-        }
+        await persistSwappedLayerTarget(result.swappedWith);
         console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
       } else {
         console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up to next object)`);
       }
       
-      // Save both objects
-      await setAllImages(images);
+      // Persist selected image using debounced batching
+      await persistImageState(selectedImageId, imageElement, container);
     } else {
       // At boundary - provide feedback
       console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | Cannot move up - ${result.reason}`);
@@ -2752,7 +2845,6 @@ document.addEventListener("copy", (e) => {
   };
 
   e.clipboardData?.setData("text/plain", `[wbe-IMAGE-COPY:${selectedImageId}]`);
-  ui.notifications.info("Картинка скопирована (Ctrl+V для вставки)");
 });
 
 // cleanup methods for socket updates
@@ -3091,7 +3183,6 @@ function installGlobalImageSelectionHandler() {
 
     // FIX: Prevent dual selection - check if clicking on other element types first
     const textContainer = e.target.closest(".wbe-canvas-text-container");
-    const cardContainer = e.target.closest(".wbe-canvas-card-container");
     const colorPanel = e.target.closest(".wbe-color-picker-panel");
 
     // FIX: Text elements have pointer-events: none, so we need to check coordinates
@@ -3115,8 +3206,9 @@ function installGlobalImageSelectionHandler() {
       clickedOnText = textIndex !== -1 && (imageIndex === -1 || textIndex < imageIndex);
     }
 
-    // If clicking on text, cards, or color panels, don't process image selection
-    if (clickedOnText || cardContainer || colorPanel) {
+    // If clicking on text, or color panels, don't process image selection
+    if (clickedOnText || colorPanel) {
+      console.log("clicked on text or color panel, skipping image selection");
       // FIX: Synchronously kill image panel immediately to prevent race condition
       // Don't wait for async deselection - text handler will manage deselection
       killImageControlPanel();
@@ -3136,7 +3228,7 @@ function installGlobalImageSelectionHandler() {
         }
       }
       
-      return; // Let other handlers deal with text/card selection
+      return; // Let other handlers deal with text selection
     }
 
     let clickedImageId = null;
@@ -3308,6 +3400,7 @@ function installGlobalImageSelectionHandler() {
 
         // Select this one
         clickedImageData.selectFn();
+        
       } else {
         // Already selected - no action needed
       }
@@ -3808,7 +3901,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
   const resizeController = new ResizeController(container, imageElement, {
     onSave: async () => {
       clampCircleOffsetToBounds();
-      await saveImageState();
+      await saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during resize
 
       if (window.wbeImageControlPanelUpdate) {
         window.wbeImageControlPanelUpdate();
@@ -3993,7 +4086,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
   function enterCropMode() {
     // Проверяем, не заблокирована ли картинка другим пользователем
     if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
-      ui.notifications.warn("This image is being cropped by another user");
+   
       return;
     }
     isCropping = true;
@@ -4051,7 +4144,6 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     // NEW ARCHITECTURE: Update border using synced data
     updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
 
-    ui.notifications.info("Crop mode activated (image locked)");
 
 
 
@@ -4153,8 +4245,8 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       circleRadius: circleRadius
     });
 
-    // FINAL SAVE - Now broadcast all crop changes to everyone
-    await saveImageState(true); // Force broadcast
+    // FINAL SAVE - Now broadcast all crop changes to everyone (skip z-index read - it doesn't change during crop)
+    await saveImageState(true, { skipZIndex: true }); // Force broadcast
 
     // Broadcast unlock to all users
     game.socket.emit(`module.${MODID}`, {
@@ -4215,7 +4307,6 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       clickTarget.style.pointerEvents = "auto";
     }
 
-    ui.notifications.info("Crop mode deactivated (image unlocked)");
 
     // Remove gizmo points (for rect and circle)
     Object.values(cropHandles).forEach(handle => {
@@ -4351,7 +4442,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       function onMouseUp() {
         document.removeEventListener("mousemove", onMouseMove);
         document.removeEventListener("mouseup", onMouseUp);
-        saveImageState(); // Save radius
+        saveImageState(true, { skipZIndex: true }); // Save radius (skip z-index read)
       }
 
       document.addEventListener("mousemove", onMouseMove);
@@ -4398,7 +4489,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       function onMouseUp() {
         document.removeEventListener("mousemove", onMouseMove);
         document.removeEventListener("mouseup", onMouseUp);
-        saveImageState(); // Save crop
+        saveImageState(true, { skipZIndex: true }); // Save crop (skip z-index read)
       }
 
       document.addEventListener("mousemove", onMouseMove);
@@ -4435,7 +4526,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       function onMouseUp() {
         document.removeEventListener("mousemove", onMouseMove);
         document.removeEventListener("mouseup", onMouseUp);
-        saveImageState();
+        saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during crop
       }
 
       document.addEventListener("mousemove", onMouseMove);
@@ -4472,7 +4563,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       function onMouseUp() {
         document.removeEventListener("mousemove", onMouseMove);
         document.removeEventListener("mouseup", onMouseUp);
-        saveImageState();
+        saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during crop
       }
 
       document.addEventListener("mousemove", onMouseMove);
@@ -4509,7 +4600,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       function onMouseUp() {
         document.removeEventListener("mousemove", onMouseMove);
         document.removeEventListener("mouseup", onMouseUp);
-        saveImageState();
+        saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during crop
       }
 
       document.addEventListener("mousemove", onMouseMove);
@@ -4585,7 +4676,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       function onMouseUp() {
         document.removeEventListener("mousemove", onMouseMove);
         document.removeEventListener("mouseup", onMouseUp);
-        saveImageState();
+        saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during crop
       }
 
       document.addEventListener("mousemove", onMouseMove);
@@ -4819,7 +4910,6 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     };
     await setAllImages(images);
 
-    ui.notifications.info("Image pasted");
   }
 
   // REMOVED: Per-image global handlers (moved to single global handlers at module level)
@@ -4844,7 +4934,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       // Position updates are handled internally by the controller
     },
     onDragEnd: async (controller) => {
-      await saveImageState();
+      await saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during drag
 
       // FIX: Show panel again after drag (like text module)
       if (window.wbeImageControlPanel) {
@@ -4893,7 +4983,8 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
 
 
   // Universal function for saving image state
-  async function saveImageState(broadcast = true) {
+  // Universal function for saving image state
+  async function saveImageState(broadcast = true, options = {}) {
     // Always snapshot the CURRENT truth from the DOM first
     const domSnap = getImageCropData(imageElement);
     const currentScale = domSnap.scale;
@@ -4907,6 +4998,17 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     if (!useCircleOffset) useCircleOffset = { x: circleOffsetX, y: circleOffsetY };
     if (useCircleRadius === undefined) useCircleRadius = circleRadius;
 
+    // OPTIMIZATION: Only read z-index if not skipping (for high-speed operations like drag/resize/crop)
+    // If skipping, use cached value from pending updates or fall back to manager
+    let zIndex;
+    if (options.skipZIndex) {
+      // Skip z-index read - use cached value from pending updates or manager
+      const cached = window.wbePendingImageUpdates?.get(id);
+      zIndex = cached?.zIndex || ZIndexManager.get(id);
+    } else {
+      // Read z-index from manager (normal case)
+      zIndex = ZIndexManager.get(id);
+    }
 
     const imageData = {
       src: imageElement.src,
@@ -4919,7 +5021,7 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       circleRadius: useCircleRadius,
       isCropping: isCropping,
       isFrozen: isFrozen,
-      zIndex: ZIndexManager.get(id)
+      zIndex: zIndex
     };
 
     // Keep caches in sync with what we're persisting
@@ -4988,23 +5090,43 @@ async function getAllImages() {
 }
 
 async function setAllImages(images) {
+  const timestamp = Date.now();
+  const stackTrace = new Error().stack?.split('\n').slice(1, 4).join(' | ') || 'unknown';
+  
   try {
     const imageIds = Object.keys(images);
-    console.log(`[WB-E] setAllImages: Sending ${imageIds.length} images:`, imageIds.slice(0, 5));
-    
-    // Sync ZIndexManager with existing z-index values to avoid conflicts
-    const existingZIndexes = Object.entries(images).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
-    ZIndexManager.syncWithExisting(existingZIndexes);
+    const isEmptyPayload = imageIds.length === 0;
+    console.log(`[WB-E] setAllImages: [${timestamp}] Sending ${imageIds.length} images:`, imageIds.slice(0, 5));
+    console.log(`[WB-E] setAllImages: [${timestamp}] Call stack:`, stackTrace);
 
     if (game.user.isGM) {
+      // CRITICAL FIX: Do NOT sync z-indexes when receiving updates from players
+      // The z-indexes in the payload are already correct from the ZIndexManager
+      // Syncing would cause conflicts and trigger duplicate prevention → flicker
+      // Only sync on initial load or when absolutely necessary
+      
       // CRITICAL FIX: Read current state BEFORE unsetFlag to prevent race conditions
       // If another setAllImages is running concurrently, we need to merge states
       const currentImages = await getAllImages();
+      const currentImageIds = Object.keys(currentImages);
+      console.log(`[WB-E] setAllImages: [${timestamp}] getAllImages() returned ${currentImageIds.length} images:`, currentImageIds.slice(0, 5));
+      
       const mergedImages = { ...currentImages, ...images }; // Merge: current state + our updates
       const mergedIds = Object.keys(mergedImages);
       
+      // Log missing images
+      const missingFromCurrent = imageIds.filter(id => !currentImageIds.includes(id));
+      const missingFromMerged = currentImageIds.filter(id => !mergedIds.includes(id));
+      
+      if (missingFromCurrent.length > 0) {
+        console.warn(`[WB-E] setAllImages: [${timestamp}] ⚠️ Images in passed object but NOT in current state:`, missingFromCurrent);
+      }
+      if (missingFromMerged.length > 0) {
+        console.warn(`[WB-E] setAllImages: [${timestamp}] ⚠️ Images in current state but NOT in merged:`, missingFromMerged);
+      }
+      
       if (mergedIds.length !== imageIds.length) {
-        console.log(`[WB-E] setAllImages: Merged ${imageIds.length} updates with ${Object.keys(currentImages).length} existing = ${mergedIds.length} total`);
+        console.log(`[WB-E] setAllImages: [${timestamp}] Merged ${imageIds.length} updates with ${currentImageIds.length} existing = ${mergedIds.length} total`);
       }
       
       // GM saves to database
@@ -5012,7 +5134,7 @@ async function setAllImages(images) {
       await new Promise(resolve => setTimeout(resolve, 50));
       await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, mergedImages);
       // Emit to all (merged state, not just our updates)
-      console.log(`[WB-E] setAllImages: GM emitting socket update with ${mergedIds.length} images`);
+      console.log(`[WB-E] setAllImages: [${timestamp}] GM emitting socket update with ${mergedIds.length} images`);
       game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: mergedImages });
     } else {
       const layer = getOrCreateLayer();
@@ -5023,6 +5145,9 @@ async function setAllImages(images) {
       if (layer) {
         // Get all existing images
         const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
+        const existingElementIds = Array.from(existingElements).map(el => el.id);
+        console.log(`[WB-E] setAllImages: [${timestamp}] Found ${existingElementIds.length} existing DOM elements:`, existingElementIds.slice(0, 5));
+        
         const existingIds = new Set();
 
         // Update existing and create new images locally
@@ -5052,16 +5177,37 @@ async function setAllImages(images) {
           });
         }
 
-        // Remove elements that are no longer in images
-        existingElements.forEach(element => {
-          if (!existingIds.has(element.id)) {
-            // Clear runtime caches to prevent resurrection
-            clearImageCaches(element.id);
-            // Clean up z-index
-            ZIndexManager.remove(element.id);
-            element.remove();
+        // Only run destructive prune when payload carries authoritative state
+        const shouldSkipPrune = isEmptyPayload;
+        if (shouldSkipPrune) {
+          console.log(`[WB-E] setAllImages: [${timestamp}] Skipping DOM prune for empty payload on non-GM client; awaiting authoritative sync.`);
+        } else {
+          // Remove elements that are no longer in images
+          const toRemove = [];
+          existingElements.forEach(element => {
+            if (!existingIds.has(element.id)) {
+              toRemove.push(element.id);
+            }
+          });
+          
+          if (toRemove.length > 0) {
+            console.error(`[WB-E] setAllImages: [${timestamp}] 🚨 REMOVING ${toRemove.length} elements from DOM:`, toRemove);
+            console.error(`[WB-E] setAllImages: [${timestamp}] 🚨 Elements in DOM but NOT in images object:`, toRemove);
+            console.error(`[WB-E] setAllImages: [${timestamp}] 🚨 Images object has:`, imageIds);
+            console.error(`[WB-E] setAllImages: [${timestamp}] 🚨 Call stack:`, stackTrace);
           }
-        });
+          
+          existingElements.forEach(element => {
+            if (!existingIds.has(element.id)) {
+              // Clear runtime caches to prevent resurrection
+              clearImageCaches(element.id);
+              // Clean up z-index
+              ZIndexManager.remove(element.id);
+              console.error(`[WB-E] setAllImages: [${timestamp}] 🚨 Removing element: ${element.id}`);
+              element.remove();
+            }
+          });
+        }
       }
     }
   } catch (e) {
@@ -5131,6 +5277,10 @@ function updateImageElement(existing, imageData) {
     isCropping: imageData.isCropping || false
   });
 
+  // Note: Controllers are already enabled when created and remain enabled
+  // The real issue was pointer-events being set to none by updateImageUIStates
+  // which is now fixed by preserving local selection state in updateImageUIElements
+
 }
 
 // Function for applying visual styles of the image
@@ -5176,9 +5326,12 @@ function updateImageUIElements(container, imageData) {
   const circleRadius = imageData.circleRadius;
   const scale = imageData.scale || 1;
 
-  // PRESERVE local selection state - don't override with socket data
-  // Selection is managed locally via global click handler
-  const isSelected = container.dataset.selected === "true";
+  // ✅ FIX: PRESERVE local selection state - don't override with socket data
+  // Selection is managed locally via SelectionController and should not be affected by socket updates
+  // Check both dataset.selected AND registry to ensure we preserve selection
+  const registry = imageRegistry.get(container.id);
+  const isSelected = container.dataset.selected === "true" || 
+                     (registry && registry.selectionController && registry.selectionController.isSelected());
 
   // CRITICAL: Check if THIS user is cropping (locked by them)
   // Local crop mode takes precedence over socket data
@@ -5633,7 +5786,6 @@ async function globalPasteImage() {
   };
   await setAllImages(images);
 
-  ui.notifications.info("Картинка вставлена");
 }
 
 // Вставка картинки из системного буфера
@@ -5701,13 +5853,12 @@ async function handleImagePasteFromClipboard(file) {
       };
       await setAllImages(images);
 
-      ui.notifications.info("Изображение добавлено");
     } else {
-      ui.notifications.error("Не удалось загрузить изображение");
+      ui.notifications.error("Image upload failed");
     }
   } catch (err) {
-    console.error("[WB-E] Ошибка при вставке картинки:", err);
-    ui.notifications.error("Ошибка при вставке изображения");
+    console.error("[WB-E] Image paste error:", err);
+    ui.notifications.error("Image paste error");
   }
 }
 
@@ -5735,7 +5886,6 @@ async function cleanupBrokenImages() {
   }
 
   if (brokenImages.length === 0) {
-    ui.notifications.info("No broken images found");
     return;
   }
 
@@ -5758,7 +5908,6 @@ async function cleanupBrokenImages() {
     }
 
     await setAllImages(images);
-    ui.notifications.info(`Removed ${brokenImages.length} broken image(s)`);
   }
 }
 
@@ -5770,6 +5919,7 @@ export const ImageTools = {
   // storage
   getAllImages,
   setAllImages,
+  persistImageState,
 
   // paste impl
   globalPasteImage,

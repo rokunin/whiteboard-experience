@@ -38,6 +38,7 @@ export class CompactZIndexManager {
     this._debugMode = false;
     this._autoCleanup = options.autoCleanup || false;
     this._onSyncFailed = options.onSyncFailed || null;
+    this._assertUniquenessEnabled = options.assertUniqueness !== false;
   }
 
   /**
@@ -100,7 +101,60 @@ export class CompactZIndexManager {
     // Remove from old position
     this.remove(objectId);
     
-    // Set new position
+    // PREVENTION: Deduplicate target z-index if it has existing objects
+    // This prevents duplicates from being created during swaps and assignments
+    const existingObjects = this.zIndexObjects.get(clamped);
+    if (existingObjects && existingObjects.size > 0) {
+      // If there are objects at this z-index (even just 1), we need to handle it
+      // because we're about to add our object, which would create a duplicate
+      if (existingObjects.size === 1) {
+        // Single object exists - move it to a unique z-index to make room
+        const existingObjectId = existingObjects.values().next().value;
+        if (existingObjectId !== objectId) { // Safety check (shouldn't happen after remove, but just in case)
+          // Find a unique z-index for the existing object
+          let newZIndex = clamped + this.stepSize;
+          while (this.zIndexObjects.has(newZIndex)) {
+            newZIndex += this.stepSize;
+          }
+          // Move the existing object
+          this.objectZIndexes.set(existingObjectId, newZIndex);
+          existingObjects.delete(existingObjectId);
+          if (!this.zIndexObjects.has(newZIndex)) {
+            this.zIndexObjects.set(newZIndex, new Set());
+          }
+          this.zIndexObjects.get(newZIndex).add(existingObjectId);
+          this._syncDOMZIndex(existingObjectId, newZIndex);
+          console.log(`[CompactZIndexManager] Prevented duplicate: moved existing object ${existingObjectId} from z-index ${clamped} to ${newZIndex} to make room for ${objectId}`);
+        }
+      } else {
+        // Multiple objects exist - deduplicate them
+        const reassigned = this._deduplicateZIndex(clamped);
+        if (reassigned.length > 0) {
+          console.log(`[CompactZIndexManager] Prevented duplicate: deduplicated ${reassigned.length} objects at z-index ${clamped} before setting ${objectId}`);
+        }
+        // After deduplication, if there's still 1 object, move it too
+        const remainingObjects = this.zIndexObjects.get(clamped);
+        if (remainingObjects && remainingObjects.size === 1) {
+          const remainingObjectId = remainingObjects.values().next().value;
+          if (remainingObjectId !== objectId) {
+            let newZIndex = clamped + this.stepSize;
+            while (this.zIndexObjects.has(newZIndex)) {
+              newZIndex += this.stepSize;
+            }
+            this.objectZIndexes.set(remainingObjectId, newZIndex);
+            remainingObjects.delete(remainingObjectId);
+            if (!this.zIndexObjects.has(newZIndex)) {
+              this.zIndexObjects.set(newZIndex, new Set());
+            }
+            this.zIndexObjects.get(newZIndex).add(remainingObjectId);
+            this._syncDOMZIndex(remainingObjectId, newZIndex);
+            console.log(`[CompactZIndexManager] Prevented duplicate: moved remaining object ${remainingObjectId} from z-index ${clamped} to ${newZIndex} to make room for ${objectId}`);
+          }
+        }
+      }
+    }
+    
+    // Now safe to set - target z-index is guaranteed to be empty
     this.objectZIndexes.set(objectId, clamped);
     
     // Update reverse lookup
@@ -124,7 +178,8 @@ export class CompactZIndexManager {
     
     // Sync DOM z-index value
     this._syncDOMZIndex(objectId, clamped);
-    
+    this._assertUniqueZIndexes('set', { objectId, zIndex: clamped });
+
     return clamped;
   }
 
@@ -177,6 +232,39 @@ export class CompactZIndexManager {
     }
   }
 
+  _snapshotState() {
+    return {
+      objectZIndexes: Array.from(this.objectZIndexes.entries()),
+      zIndexObjects: Array.from(this.zIndexObjects.entries()).map(([z, ids]) => [z, Array.from(ids)]),
+      minZIndex: this.minZIndex,
+      maxZIndex: this.maxZIndex,
+      nextAvailable: this.nextAvailable
+    };
+  }
+
+  _assertUniqueZIndexes(context, details = {}) {
+    const debugEnabled = typeof window !== 'undefined' && !!window.WBE_DEBUG_ZINDEX;
+    if (!this._assertUniquenessEnabled || !debugEnabled) {
+      return;
+    }
+
+    const duplicates = [];
+    this.zIndexObjects.forEach((ids, zIndex) => {
+      if (ids.size > 1) {
+        duplicates.push({ zIndex, ids: Array.from(ids) });
+      }
+    });
+
+    if (duplicates.length > 0) {
+      console.error(`[CompactZIndexManager] 🚨 Duplicate z-index detected after ${context}`, {
+        timestamp: Date.now(),
+        duplicates,
+        details,
+        snapshot: this._snapshotState()
+      });
+    }
+  }
+
   /**
    * Remove an object from z-index tracking
    * @param {string} objectId - The object ID to remove
@@ -203,6 +291,8 @@ export class CompactZIndexManager {
       //   //console.log(`[CompactZIndexManager] Automatic compaction triggered after object removal`);
       //   this.compact();
       // }
+
+      this._assertUniqueZIndexes('remove', { objectId, previousZIndex: currentZIndex });
     }
   }
 
@@ -218,19 +308,6 @@ export class CompactZIndexManager {
     const nextObjectZIndex = this._findNextObjectAbove(currentZIndex);
     
     if (nextObjectZIndex === null) {
-      // Debug: Log state when at_top error occurs
-      const allZIndexes = Array.from(this.zIndexObjects.keys()).sort((a, b) => a - b);
-      // console.log(`[CompactZIndexManager] moveUp at_top check:`, {
-      //   objectId,
-      //   currentZIndex,
-      //   allZIndexesInMap: allZIndexes,
-      //   objectZIndexesSize: this.objectZIndexes.size,
-      //   zIndexObjectsSize: this.zIndexObjects.size,
-      //   objectsAboveCurrent: allZIndexes.filter(z => z > currentZIndex),
-      //   isLowest: currentZIndex === Math.min(...allZIndexes),
-      //   isHighest: currentZIndex === Math.max(...allZIndexes)
-      // });
-      
       // At top boundary
       return {
         success: false,
@@ -240,10 +317,22 @@ export class CompactZIndexManager {
         reason: 'at_top'
       };
     }
-    //console.log("PgUP moveUp", objectId, nextObjectZIndex);
+    
     // Get object(s) at target position
-    const objectsAtTarget = this.zIndexObjects.get(nextObjectZIndex);
+    let objectsAtTarget = this.zIndexObjects.get(nextObjectZIndex);
+    
+    // FIX: Deduplicate target z-index before swapping to prevent duplicates
+    if (objectsAtTarget && objectsAtTarget.size > 1) {
+      const reassigned = this._deduplicateZIndex(nextObjectZIndex);
+      if (reassigned.length > 0) {
+        console.log(`[CompactZIndexManager] Deduplicated z-index ${nextObjectZIndex}: reassigned ${reassigned.length} objects`);
+      }
+      objectsAtTarget = this.zIndexObjects.get(nextObjectZIndex);
+    }
+    
+    // After deduplication, there should be only one object at target z-index
     const targetObjectId = objectsAtTarget ? objectsAtTarget.values().next().value : null;
+    let result;
     
     if (targetObjectId && targetObjectId !== objectId) {
       // Swap positions
@@ -253,7 +342,14 @@ export class CompactZIndexManager {
       this.set(objectId, nextObjectZIndex);
       console.log(`[Swap DEBUG] After second set: ${objectId}=${this.get(objectId)}, ${targetObjectId}=${this.get(targetObjectId)}`);
       
-      return {
+      // FIX: Deduplicate both z-indexes after swap to ensure no duplicates were created
+      const reassignedCurrent = this._deduplicateZIndex(currentZIndex);
+      const reassignedTarget = this._deduplicateZIndex(nextObjectZIndex);
+      if (reassignedCurrent.length > 0 || reassignedTarget.length > 0) {
+        console.log(`[CompactZIndexManager] Post-swap deduplication: ${reassignedCurrent.length} at ${currentZIndex}, ${reassignedTarget.length} at ${nextObjectZIndex}`);
+      }
+      
+      result = {
         success: true,
         direction: 'up',
         changes: [
@@ -274,7 +370,13 @@ export class CompactZIndexManager {
       // Move to target position (no collision)
       this.set(objectId, nextObjectZIndex);
       
-      return {
+      // FIX: Deduplicate target z-index after move
+      const reassigned = this._deduplicateZIndex(nextObjectZIndex);
+      if (reassigned.length > 0) {
+        console.log(`[CompactZIndexManager] Post-move deduplication at ${nextObjectZIndex}: reassigned ${reassigned.length} objects`);
+      }
+      
+      result = {
         success: true,
         direction: 'up',
         changes: [
@@ -289,6 +391,15 @@ export class CompactZIndexManager {
         swappedWith: null
       };
     }
+
+    this._assertUniqueZIndexes('moveUp', {
+      objectId,
+      currentZIndex,
+      targetZIndex: nextObjectZIndex,
+      swappedWith: result.swappedWith?.id || null
+    });
+
+    return result;
   }
 
   /**
@@ -314,15 +425,34 @@ export class CompactZIndexManager {
     }
     
     // Get object(s) at target position
-    const objectsAtTarget = this.zIndexObjects.get(prevObjectZIndex);
+    let objectsAtTarget = this.zIndexObjects.get(prevObjectZIndex);
+    
+    // FIX: Deduplicate target z-index before swapping to prevent duplicates
+    if (objectsAtTarget && objectsAtTarget.size > 1) {
+      const reassigned = this._deduplicateZIndex(prevObjectZIndex);
+      if (reassigned.length > 0) {
+        console.log(`[CompactZIndexManager] Deduplicated z-index ${prevObjectZIndex}: reassigned ${reassigned.length} objects`);
+      }
+      objectsAtTarget = this.zIndexObjects.get(prevObjectZIndex);
+    }
+    
+    // After deduplication, there should be only one object at target z-index
     const targetObjectId = objectsAtTarget ? objectsAtTarget.values().next().value : null;
+    let result;
     
     if (targetObjectId && targetObjectId !== objectId) {
       // Swap positions
       this.set(targetObjectId, currentZIndex);
       this.set(objectId, prevObjectZIndex);
       
-      return {
+      // FIX: Deduplicate both z-indexes after swap to ensure no duplicates were created
+      const reassignedCurrent = this._deduplicateZIndex(currentZIndex);
+      const reassignedTarget = this._deduplicateZIndex(prevObjectZIndex);
+      if (reassignedCurrent.length > 0 || reassignedTarget.length > 0) {
+        console.log(`[CompactZIndexManager] Post-swap deduplication: ${reassignedCurrent.length} at ${currentZIndex}, ${reassignedTarget.length} at ${prevObjectZIndex}`);
+      }
+      
+      result = {
         success: true,
         direction: 'down',
         changes: [
@@ -343,7 +473,13 @@ export class CompactZIndexManager {
       // Move to target position (no collision)
       this.set(objectId, prevObjectZIndex);
       
-      return {
+      // FIX: Deduplicate target z-index after move
+      const reassigned = this._deduplicateZIndex(prevObjectZIndex);
+      if (reassigned.length > 0) {
+        console.log(`[CompactZIndexManager] Post-move deduplication at ${prevObjectZIndex}: reassigned ${reassigned.length} objects`);
+      }
+      
+      result = {
         success: true,
         direction: 'down',
         changes: [
@@ -358,6 +494,15 @@ export class CompactZIndexManager {
         swappedWith: null
       };
     }
+
+    this._assertUniqueZIndexes('moveDown', {
+      objectId,
+      currentZIndex,
+      targetZIndex: prevObjectZIndex,
+      swappedWith: result.swappedWith?.id || null
+    });
+
+    return result;
   }
 
   /**
@@ -400,6 +545,39 @@ export class CompactZIndexManager {
     }
     
     return prevZIndex;
+  }
+
+  /**
+   * Deduplicate a z-index by reassigning all but one object to unique z-indexes
+   * @param {number} zIndex - The z-index to deduplicate
+   * @returns {Array} Array of objects that were reassigned [{objectId, oldZ, newZ}, ...]
+   * @private
+   */
+  _deduplicateZIndex(zIndex) {
+    const objectsAtZIndex = this.zIndexObjects.get(zIndex);
+    if (!objectsAtZIndex || objectsAtZIndex.size <= 1) {
+      return []; // No duplicates
+    }
+    
+    const reassigned = [];
+    const objectArray = Array.from(objectsAtZIndex);
+    
+    // Keep the first object at the original z-index, reassign the rest
+    for (let i = 1; i < objectArray.length; i++) {
+      const objectId = objectArray[i];
+      // Find a unique z-index above the current one
+      let newZIndex = zIndex + this.stepSize;
+      while (this.zIndexObjects.has(newZIndex)) {
+        newZIndex += this.stepSize;
+      }
+      
+      const oldZ = this.get(objectId);
+      this.set(objectId, newZIndex);
+      reassigned.push({ objectId, oldZ, newZ: newZIndex });
+    }
+    this._assertUniqueZIndexes('_deduplicateZIndex', { zIndex, reassignedCount: reassigned.length });
+
+    return reassigned;
   }
 
   /**
@@ -766,6 +944,36 @@ export class CompactZIndexManager {
     this.syncAllDOMZIndexes();
     
     return true;
+  }
+
+  /**
+   * Deduplicate all z-indexes by reassigning duplicates to unique values
+   * @returns {number} Number of objects that were reassigned
+   */
+  deduplicateAll() {
+    let totalReassigned = 0;
+    const duplicates = [];
+    
+    // Find all z-indexes with multiple objects
+    for (const [zIndex, objects] of this.zIndexObjects.entries()) {
+      if (objects.size > 1) {
+        duplicates.push(zIndex);
+      }
+    }
+    
+    // Deduplicate each z-index
+    for (const zIndex of duplicates) {
+      const reassigned = this._deduplicateZIndex(zIndex);
+      totalReassigned += reassigned.length;
+    }
+    
+    if (totalReassigned > 0) {
+      console.log(`[CompactZIndexManager] Deduplicated ${totalReassigned} objects across ${duplicates.length} z-indexes`);
+      // Sync DOM after deduplication
+      this.syncAllDOMZIndexes();
+    }
+    
+    return totalReassigned;
   }
 
   /**

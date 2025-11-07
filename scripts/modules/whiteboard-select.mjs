@@ -405,13 +405,20 @@ function installGlobalClickHandler() {
           );
           
           if (isOutsideBoundingBox) {
-            deselectAllElements(); // Use clear() instead of deselectAllElements()
+           clearMassSelection(); // Use clear() instead of deselectAllElements()
           }
         } else {
           // No bounding box visible - safe to clear
-          deselectAllElements();
+          clearMassSelection();
         }
       }
+      return;
+    }
+    if (clickedContainer && !clickedContainer.classList.contains("wbe-mass-selected")) {
+      if (selectedObjects.size > 0) {
+        clearMassSelection(); // Clear before allowing normal selection
+      }
+      // Don't return - let the normal selection handlers run
       return;
     }
   }, true);
@@ -793,6 +800,8 @@ function updateSelectionFromBox(left, top, width, height) {
   updateBoundingBox();
 }
 
+// Z-index operations are now queued at the ZIndexManager level in main.mjs
+
 /**
  * Handle keyboard shortcuts
  */
@@ -816,8 +825,10 @@ async function handleKeyDown(e) {
     // For single selection, use moveDown() instead of moveDownGroup()
     if (objectIds.length === 1) {
       const objectId = objectIds[0];
+      
+      // Z-index operations are queued at ZIndexManager level
       const oldZIndex = ZIndexManager.get(objectId);
-      const result = ZIndexManager.moveDown(objectId);
+      const result = await ZIndexManager.moveDown(objectId);
       
       if (result.success) {
         const change = result.changes[0];
@@ -942,8 +953,10 @@ async function handleKeyDown(e) {
     // For single selection, use moveUp() instead of moveUpGroup()
     if (objectIds.length === 1) {
       const objectId = objectIds[0];
+      
+      // Z-index operations are queued at ZIndexManager level
       const oldZIndex = ZIndexManager.get(objectId);
-      const result = ZIndexManager.moveUp(objectId);
+      const result = await ZIndexManager.moveUp(objectId);
       
       if (result.success) {
         const change = result.changes[0];
@@ -1254,8 +1267,6 @@ async function massDeleteSelected() {
     // Clear selection
     clearMassSelection();
     
-    ui.notifications.info(`Deleted ${selectedObjects.size} objects`);
-    
   } catch (error) {
     console.error("[WB-E] Error deleting selected objects:", error);
   }
@@ -1428,6 +1439,19 @@ function copySelectedObjects() {
     images: {}
   };
   
+  // Helper functions for font normalization (same as in whiteboard-text.mjs)
+  const normalizeFontWeight = (value) => {
+    if (!value) return 400; // DEFAULT_FONT_WEIGHT
+    if (value === "bold") return 700;
+    const parsed = parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : 400;
+  };
+  
+  const normalizeFontStyle = (value) => {
+    if (!value) return "normal"; // DEFAULT_FONT_STYLE
+    return value === "italic" ? "italic" : "normal";
+  };
+  
   selectedObjects.forEach(id => {
     const container = document.getElementById(id);
     if (!container) return;
@@ -1435,13 +1459,56 @@ function copySelectedObjects() {
     if (container.classList.contains("wbe-canvas-text-container")) {
       const textElement = container.querySelector(".wbe-canvas-text");
       if (textElement) {
+        // Extract scale from transform
+        const transform = textElement.style.transform || "";
+        const scaleMatch = transform.match(/scale\(([\d.]+)\)/);
+        const scale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
+        
+        // Extract color
+        const color = textElement.style.color || "#000000";
+        
+        // Extract background color from span if it exists (same as extractTextState)
+        const textSpan = textElement.querySelector(".wbe-text-background-span");
+        let backgroundColor = "transparent";
+        if (textSpan) {
+          const spanBg = getComputedStyle(textSpan).backgroundColor || textSpan.style.backgroundColor;
+          backgroundColor = spanBg && spanBg !== "transparent" && spanBg !== "rgba(0, 0, 0, 0)" ? spanBg : "transparent";
+        }
+        
+        // Extract border properties
+        const borderWidth = Number(textElement.dataset.borderWidth || 0);
+        const borderColor = borderWidth > 0
+          ? (textElement.dataset.borderRgba || textElement.style.borderColor || null)
+          : null;
+        
+        // Extract font properties with normalization
+        const rawFontWeight = textElement.dataset.fontWeight || textElement.style.fontWeight || getComputedStyle(textElement).fontWeight;
+        const rawFontStyle = textElement.dataset.fontStyle || textElement.style.fontStyle || getComputedStyle(textElement).fontStyle;
+        
+        // Extract other text properties
+        const textAlign = textElement.dataset.textAlign || textElement.style.textAlign || "left";
+        const fontFamily = textElement.dataset.fontFamily || textElement.style.fontFamily || "Arial";
+        const fontSize = parseInt(textElement.dataset.fontSize || textElement.style.fontSize || 16);
+        const width = textElement.style.width ? parseFloat(textElement.style.width) : null;
+        
+        // Get text from span if it exists, otherwise from textElement
+        const text = textSpan ? textSpan.textContent : textElement.textContent;
+        
         copiedData.texts[id] = {
-          text: textElement.textContent,
+          text: text,
           left: parseFloat(container.style.left) || 0,
           top: parseFloat(container.style.top) || 0,
-          scale: parseFloat(textElement.style.transform?.match(/scale\(([\d.]+)\)/)?.[1]) || 1,
-          color: textElement.style.color || "#000000",
-          backgroundColor: textElement.style.backgroundColor || "#ffffff",
+          scale: scale,
+          color: color,
+          backgroundColor: backgroundColor,
+          borderColor: borderColor,
+          borderWidth: borderWidth,
+          fontWeight: normalizeFontWeight(rawFontWeight),
+          fontStyle: normalizeFontStyle(rawFontStyle),
+          textAlign: textAlign,
+          fontFamily: fontFamily,
+          fontSize: fontSize,
+          width: width
         };
       }
     } else if (container.classList.contains("wbe-canvas-image-container")) {
@@ -1461,7 +1528,6 @@ function copySelectedObjects() {
   // Store in global variable for paste
   window.wbeCopiedMultiSelection = copiedData;
   
-  ui.notifications.info(`Copied ${selectedObjects.size} objects`);
 }
 
 /**
@@ -1537,7 +1603,6 @@ async function pasteCopiedObjects() {
     }
   }
   
-  ui.notifications.info(`Pasted ${Object.keys(texts).length + Object.keys(images).length} objects`);
 }
 
 /**

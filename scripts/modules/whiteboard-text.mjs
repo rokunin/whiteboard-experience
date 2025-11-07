@@ -10,7 +10,6 @@ import {
   setCopiedImageData,
   setLastClickX,
   setLastClickY,
-  createCardsLayer,
   deselectAllElements,
   getOrCreateLayer,
   ZIndexManager,
@@ -25,6 +24,7 @@ const SCALE_SENSITIVITY = 0.01; // Sensitivity for text scaling
 
 const DEFAULT_TEXT_COLOR = "#000000";
 const DEFAULT_BACKGROUND_COLOR = "#ffffff";
+const DEFAULT_SPAN_BACKGROUND_COLOR = "#ffffff 0.5";
 const DEFAULT_BORDER_HEX = DEFAULT_TEXT_COLOR;
 const DEFAULT_BORDER_OPACITY = 100;
 const DEFAULT_BORDER_WIDTH = 0;
@@ -192,7 +192,6 @@ function exitTextMode() {
   }
   
   textModeCursor = null;
-  ui.notifications.info("Text mode disabled (Press T to re-enable)");
 }
 
 /* ======================== End Edit and Lock System ======================== */
@@ -248,7 +247,6 @@ function enterTextMode() {
     textModeCursor = null;
   };
   
-  ui.notifications.info("Text mode: Click to create text (Press T again or Right-click to exit)");
 }
 
 /* ======================== Font and Style Utilities ======================== */
@@ -435,7 +433,7 @@ function applyBorderDataToElement(textElement, borderColor, borderWidth) {
   updateBorderStyle(textElement, { hexColor: hex, opacity, width });
 }
 
-function extractTextState(id, textElement, container) {
+function extractTextState(id, textElement, container, options = {}) {
   if (!textElement || !container) return null;
   const transform = textElement.style.transform || "";
   const scaleMatch = transform.match(/scale\(([\d.]+)\)/);
@@ -454,17 +452,38 @@ function extractTextState(id, textElement, container) {
   const left = parseFloat(container.style.left);
   const top = parseFloat(container.style.top);
   const width = textElement.style.width ? parseFloat(textElement.style.width) : null;
-  // CRITICAL FIX: Read z-index from DOM first (source of truth), then fall back to manager
-  // This matches image pattern and prevents wrong z-index during rapid updates
-  const zIndex = parseInt(container.style.zIndex) || ZIndexManager.get(id);
+  
+  // OPTIMIZATION: Only read z-index if not skipping (for high-speed operations like drag/resize/text input)
+  // If skipping, use cached value from pending updates or fall back to manager
+  let zIndex;
+  if (options.skipZIndex) {
+    // Skip z-index read - use cached value from pending updates or manager
+    const cached = pendingTextUpdates.get(id);
+    zIndex = cached?.zIndex || ZIndexManager.get(id);
+  } else {
+    // Read z-index from DOM first (source of truth), then fall back to manager
+    // This matches image pattern and prevents wrong z-index during rapid updates
+    zIndex = parseInt(container.style.zIndex) || ZIndexManager.get(id);
+  }
 
+  // Get text from span if it exists, otherwise from textElement
+  const textSpan = textElement.querySelector(".wbe-text-background-span");
+  const text = textSpan ? textSpan.textContent : textElement.textContent;
+  
+  // Read background color from span if it exists, otherwise transparent (never from textElement)
+  let backgroundColor = "transparent";
+  if (textSpan) {
+    const spanBg = getComputedStyle(textSpan).backgroundColor || textSpan.style.backgroundColor;
+    backgroundColor = spanBg && spanBg !== "transparent" && spanBg !== "rgba(0, 0, 0, 0)" ? spanBg : "transparent";
+  }
+  
   return {
-    text: textElement.textContent,
+    text: text,
     left: Number.isFinite(left) ? left : 0,
     top: Number.isFinite(top) ? top : 0,
     scale,
     color: textElement.style.color || DEFAULT_TEXT_COLOR,
-    backgroundColor: textElement.style.backgroundColor || DEFAULT_BACKGROUND_COLOR,
+    backgroundColor: backgroundColor,
     fontWeight,
     fontStyle,
     textAlign,
@@ -492,6 +511,44 @@ function debounce(func, wait) {
 
 // Pending state updates queue (keyed by object ID)
 const pendingTextUpdates = new Map();
+
+function logDuplicateZIndexesInTextPayload(prefix, payload) {
+  const debugEnabled = typeof window !== 'undefined' && !!window.WBE_DEBUG_ZINDEX;
+  if (!debugEnabled) {
+    return;
+  }
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+
+  const buckets = new Map();
+  Object.entries(payload).forEach(([id, data]) => {
+    if (!data) return;
+    const zIndex = Number(data.zIndex);
+    if (!Number.isFinite(zIndex)) return;
+    if (!buckets.has(zIndex)) {
+      buckets.set(zIndex, []);
+    }
+    buckets.get(zIndex).push(id);
+  });
+
+  const collisions = [];
+  buckets.forEach((ids, zIndex) => {
+    if (ids.length > 1) {
+      collisions.push({ zIndex, ids, sample: ids.slice(0, 5) });
+    }
+  });
+
+  if (collisions.length > 0) {
+    console.error(`[WB-E] ${prefix}: 🚨 Payload contains duplicate z-index assignments`, {
+      timestamp: Date.now(),
+      collisions,
+      totalCollisions: collisions.length
+    });
+  }
+}
+
+// Z-index operations are now queued at the ZIndexManager level in main.mjs
 
 // Debounced function to flush all pending text updates
 const debouncedFlushTextUpdates = debounce(async () => {
@@ -550,16 +607,18 @@ const debouncedFlushTextUpdates = debounce(async () => {
   const finalIds = Object.keys(texts);
   console.log(`[WB-E] debouncedFlushTextUpdates: Final state has ${finalIds.length} texts (${domExtractedCount} from DOM, ${Object.keys(dbTexts).length} from DB):`, finalIds.slice(0, 5));
   
+  logDuplicateZIndexesInTextPayload('debouncedFlushTextUpdates', texts);
+
   // Clear pending updates
   pendingTextUpdates.clear();
   
   // Send complete state
   await setAllTexts(texts);
-}, 200); // 200ms debounce for rapid z-index changes
+}, 100); // 200ms debounce for rapid z-index changes
 
-async function persistTextState(id, textElement, container) {
+async function persistTextState(id, textElement, container, options = {}) {
   if (!id || !textElement || !container) return;
-  const state = extractTextState(id, textElement, container);
+  const state = extractTextState(id, textElement, container, options);
   if (!state) return;
   
   // Queue the update for debounced batching
@@ -567,6 +626,29 @@ async function persistTextState(id, textElement, container) {
   
   // Trigger debounced flush (will batch multiple rapid changes)
   debouncedFlushTextUpdates();
+}
+
+async function persistSwappedZIndexTarget(swappedId) {
+  if (!swappedId) return;
+
+  const swappedContainer = document.getElementById(swappedId);
+  if (!swappedContainer) return;
+
+  if (swappedId.startsWith('wbe-text-')) {
+    const swappedTextElement = swappedContainer.querySelector('.wbe-canvas-text');
+    if (swappedTextElement) {
+      await persistTextState(swappedId, swappedTextElement, swappedContainer);
+    }
+    return;
+  }
+
+  if (swappedId.startsWith('wbe-image-')) {
+    const swappedImageElement = swappedContainer.querySelector('.wbe-canvas-image');
+    const persistImage = window.ImageTools?.persistImageState;
+    if (swappedImageElement && typeof persistImage === 'function') {
+      await persistImage(swappedId, swappedImageElement, swappedContainer);
+    }
+  }
 }
 
 /* ======================== Color Picker System ======================== */
@@ -610,9 +692,13 @@ async function showColorPicker() {
     DEFAULT_TEXT_COLOR,
     100
   );
+  // Read background color from span if it exists, otherwise from textElement
+  const textSpan = textElement.querySelector(".wbe-text-background-span");
+  const bgColorSource = textSpan || textElement;
+  const bgComputed = getComputedStyle(bgColorSource);
   const backgroundColorInfo = rgbaToHexOpacity(
-    computed.backgroundColor || textElement.style.backgroundColor || DEFAULT_BACKGROUND_COLOR,
-    "#000000",
+    bgComputed.backgroundColor || bgColorSource.style.backgroundColor || DEFAULT_SPAN_BACKGROUND_COLOR,
+    DEFAULT_SPAN_BACKGROUND_COLOR,
     0
   );
   const currentBorderWidth = Number(textElement.dataset.borderWidth || DEFAULT_BORDER_WIDTH);
@@ -766,7 +852,11 @@ async function showColorPicker() {
 
   const applyBackgroundColor = async (hex, opacity) => {
     const rgba = hexToRgba(hex, opacity) || hex;
-    textElement.style.backgroundColor = rgba;
+    // Apply to span only - never touch textElement background
+    const textSpan = textElement.querySelector(".wbe-text-background-span");
+    if (textSpan) {
+      textSpan.style.backgroundColor = rgba;
+    }
     await persistTextState(selectedTextId, textElement, container);
   };
 
@@ -1495,7 +1585,6 @@ async function globalPasteText() {
     const zIndex = ZIndexManager.get(newTextId);
     console.log(`[Text Paste] ID: ${newTextId} | z-index: ${zIndex} (global paste)`);
     
-    ui.notifications.info("Текст вставлен");
 }
 
 async function handleTextPasteFromClipboard(text) {
@@ -1524,10 +1613,9 @@ async function handleTextPasteFromClipboard(text) {
     // Update container dimensions after paste
     updateTextUI(container);
     
-    ui.notifications.info("Текст добавлен");
   } catch (err) {
-    console.error("[WB-E] Ошибка при вставке текста:", err);
-    ui.notifications.error("Ошибка при вставке текста");
+    console.error("[WB-E] Text paste error:", err);
+    ui.notifications.error("Text paste error");
   }
 }
 
@@ -1627,11 +1715,30 @@ function createTextElement(
     const textElement = document.createElement("div");
     textElement.className = "wbe-canvas-text";
     textElement.contentEditable = "false";
-    textElement.textContent = text;
+    
+    // Create span wrapper for text background
+    const textSpan = document.createElement("span");
+    textSpan.className = "wbe-text-background-span";
+    textSpan.textContent = text;
+    // Use provided backgroundColor or default to black
+    const spanBgColor = backgroundColor && backgroundColor !== "transparent" && backgroundColor !== DEFAULT_BACKGROUND_COLOR 
+      ? backgroundColor 
+      : DEFAULT_SPAN_BACKGROUND_COLOR;
+    textSpan.style.cssText = `
+      display: inline;
+      background-color: ${spanBgColor};
+      padding: 4px 8px 4px 2px;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+      line-height: 1.68;
+    `;
+    
+    textElement.appendChild(textSpan);
+    
     textElement.style.cssText = `
       transform: scale(${scale});
       transform-origin: top left;
-      background: ${backgroundColor || "transparent"};
+      background: transparent;
       color: ${color};
       padding: 0;
       border: none;
@@ -1643,7 +1750,8 @@ function createTextElement(
       overflow-wrap: break-word;
       word-wrap: break-word;
       word-break: break-word;
-      overflow: visible;
+      overflow: hidden;
+    
     `;
     
     // Apply width if it was manually set
@@ -1726,8 +1834,9 @@ function createTextElement(
     const editBlurHandler = async (e) => {
       if (!isEditing) return;
       
-      // Ignore if clicking on the text element itself
-      if (textElement.contains(e.target)) return;
+      // Ignore if clicking on the text element itself or the span
+      const textSpan = textElement.querySelector(".wbe-text-background-span");
+      if (textElement.contains(e.target) || (textSpan && textSpan.contains(e.target))) return;
       
       // Ignore if clicking on color panel
       if (window.wbeColorPanel?.contains(e.target)) return;
@@ -1744,10 +1853,17 @@ function createTextElement(
       if (!isEditing) return;
       
       // Check if text is empty - delete if so
-      const textContent = textElement.textContent.trim();
+      const textSpan = textElement.querySelector(".wbe-text-background-span");
+      const textContent = (textSpan ? textSpan.textContent : textElement.textContent).trim();
       if (textContent === "") {
         // Text is empty - delete it
         isEditing = false;
+        
+        // Exit contentEditable from span or textElement
+        const editableElement = textSpan || textElement;
+        editableElement.contentEditable = "false";
+        editableElement.style.userSelect = "none";
+        
         textElement.contentEditable = "false";
         textElement.style.userSelect = "none";
         
@@ -1775,6 +1891,12 @@ function createTextElement(
       }
       
       isEditing = false;
+      
+      // Exit contentEditable from span or textElement (reuse textSpan from above scope)
+      const editableElement = textSpan || textElement;
+      editableElement.contentEditable = "false";
+      editableElement.style.userSelect = "none";
+      
       textElement.contentEditable = "false";
       textElement.style.userSelect = "none";
       
@@ -1792,8 +1914,8 @@ function createTextElement(
         textId: id
       });
       
-      // Save changes
-      await persistTextState(id, textElement, container);
+      // Save changes (skip z-index read - it doesn't change during text editing)
+      await persistTextState(id, textElement, container, { skipZIndex: true });
       
       // Return to selected state
       // CLEAR MASS SELECTION when exiting edit mode
@@ -1817,7 +1939,6 @@ function createTextElement(
         }, 100);
       }
       
-      ui.notifications.info("Edit mode deactivated (text unlocked)");
     }
     
     // Двойной клик для редактирования
@@ -1827,7 +1948,6 @@ function createTextElement(
       
       // NEW: Check if locked by another user
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
-        ui.notifications.warn("This text is being edited by another user");
         return;
       }
       
@@ -1859,9 +1979,14 @@ function createTextElement(
       // Mark locked locally
       container.dataset.lockedBy = game.user.id;
       
-      textElement.contentEditable = "true";
-      textElement.style.userSelect = "text";
-      textElement.focus();
+      // Make span contentEditable if it exists, otherwise textElement
+      const textSpan = textElement.querySelector(".wbe-text-background-span");
+      const editableElement = textSpan || textElement;
+      
+      editableElement.contentEditable = "true";
+      editableElement.style.userSelect = "text";
+      editableElement.style.outline = "none";
+      editableElement.focus();
       
       // Add the blur handler to detect clicks outside
       document.addEventListener("mousedown", editBlurHandler, true);
@@ -1881,12 +2006,11 @@ function createTextElement(
       
       // Выделяем весь текст
       const range = document.createRange();
-      range.selectNodeContents(textElement);
+      range.selectNodeContents(editableElement);
       const selection = window.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
       
-      ui.notifications.info("Edit mode activated (text locked)");
     });
 
     // Завершение редактирования по Enter
@@ -2123,7 +2247,7 @@ function createTextElement(
       
     if (container) {
       const textEl = container.querySelector(".wbe-canvas-text");
-      if (textEl) await persistTextState(newTextId, textEl, container);
+      if (textEl) await persistTextState(newTextId, textEl, container, { skipZIndex: true });
       
       // LOG: Track text paste with z-index
       const zIndex = ZIndexManager.get(newTextId);
@@ -2133,7 +2257,6 @@ function createTextElement(
       updateTextUI(container);
     }
     
-    ui.notifications.info("Текст вставлен");
     }
     
     // ---- Document-level handlers bound to this element ----
@@ -2148,22 +2271,17 @@ function createTextElement(
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
+        
+        // Z-index operations are queued at ZIndexManager level
         const oldZIndex = ZIndexManager.get(id);
-        const result = ZIndexManager.moveDown(id);
+        const result = await ZIndexManager.moveDown(id);
         if (result.success) {
           const change = result.changes[0];
           // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
           
           // FIX #3: Persist swapped occupant to database
-          if (result.swappedWith) {
-            const swappedContainer = document.getElementById(result.swappedWith.id);
-            if (swappedContainer) {
-              // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
-              const swappedTextElement = swappedContainer.querySelector(".wbe-canvas-text");
-              if (swappedTextElement) {
-                await persistTextState(result.swappedWith.id, swappedTextElement, swappedContainer);
-              }
-            }
+        if (result.swappedWith) {
+          await persistSwappedZIndexTarget(result.swappedWith.id);
             console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
           } else {
             console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down to next object)`);
@@ -2181,22 +2299,17 @@ function createTextElement(
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
+        
+        // Z-index operations are queued at ZIndexManager level
         const oldZIndex = ZIndexManager.get(id);
-        const result = ZIndexManager.moveUp(id);
+        const result = await ZIndexManager.moveUp(id);
         if (result.success) {
           const change = result.changes[0];
           // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
           
           // FIX #3: Persist swapped occupant to database
-          if (result.swappedWith) {
-            const swappedContainer = document.getElementById(result.swappedWith.id);
-            if (swappedContainer) {
-              // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
-              const swappedTextElement = swappedContainer.querySelector(".wbe-canvas-text");
-              if (swappedTextElement) {
-                await persistTextState(result.swappedWith.id, swappedTextElement, swappedContainer);
-              }
-            }
+        if (result.swappedWith) {
+          await persistSwappedZIndexTarget(result.swappedWith.id);
             console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
           } else {
             console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up to next object)`);
@@ -2227,7 +2340,15 @@ function createTextElement(
       const m = transform.match(/scale\(([\d.]+)\)/);
       const currentScale = m ? parseFloat(m[1]) : 1;
       const currentColor = textElement.style.color || DEFAULT_TEXT_COLOR;
-      const currentBackgroundColor = textElement.style.backgroundColor || DEFAULT_BACKGROUND_COLOR;
+      
+      // Extract background color from span if it exists (same as extractTextState)
+      const textSpan = textElement.querySelector(".wbe-text-background-span");
+      let currentBackgroundColor = "transparent";
+      if (textSpan) {
+        const spanBg = getComputedStyle(textSpan).backgroundColor || textSpan.style.backgroundColor;
+        currentBackgroundColor = spanBg && spanBg !== "transparent" && spanBg !== "rgba(0, 0, 0, 0)" ? spanBg : "transparent";
+      }
+      
       const currentBorderWidth = Number(textElement.dataset.borderWidth || DEFAULT_BORDER_WIDTH);
       const currentBorderColor = currentBorderWidth > 0
         ? (textElement.dataset.borderRgba || textElement.style.borderColor || null)
@@ -2237,9 +2358,12 @@ function createTextElement(
       const rawFontWeight = textElement.dataset.fontWeight || textElement.style.fontWeight || getComputedStyle(textElement).fontWeight;
       const rawFontStyle = textElement.dataset.fontStyle || textElement.style.fontStyle || getComputedStyle(textElement).fontStyle;
       
+      // Get text from span if it exists, otherwise from textElement
+      const text = textSpan ? textSpan.textContent : textElement.textContent;
+      
       // Capture current state for copying (includes font data)
       copiedTextData = {
-        text: textElement.textContent,
+        text: text,
         scale: currentScale,
         color: currentColor,
         backgroundColor: currentBackgroundColor,
@@ -2254,13 +2378,13 @@ function createTextElement(
       };
       setCopiedImageData(null);
       
-      // Persist current state to scene flags to ensure fonts are saved across socket hops
-      persistTextState(id, textElement, container);
+      // Persist current state to scene flags to ensure fonts are saved across socket hops (skip z-index read - it doesn't change during copy)
+      persistTextState(id, textElement, container, { skipZIndex: true });
 
       // Add marker to clipboard so paste handler knows this is a FATE text copy
       if (e.clipboardData) e.clipboardData.setData("text/plain", `[wbe-TEXT-COPY:${id}]\n${textElement.textContent}`);
-      ui.notifications.info("Текст скопирован (Ctrl+V для вставки)");
-    };
+
+    };;
 
     const onDocMouseDown = (e) => {
       if (window.wbeColorPanel && window.wbeColorPanel.contains(e.target)) {
@@ -2431,8 +2555,8 @@ function createTextElement(
         const scaleMatch = transform.match(/scale\(([\d.]+)\)/);
         const currentScale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
         
-        // Сохранить позицию КОНТЕЙНЕРА
-        await persistTextState(id, textElement, container);
+        // Сохранить позицию КОНТЕЙНЕРА (skip z-index read - it doesn't change during drag)
+        await persistTextState(id, textElement, container, { skipZIndex: true });
         
         // Re-assert selection and restore panel after drag
         // CLEAR MASS SELECTION when re-asserting after drag
@@ -2649,8 +2773,8 @@ function createTextElement(
         const scaleMatch = transform.match(/scale\(([\d.]+)\)/);
         const currentScale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
         
-        // Сохранить позицию контейнера + scale textElement
-        await persistTextState(id, textElement, container);
+        // Сохранить позицию контейнера + scale textElement (skip z-index read - it doesn't change during resize)
+        await persistTextState(id, textElement, container, { skipZIndex: true });
         
         // Re-assert selection and restore panel after resize
         // CLEAR MASS SELECTION when re-asserting after resize
@@ -2670,7 +2794,7 @@ function createTextElement(
 async function addTextToCanvas(clickX, clickY, autoEdit = false) {
     // Проверяем готовность canvas
     if (!canvas || !canvas.ready) {
-      ui.notifications.warn("Canvas не готов");
+      ui.notifications.warn("Canvas not ready");
       return;
     }
   
@@ -2736,7 +2860,6 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
       }, 100);
     }
     
-    ui.notifications.info("Текстовый элемент добавлен. Двойной клик для редактирования.");
   }
 
 async function getAllTexts() {
@@ -2749,17 +2872,161 @@ async function getAllTexts() {
 }
 
 async function setAllTexts(texts) {
+    const timestamp = Date.now();
+    const stackTrace = new Error().stack?.split('\n').slice(1, 4).join(' | ') || 'unknown';
     try {
+      const textIds = Object.keys(texts);
+      const isEmptyPayload = textIds.length === 0;
+      console.log(`[WB-E] setAllTexts: [${timestamp}] Sending ${textIds.length} texts:`, textIds.slice(0, 5));
+      console.log(`[WB-E] setAllTexts: [${timestamp}] Call stack:`, stackTrace);
+      
       // Sync ZIndexManager with existing z-index values to avoid conflicts
       const existingZIndexes = Object.entries(texts).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
       ZIndexManager.syncWithExisting(existingZIndexes);
       
       if (game.user.isGM) {
-        // GM сохраняет в базу
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
         await new Promise(resolve => setTimeout(resolve, 50));
         await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, texts);
-        // Эмитим всем
+        if (isEmptyPayload) {
+          if (window.ZIndexManager && typeof window.ZIndexManager.clear === "function") {
+            window.ZIndexManager.clear();
+          }
+        }
+
+        // Обновляем локально для немедленной реакции UI у GM
+        const layer = getOrCreateLayer();
+        if (layer) {
+          // Получаем все существующие текстовые элементы
+          const existingElements = layer.querySelectorAll(".wbe-canvas-text-container");
+          const existingIds = new Set();
+
+          // Обновляем существующие и создаем новые тексты локально у GM
+          for (const [id, textData] of Object.entries(texts)) {
+            existingIds.add(id);
+            const existing = document.getElementById(id);
+            if (existing) {
+              // CRITICAL FIX: Skip locked text elements (GM socket handler)
+              // Check both dataset.lockedBy AND lock overlay (more reliable - works even if lock restored after socket update)
+              const hasLockOverlay = existing.querySelector(".wbe-text-lock-overlay") !== null;
+              const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
+              if (hasLockOverlay || isLockedByOther) {
+                const lockedBy = existing.dataset.lockedBy || "unknown";
+                console.log(`[WB-E] GM skipping socket update for ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
+                continue; // Don't update! This prevents cursor reset and size changes!
+              }
+
+              // Обновляем существующий элемент
+              const textElement = existing.querySelector(".wbe-canvas-text");
+              if (textElement) {
+                // ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
+                if (textElement.contentEditable === "true") {
+                  console.log(`[WB-E] GM skipping socket update for ${id} - actively being edited`);
+                  continue;
+                }
+
+                // Safe to update now
+                // Update text content - check for span first
+                const textSpan = textElement.querySelector(".wbe-text-background-span");
+                if (textSpan) {
+                  textSpan.textContent = textData.text;
+                } else {
+                  textElement.textContent = textData.text;
+                }
+
+                existing.style.left = `${textData.left}px`;
+                existing.style.top = `${textData.top}px`;
+                textElement.style.transform = `scale(${textData.scale})`;
+                textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR; // Apply color
+
+                // Apply background to span if it exists, otherwise to textElement (backward compat)
+                if (textSpan && textData.backgroundColor) {
+                  textSpan.style.backgroundColor = textData.backgroundColor;
+                } else if (!textSpan) {
+                  textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+                }
+                TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
+                TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
+                TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
+                TextTools.applyFontSizeToElement?.(textElement, textData.fontSize || TextTools.DEFAULT_FONT_SIZE);
+                TextTools.applyBorderDataToElement?.(textElement, textData.borderColor, textData.borderWidth);
+
+                // CRITICAL FIX: Don't update width if element is locked (lockedSize prevents size changes)
+                if (!textElement.dataset.lockedSize) {
+                  // FIX: Apply width if present
+                  if (textData.width && textData.width > 0) {
+                    textElement.style.width = `${textData.width}px`;
+                    textElement.dataset.manualWidth = "true";
+                  } else {
+                    textElement.style.width = "";
+                    textElement.dataset.manualWidth = "false";
+                  }
+                } else {
+                  console.log(`[WB-E] GM skipping width update for ${id} - element is locked (lockedSize=true)`);
+                }
+
+                // Update resize handle position after scale/size changes
+                TextTools.updateTextUI(existing);
+              }
+            } else {
+              // Создаем новый элемент
+              const createdContainer = TextTools.createTextElement(
+                id,
+                textData.text,
+                textData.left,
+                textData.top,
+                textData.scale,
+                textData.color,
+                textData.backgroundColor,
+                textData.borderColor,
+                textData.borderWidth,
+                textData.fontWeight,
+                textData.fontStyle,
+                textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
+                textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
+                textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
+                textData.width,
+                textData.zIndex ?? null // Use null instead of undefined so default parameter works
+              );
+
+              // Apply color and background to newly created element
+              const created = createdContainer || document.getElementById(id);
+              if (created) {
+                const textElement = created.querySelector(".wbe-canvas-text");
+                if (textElement) {
+                  textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR;
+                  textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+                  TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
+                  TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
+                  TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
+                  TextTools.applyFontSizeToElement?.(textElement, textData.fontSize || TextTools.DEFAULT_FONT_SIZE);
+                  TextTools.applyBorderDataToElement?.(textElement, textData.borderColor, textData.borderWidth);
+                }
+                TextTools.updateTextUI(created);
+              }
+            }
+          }
+
+          // Удаляем элементы, которых больше нет в texts
+          existingElements.forEach(element => {
+            if (!existingIds.has(element.id)) {
+              // FIX: Clean up color panel before removing element
+              if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
+                try {
+                  window.wbeColorPanel.cleanup();
+                } catch { }
+              }
+              // Clean up color pickers before removing element
+              document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
+              // Clean up ZIndexManager
+              if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                window.ZIndexManager.remove(element.id);
+              }
+              element.remove();
+            }
+          });
+        }
+
         game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts });
       } else {
         // Игрок отправляет запрос GM через сокет
@@ -2770,7 +3037,8 @@ async function setAllTexts(texts) {
         if (layer) {
           // Получаем все существующие текстовые элементы
           const existingElements = layer.querySelectorAll(".wbe-canvas-text-container");
-          const existingIds = new Set();
+          const existingIds = new Set(Array.from(existingElements).map(el => el.id));
+          console.log(`[WB-E] setAllTexts: [${timestamp}] Found ${existingIds.size} existing DOM elements:`, Array.from(existingIds).slice(0, 5));
           
           // Обновляем существующие и создаем новые тексты локально
           for (const [id, textData] of Object.entries(texts)) {
@@ -2791,12 +3059,21 @@ async function setAllTexts(texts) {
                 }
                 
                 // Safe to update now
-                textElement.textContent = textData.text;
+                const textSpan = textElement.querySelector(".wbe-text-background-span");
+                if (textSpan) {
+                  textSpan.textContent = textData.text;
+                } else {
+                  textElement.textContent = textData.text;
+                }
                 existing.style.left = `${textData.left}px`;
                 existing.style.top = `${textData.top}px`;
                 textElement.style.transform = `scale(${textData.scale})`;
                 textElement.style.color = textData.color || DEFAULT_TEXT_COLOR;
-                textElement.style.backgroundColor = textData.backgroundColor || DEFAULT_BACKGROUND_COLOR;
+                // Apply background to span only - never touch textElement background
+                const existingTextSpan = textElement.querySelector(".wbe-text-background-span");
+                if (existingTextSpan && textData.backgroundColor) {
+                  existingTextSpan.style.backgroundColor = textData.backgroundColor;
+                }
                 applyBorderDataToElement(textElement, textData.borderColor, textData.borderWidth);
                 
                 // Apply font weight and style to existing elements
@@ -2862,7 +3139,11 @@ async function setAllTexts(texts) {
                 const textElement = createdContainer.querySelector(".wbe-canvas-text");
                 if (textElement) {
                   textElement.style.color = textData.color || DEFAULT_TEXT_COLOR;
-                  textElement.style.backgroundColor = textData.backgroundColor || DEFAULT_BACKGROUND_COLOR;
+                  // Apply background to span only - never touch textElement background
+                  const createdTextSpan = textElement.querySelector(".wbe-text-background-span");
+                  if (createdTextSpan && textData.backgroundColor) {
+                    createdTextSpan.style.backgroundColor = textData.backgroundColor;
+                  }
                   applyBorderDataToElement(textElement, textData.borderColor, textData.borderWidth);
                   
                   // Apply manual width flag if width was set
@@ -2891,14 +3172,44 @@ async function setAllTexts(texts) {
             }
           }
           
-          // Удаляем элементы, которых больше нет в texts
-          existingElements.forEach(element => {
-            if (!existingIds.has(element.id)) {
-              // Clean up color pickers before removing element
-              killColorPanel();
-              destroyTextElementById(element.id);
+          // Удаляем элементы, которых больше нет в texts (skip for empty payload until authoritative response)
+          if (!isEmptyPayload) {
+            const toRemove = [];
+            existingElements.forEach(element => {
+              if (!existingIds.has(element.id)) {
+                // Don't remove if element is locked/being manipulated
+                if (element.dataset.lockedBy) {
+                  console.log(`[WB-E] Preserving text ${element.id} - locked by user ${element.dataset.lockedBy}`);
+                  return;
+                }
+                toRemove.push(element.id);
+              }
+            });
+
+            if (toRemove.length > 0) {
+              console.error(`[WB-E] setAllTexts: [${timestamp}] 🚨 REMOVING ${toRemove.length} text elements from DOM:`, toRemove);
+              toRemove.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                  // Clean up color pickers before removing element
+                  killColorPanel();
+                  // Clear runtime caches to prevent resurrection
+                  if (window.TextTools && typeof window.TextTools.clearTextCaches === "function") {
+                    try {
+                      window.TextTools.clearTextCaches(id);
+                    } catch { }
+                  }
+                  // Clean up ZIndexManager
+                  if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                    window.ZIndexManager.remove(id);
+                  }
+                  destroyTextElementById(id);
+                }
+              });
             }
-          });
+          } else {
+            console.log(`[WB-E] setAllTexts: [${timestamp}] Skipping DOM prune for empty payload on non-GM client; awaiting authoritative sync.`);
+          }
         }
       }
     } catch (e) {
@@ -2936,6 +3247,119 @@ function updateTextUI(containerOrId) {
     : containerOrId;
   if (!container) return;
   updateTextResizeHandlePosition(container);
+}
+
+/**
+ * Toggle bold formatting for selected text
+ * Updates the text element and color panel state
+ */
+async function toggleTextBold() {
+  if (!selectedTextId) return;
+  
+  const container = document.getElementById(selectedTextId);
+  if (!container) return;
+  
+  const textElement = container.querySelector(".wbe-canvas-text");
+  if (!textElement) return;
+  
+  // Get current bold state
+  const computedFont = getComputedStyle(textElement);
+  const currentWeight = normalizeFontWeight(
+    textElement.dataset.fontWeight || 
+    textElement.style.fontWeight || 
+    computedFont.fontWeight
+  );
+  const isCurrentlyBold = currentWeight >= 600;
+  
+  // Toggle bold state
+  const newWeight = isCurrentlyBold ? DEFAULT_FONT_WEIGHT : 700;
+  const currentStyle = normalizeFontStyle(
+    textElement.dataset.fontStyle || 
+    textElement.style.fontStyle || 
+    computedFont.fontStyle
+  );
+  
+  // Apply the new font weight
+  applyFontVariantToElement(textElement, newWeight, currentStyle);
+  
+  // Persist the change
+  await persistTextState(selectedTextId, textElement, container);
+  
+  // Update color panel bold button state if panel exists
+  if (window.wbeColorPanel) {
+    const panel = window.wbeColorPanel;
+    // Find the bold button (button with text "B")
+    const boldBtn = Array.from(panel.querySelectorAll("button")).find(
+      btn => btn.textContent.trim() === "B"
+    );
+    
+    if (boldBtn) {
+      // Update button active state using the same logic as setMiniActive
+      const isBold = newWeight >= 600;
+      if (isBold) {
+        boldBtn.dataset.active = "1";
+        boldBtn.style.background = "#e0ebff";
+        boldBtn.style.borderColor = "#4d8dff";
+        boldBtn.style.color = "#1a3f8b";
+      } else {
+        boldBtn.dataset.active = "0";
+        boldBtn.style.background = "#f5f5f7";
+        boldBtn.style.borderColor = "#d2d2d8";
+        boldBtn.style.color = "#333";
+      }
+      
+      // Also update regular button state
+      const regularBtn = Array.from(panel.querySelectorAll("button")).find(
+        btn => btn.textContent.trim() === "Aa"
+      );
+      if (regularBtn) {
+        const isItalic = currentStyle === "italic";
+        const isRegular = !isBold && !isItalic;
+        if (isRegular) {
+          regularBtn.dataset.active = "1";
+          regularBtn.style.background = "#e0ebff";
+          regularBtn.style.borderColor = "#4d8dff";
+          regularBtn.style.color = "#1a3f8b";
+        } else {
+          regularBtn.dataset.active = "0";
+          regularBtn.style.background = "#f5f5f7";
+          regularBtn.style.borderColor = "#d2d2d8";
+          regularBtn.style.color = "#333";
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Setup keyboard shortcuts for text formatting
+ */
+function setupTextKeyboardShortcuts() {
+  document.addEventListener("keydown", async (e) => {
+    // Only handle if text is selected and not editing
+    if (!selectedTextId) return;
+    
+    const container = document.getElementById(selectedTextId);
+    if (!container) return;
+    
+    const textElement = container.querySelector(".wbe-canvas-text");
+    if (!textElement) return;
+    
+    // Check if text is in editing mode (contentEditable)
+    if (textElement.contentEditable === "true") return;
+    
+    // Ctrl+B or Cmd+B for bold
+    if ((e.ctrlKey || e.metaKey) && (e.key === "b" || e.key === "B")) {
+      // Don't prevent default if in input/textarea
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") {
+        return;
+      }
+      
+      e.preventDefault();
+      e.stopPropagation();
+      await toggleTextBold();
+    }
+  });
 }
 
 export const TextTools = {
@@ -2986,14 +3410,21 @@ export const TextTools = {
   applyTextLockVisual,
   removeTextLockVisual,
 
+  // keyboard shortcuts
+  setupTextKeyboardShortcuts,
+
   // defaults
   DEFAULT_TEXT_COLOR,
   DEFAULT_BACKGROUND_COLOR,
+  DEFAULT_SPAN_BACKGROUND_COLOR,
   DEFAULT_BORDER_WIDTH,
   DEFAULT_TEXT_SCALE,
   DEFAULT_FONT_WEIGHT,
   DEFAULT_FONT_STYLE,
   DEFAULT_TEXT_ALIGN,
   DEFAULT_FONT_FAMILY,
-  DEFAULT_FONT_SIZE
+  DEFAULT_FONT_SIZE,
+
+  // cross-module helpers
+  persistTextState
 };
