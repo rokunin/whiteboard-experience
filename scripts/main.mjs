@@ -1,4 +1,4 @@
-﻿/*********************************************************
+﻿ /*********************************************************
  * FATE Table Card — v13+
  * Многокарточные визитки на столе (синхрон у всех).
  *********************************************************/
@@ -11,16 +11,9 @@ const FLAG_KEY_IMAGES = "images"; // scene.flags[MODID].images = { [id]: { src, 
 import { TextTools } from "./modules/whiteboard-text.mjs";
 import { ImageTools } from "./modules/whiteboard-image.mjs";
 import { MassSelection } from "./modules/whiteboard-select.mjs";
-import { FateTableCardApp, CARD_CSS } from './modules/fate-card.mjs';
 
-// Inject CSS globally for all users as early as possible
-if (!document.getElementById("wbe-table-card-style")) {
-  const style = document.createElement("style");
-  style.id = "wbe-table-card-style";
-  style.textContent = CARD_CSS;
-  document.head.appendChild(style);
-  console.log("[WB-E] CSS injected globally");
-}
+
+
 
 // Debounce функция для предотвращения частых обновлений
 function debounce(func, wait) {
@@ -36,17 +29,7 @@ function debounce(func, wait) {
 }
 
 /* ----------------------- Bootstrap ----------------------- */
-Hooks.once("init", async () => {
-  // HBS helpers
-  if (!Handlebars.helpers.array) Handlebars.registerHelper("array", (...args) => args.slice(0, -1));
-  if (!Handlebars.helpers.inc) Handlebars.registerHelper("inc", v => Number(v) + 1);
 
-  // Preload templates
-  await loadTemplates([
-    `modules/${MODID}/templates/card.hbs`,
-    `modules/${MODID}/templates/partials/approaches.hbs`
-  ]);
-});
 
 Hooks.once("ready", async () => {
   // Контролы могут быть собраны до наших хуков — пересоберём мягко
@@ -70,35 +53,17 @@ Hooks.once("ready", async () => {
   MassSelection.initialize();
   MassSelection.setToggleState(massSelectionToggleState);
 
-  // Верхняя кнопка (справа у навигации) — только ГМ
-  if (game.user.isGM && !document.getElementById("whiteboard-experience-topbtn")) {
-    const bar = document.querySelector("#navigation .scene-controls")
-      || document.querySelector("#controls .scene-controls")
-      || document.querySelector("#logo")
-      || document.querySelector("#navigation");
-    if (bar) {
-      const a = document.createElement("a");
-      a.id = "whiteboard-experience-topbtn";
-      a.className = "control-tool";
-      a.title = "Добавить FATE Card";
-      a.innerHTML = '<i class="fas fa-id-card"></i>';
-      a.style.marginLeft = "6px";
-      a.addEventListener("click", async () => {
-        if (!game.user.isGM) return ui.notifications.warn("Добавлять карточки может только GM.");
-        const { id, state } = await createCardState();
-        FateTableCardApp.show(id, state);
-      });
-      bar.appendChild(a);
-    }
-  }
+ 
 
   // Инъекция инструментов в левый тулбар
   injectMassSelectionTool(); // Mass selection first (top priority)
-  injectFateCardTool();
   TextTools.injectTextTool();
+  
+  // Setup keyboard shortcuts for text formatting
+  TextTools.setupTextKeyboardShortcuts();
+  
   Hooks.on("renderSceneControls", () => {
     injectMassSelectionTool(); // Mass selection first (top priority)
-    injectFateCardTool();
     TextTools.injectTextTool();
   });
 
@@ -160,10 +125,12 @@ Hooks.once("ready", async () => {
     if (data.type === "textUpdateRequest") {
       // Игрок просит GM сохранить изменения
       if (game.user.isGM) {
-        const isEmpty = Object.keys(data.texts || {}).length === 0;
+        const requestTexts = data.texts || {};
+        const requestTextIds = Object.keys(requestTexts);
+        const isEmpty = requestTextIds.length === 0;
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
         await new Promise(resolve => setTimeout(resolve, 50));
-        await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, data.texts);
+        await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, requestTexts);
         if (isEmpty) {
           // Also clear ZIndexManager completely when clearing all
           if (window.ZIndexManager && typeof window.ZIndexManager.clear === "function") {
@@ -179,7 +146,7 @@ Hooks.once("ready", async () => {
           const existingIds = new Set();
 
           // Обновляем существующие и создаем новые тексты локально у GM
-          for (const [id, textData] of Object.entries(data.texts)) {
+          for (const [id, textData] of Object.entries(requestTexts)) {
             existingIds.add(id);
             const existing = document.getElementById(id);
             if (existing) {
@@ -203,12 +170,25 @@ Hooks.once("ready", async () => {
                 }
 
                 // Safe to update now
-                textElement.textContent = textData.text;
+                // Update text content - check for span first
+                const textSpan = textElement.querySelector(".wbe-text-background-span");
+                if (textSpan) {
+                  textSpan.textContent = textData.text;
+                } else {
+                  textElement.textContent = textData.text;
+                }
+                
                 existing.style.left = `${textData.left}px`;
                 existing.style.top = `${textData.top}px`;
                 textElement.style.transform = `scale(${textData.scale})`;
                 textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR; // Apply color
-                textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+                
+                // Apply background to span if it exists, otherwise to textElement (backward compat)
+                if (textSpan && textData.backgroundColor) {
+                  textSpan.style.backgroundColor = textData.backgroundColor;
+                } else if (!textSpan) {
+                  textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+                }
                 TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
                 TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
                 TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
@@ -291,8 +271,11 @@ Hooks.once("ready", async () => {
           });
         }
 
-        // Эмитим всем (включая отправителя)
-        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts: data.texts });
+        const textUpdatePayload = { type: "textUpdate", texts: requestTexts };
+        if (data.userId) {
+          textUpdatePayload.senderId = data.userId;
+        }
+        game.socket.emit(`module.${MODID}`, textUpdatePayload);
       }
     }
 
@@ -335,12 +318,25 @@ Hooks.once("ready", async () => {
               }
 
               // Safe to update now
-              textElement.textContent = textData.text;
+              // Update text content - check for span first
+              const textSpan = textElement.querySelector(".wbe-text-background-span");
+              if (textSpan) {
+                textSpan.textContent = textData.text;
+              } else {
+                textElement.textContent = textData.text;
+              }
+              
               existing.style.left = `${textData.left}px`;
               existing.style.top = `${textData.top}px`;
               textElement.style.transform = `scale(${textData.scale})`;
               textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR; // Apply color
-              textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+              
+              // Apply background to span if it exists, otherwise to textElement (backward compat)
+              if (textSpan && textData.backgroundColor) {
+                textSpan.style.backgroundColor = textData.backgroundColor;
+              } else if (!textSpan) {
+                textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+              }
               TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle); // Apply background color
               TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
               TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
@@ -1202,7 +1198,53 @@ const ZIndexConstants = {
 import { CompactZIndexManager } from "./modules/compact-zindex-manager.mjs";
 
 // Z-Index Manager - Direct usage of CompactZIndexManager (no wrapper!)
-const ZIndexManager = new CompactZIndexManager();
+const ZIndexManagerInstance = new CompactZIndexManager();
+
+// Shared queue for z-index operations to prevent race conditions across all modules
+const zIndexOperationQueue = [];
+let isProcessingZIndexOperation = false;
+
+// Process z-index operations one at a time (shared across all modules)
+async function processZIndexOperation(operation) {
+  if (isProcessingZIndexOperation) {
+    zIndexOperationQueue.push(operation);
+    return;
+  }
+  
+  isProcessingZIndexOperation = true;
+  try {
+    await operation();
+  } finally {
+    isProcessingZIndexOperation = false;
+    if (zIndexOperationQueue.length > 0) {
+      const nextOp = zIndexOperationQueue.shift();
+      processZIndexOperation(nextOp);
+    }
+  }
+}
+
+// Wrap ZIndexManager.moveUp and moveDown with queue system
+const ZIndexManager = new Proxy(ZIndexManagerInstance, {
+  get(target, prop) {
+    if (prop === 'moveUp' || prop === 'moveDown') {
+      return async function(objectId) {
+        return new Promise((resolve) => {
+          processZIndexOperation(async () => {
+            const result = target[prop](objectId);
+            // After each z-index operation, check for and resolve any duplicates
+            // This ensures duplicates created during swaps are cleaned up
+            const reassigned = target.deduplicateAll();
+            if (reassigned > 0) {
+              console.log(`[CompactZIndexManager] Auto-deduplication after ${prop}: reassigned ${reassigned} objects`);
+            }
+            resolve(result);
+          });
+        });
+      };
+    }
+    return target[prop];
+  }
+});
 
 // ===== Utility Functions =====
 // Helper functions for prefix-based filtering and migration
@@ -1940,7 +1982,7 @@ const OTHER_CSS = `
   background: transparent;
   color: white;
   padding: 8px 12px;
-  border: 2px solid rgba(255, 255, 255, 0.6);
+  border: none !important;
   font-size: 16px;
   font-weight: bold;
   text-shadow: 0 0 4px rgba(0,0,0,0.8);
@@ -1953,16 +1995,16 @@ const OTHER_CSS = `
 }
 
 .wbe-canvas-text:hover {
-  border-color: rgba(255, 255, 255, 0.9);
+  border: none !important;
   background: rgba(0, 0, 0, 0.9);
 }
 
 .wbe-canvas-text[contenteditable="true"] {
-  outline: 2px solid #4a9eff;
-  outline-offset: 2px;
+  border: none !important;
+  outline: none !important;
   user-select: text;
   white-space: normal;
-  overflow: visible;
+  overflow: hidden;
   pointer-events: none;
 }
 
@@ -2014,7 +2056,7 @@ const OTHER_CSS = `
 `;
 
 /* ----------------------- Expose (optional) --------------- */
-window.FateTableCardApp = FateTableCardApp;
+
 // Expose ImageTools and TextTools for browser console access and testing
 window.ImageTools = ImageTools;
 window.TextTools = TextTools;
