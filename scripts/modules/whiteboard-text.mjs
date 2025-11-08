@@ -457,6 +457,7 @@ function extractTextState(id, textElement, container, options = {}) {
   // DOM is just a view that _syncDOMZIndex keeps in sync
   // This eliminates DOM as competing source of truth and prevents flicker
   const zIndex = ZIndexManager.get(id);
+  const rank = ZIndexManager.getRank(id);
 
   // Get text from span if it exists, otherwise from textElement
   const textSpan = textElement.querySelector(".wbe-text-background-span");
@@ -484,7 +485,8 @@ function extractTextState(id, textElement, container, options = {}) {
     borderColor,
     borderWidth,
     width,
-    zIndex
+    zIndex: zIndex,
+    rank: rank
   };
 }
 
@@ -1677,16 +1679,27 @@ function createTextElement(
     container.id = id;
     container.className = "wbe-canvas-text-container";
     
-    // FIX: Get z-index from manager or use existing
-    const zIndex = existingZIndex || ZIndexManager.assign(id);
-    
-    // If using existing z-index, make sure it's registered
-    if (existingZIndex) {
-      ZIndexManager.set(id, existingZIndex);
+    // FIX: Get z-index from manager
+    // If existingZIndex is provided, the object should already be registered via syncWithExisting
+    // But we check anyway to be safe - if not registered, assignText() will register it
+    let zIndex;
+    if (existingZIndex !== null && existingZIndex !== undefined) {
+      // Object should already be registered by syncWithExisting, but check to be safe
+      if (ZIndexManager.has && typeof ZIndexManager.has === 'function' && ZIndexManager.has(id)) {
+        // Object is registered, use its current z-index from manager
+        zIndex = ZIndexManager.get(id);
+      } else {
+        // Object not registered yet - assign new rank (will be corrected by syncAllDOMZIndexes if rank exists)
+        // This can happen if syncWithExisting hasn't run yet or if object was added after migration
+        zIndex = ZIndexManager.assignText(id);
+      }
+    } else {
+      // No existing z-index provided - assign new rank (places at top)
+      zIndex = ZIndexManager.assignText(id);
     }
     
     // LOG: Track text creation with z-index
-    console.log(`[Text Creation] ID: ${id} | z-index: ${zIndex} ${existingZIndex ? '(from existing)' : '(newly assigned)'}`);
+    console.log(`[Text Creation] ID: ${id} | z-index: ${zIndex} ${existingZIndex ? '(existing provided, using manager)' : '(newly assigned)'}`);
     
     container.style.cssText = `
       position: absolute;
@@ -2259,20 +2272,36 @@ function createTextElement(
         // Z-index operations are queued at ZIndexManager level
         const oldZIndex = ZIndexManager.get(id);
         const result = await ZIndexManager.moveDown(id);
-        if (result.success) {
+        if (result.success && result.changes.length > 0) {
           const change = result.changes[0];
-          // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+          
+          // Sync all DOM z-indexes (ensures consistency across all objects)
+          await ZIndexManager.syncAllDOMZIndexes();
+          const newZIndex = ZIndexManager.get(id);
+          
+          // Emit rank update to GM (player sends request, GM broadcasts confirmation)
+          const rank = ZIndexManager.getRank(id);
+          game.socket.emit('module.whiteboard-experience', {
+            type: 'rankUpdate',
+            objectType: 'text',
+            id: id,
+            rank: rank,
+            userId: game.user.id
+          });
           
           // FIX #3: Persist swapped occupant to database
-        if (result.swappedWith) {
-          await persistSwappedZIndexTarget(result.swappedWith.id);
-            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
+          if (result.swappedWith) {
+            await persistSwappedZIndexTarget(result.swappedWith.id);
+            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} (moved down, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
           } else {
-            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down to next object)`);
+            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} (moved down to next object)`);
           }
           
+          console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
+          
+          // Persist text state using debounced batching
           await persistTextState(id, textElement, container);
-        } else {
+        } else if (result.atBoundary) {
           // At boundary - provide feedback
           console.log(`[Z-Index] TEXT | ID: ${id} | Cannot move down - ${result.reason}`);
         }
@@ -2287,20 +2316,36 @@ function createTextElement(
         // Z-index operations are queued at ZIndexManager level
         const oldZIndex = ZIndexManager.get(id);
         const result = await ZIndexManager.moveUp(id);
-        if (result.success) {
+        if (result.success && result.changes.length > 0) {
           const change = result.changes[0];
-          // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
+          
+          // Sync all DOM z-indexes (ensures consistency across all objects)
+          await ZIndexManager.syncAllDOMZIndexes();
+          const newZIndex = ZIndexManager.get(id);
+          
+          // Emit rank update to GM (player sends request, GM broadcasts confirmation)
+          const rank = ZIndexManager.getRank(id);
+          game.socket.emit('module.whiteboard-experience', {
+            type: 'rankUpdate',
+            objectType: 'text',
+            id: id,
+            rank: rank,
+            userId: game.user.id
+          });
           
           // FIX #3: Persist swapped occupant to database
-        if (result.swappedWith) {
-          await persistSwappedZIndexTarget(result.swappedWith.id);
-            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
+          if (result.swappedWith) {
+            await persistSwappedZIndexTarget(result.swappedWith.id);
+            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} (moved up, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
           } else {
-            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up to next object)`);
+            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} (moved up to next object)`);
           }
           
+          console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
+          
+          // Persist text state using debounced batching
           await persistTextState(id, textElement, container);
-        } else {
+        } else if (result.atBoundary) {
           // At boundary - provide feedback
           console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} | Cannot move up - ${result.reason}`);
         }

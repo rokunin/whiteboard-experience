@@ -358,14 +358,24 @@ Hooks.once("ready", async () => {
                 console.log(`[WB-E] Skipping width update for ${id} - element is locked (lockedSize=true)`);
               }
 
-              // EXPERIMENT PHASE 1: Only update Manager if value actually changed (idempotent)
-              if (textData.zIndex !== undefined && textData.zIndex !== null) {
-                if (window.ZIndexManager && typeof window.ZIndexManager.set === 'function') {
-                  const currentManagerZ = window.ZIndexManager.get(id);
-                  if (currentManagerZ !== textData.zIndex) {
-                    window.ZIndexManager.set(id, textData.zIndex);
-                    // Manager's _syncDOMZIndex will update DOM automatically
+              // EXPERIMENT PHASE 1: Don't update Manager z-index directly - use rank instead
+              // Z-index is derived from rank order, so we should only update rank
+              // The old z-index value is kept for backward compatibility but rank takes precedence
+              // Rank sync is handled below
+
+              // Sync rank if present in socket data (fractional indexing)
+              // Only update if rank actually changed to avoid unnecessary DOM updates
+              if (textData.rank && typeof textData.rank === 'string') {
+                if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+                  const currentRank = window.ZIndexManager.getRank(id);
+                  if (currentRank !== textData.rank) {
+                    window.ZIndexManager.setRank(id, textData.rank);
                   }
+                }
+              } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
+                // If no rank and object doesn't exist in manager, assign new rank
+                if (typeof window.ZIndexManager.assignText === 'function') {
+                  window.ZIndexManager.assignText(id);
                 }
               }
 
@@ -409,6 +419,26 @@ Hooks.once("ready", async () => {
               TextTools.updateTextUI(created);
             }
           }
+
+          // Sync rank if present in socket data (fractional indexing) for newly created elements
+          if (textData.rank && typeof textData.rank === 'string') {
+            if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+              const currentRank = window.ZIndexManager.getRank(id);
+              if (currentRank !== textData.rank) {
+                window.ZIndexManager.setRank(id, textData.rank);
+              }
+            }
+          } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
+            // If no rank and object doesn't exist in manager, assign new rank
+            if (typeof window.ZIndexManager.assignText === 'function') {
+              window.ZIndexManager.assignText(id);
+            }
+          }
+        }
+
+        // Sync DOM z-indexes after updating all ranks
+        if (window.ZIndexManager && typeof window.ZIndexManager.syncAllDOMZIndexes === 'function') {
+          await window.ZIndexManager.syncAllDOMZIndexes();
         }
 
         // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
@@ -724,6 +754,31 @@ Hooks.once("ready", async () => {
             });
             
             console.log(`[WB-E] GM confirmed rank update for ${data.id}, serverSeq: ${serverSeq}`);
+          } else if (data.objectType === "text") {
+            const texts = await TextTools.getAllTexts();
+            if (!texts[data.id]) {
+              console.warn(`[WB-E] Cannot update rank for non-existent text ${data.id}`);
+              return;
+            }
+            
+            // Update only the rank for this specific text in database
+            texts[data.id].rank = data.rank;
+            // Save to database without triggering socket broadcast (we'll use rankConfirm instead)
+            await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
+            await new Promise(resolve => setTimeout(resolve, 50));
+            await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, texts);
+            
+            // Broadcast confirmation to all clients (including sender)
+            serverSeq++;
+            game.socket.emit(`module.${MODID}`, {
+              type: "rankConfirm",
+              objectType: data.objectType,
+              id: data.id,
+              rank: data.rank,
+              serverSeq: serverSeq
+            });
+            
+            console.log(`[WB-E] GM confirmed rank update for ${data.id}, serverSeq: ${serverSeq}`);
           }
         } catch (error) {
           console.error('[WB-E] GM failed to process rank update:', error);
@@ -737,6 +792,22 @@ Hooks.once("ready", async () => {
         console.log(`[WB-E] Received rank confirmation for ${data.objectType} ${data.id}: ${data.rank}, serverSeq: ${data.serverSeq}`);
         
         if (data.objectType === "image") {
+          // Update local rank in manager
+          if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+            const currentRank = window.ZIndexManager.getRank(data.id);
+            // Only update if rank actually changed (avoid unnecessary DOM updates)
+            if (currentRank !== data.rank) {
+              window.ZIndexManager.setRank(data.id, data.rank);
+              
+              // Refresh DOM z-index order
+              await window.ZIndexManager.syncAllDOMZIndexes();
+              
+              console.log(`[WB-E] Applied rank ${data.rank} to ${data.id} (was ${currentRank})`);
+            } else {
+              console.log(`[WB-E] Rank ${data.rank} already applied to ${data.id}, skipping`);
+            }
+          }
+        } else if (data.objectType === "text") {
           // Update local rank in manager
           if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
             const currentRank = window.ZIndexManager.getRank(data.id);
