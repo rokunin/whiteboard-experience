@@ -1,1010 +1,447 @@
 /**
- * CompactZIndexManager - Efficient z-index management with object-to-object navigation
+ * CompactZIndexManager - Rank-based z-index management with fractional indexing
  * 
- * This replaces the existing ZIndexManager with a simpler, more efficient approach:
- * - Single source of truth for all z-index data
- * - Dynamic range allocation that grows with object count
- * - Object-to-object navigation (always move to next/previous actual object)
- * - Efficient O(1) operations for common cases
+ * This manager uses fractional indexing (string ranks) internally to avoid conflicts
+ * during parallel operations. DOM z-index values are derived from rank order.
+ * 
+ * Key features:
+ * - No z-index conflicts during concurrent operations
+ * - Optimistic local updates
+ * - Minimal network traffic (only changed objects)
+ * - Compatible with existing API
  */
 
 import { ZIndexRanges } from "../main.mjs";
+import { rankBetween, rankAfter, rankBefore } from "./fractional-index.mjs";
 
 export class CompactZIndexManager {
-  constructor(stepSize = 50, options = {}) {
-    // Single source of truth: Map<objectId, zIndex>
-    this.objectZIndexes = new Map();
+  constructor() {
+    // Core data: Map<objectId, {rank: string, type: string}>
+    this.objectRank = new Map();
     
-    // Efficient lookups: Map<zIndex, Set<objectId>>
-    this.zIndexObjects = new Map();
+    // Cached sorted order
+    this.orderCache = null;
+    this.dirty = true;
     
-    // Step-based assignment configuration
-    this.stepSize = stepSize;
+    // Base z-index for DOM elements
+    this.baseZ = 1000;
     
-    // Dynamic range management
-    this.minZIndex = ZIndexRanges.EDITABLE_MIN;
-    this.maxZIndex = ZIndexRanges.EDITABLE_MIN;
-    this.nextAvailable = ZIndexRanges.EDITABLE_MIN;
+    // Migration flag
+    this._migrationCompleted = false;
     
-    // Group operation flag to disable compaction
-    this.isGroupOperation = false;
-    
-    // Undo history
+    // Undo history (kept for compatibility)
     this.undoHistory = [];
     this.maxUndoSteps = 50;
-    
-    // DOM sync tracking and configuration
-    this._failedSyncs = new Map();
-    this._debugMode = false;
-    this._autoCleanup = options.autoCleanup || false;
-    this._onSyncFailed = options.onSyncFailed || null;
-    this._assertUniquenessEnabled = options.assertUniqueness !== false;
   }
 
   /**
-   * Assign a new z-index to an object using step-based allocation
+   * Assign a rank to a new object (places at top)
    * @param {string} objectId - The object ID
-   * @returns {number} The assigned z-index
+   * @param {string} initialRank - Optional initial rank (for migration)
+   * @returns {number} The calculated DOM z-index
    */
-  assign(objectId) {
-    // Remove existing assignment if any
-    this.remove(objectId);
-    
-    // Check if we need to expand range before assignment
-    this._checkAndExpandRange();
-    
-    const zIndex = this.nextAvailable;
-    this.objectZIndexes.set(objectId, zIndex);
-    
-    // Update reverse lookup
-    if (!this.zIndexObjects.has(zIndex)) {
-      this.zIndexObjects.set(zIndex, new Set());
-    }
-    this.zIndexObjects.get(zIndex).add(objectId);
-    
-    // Update range tracking
-    if (zIndex > this.maxZIndex) {
-      this.maxZIndex = zIndex;
-    }
-    
-    // Increment next available by step size for spacing
-    this.nextAvailable += this.stepSize;
-    
-    // Sync DOM z-index value
-    this._syncDOMZIndex(objectId, zIndex);
-    
-    return zIndex;
+  assign(objectId, initialRank = null) {
+    return this.#assignInternal(objectId, "image", initialRank);
   }
 
   /**
-   * Get z-index for an object
+   * Assign rank to image (for API compatibility)
+   */
+  assignImage(objectId, initialRank = null) {
+    return this.#assignInternal(objectId, "image", initialRank);
+  }
+
+  /**
+   * Assign rank to text (for API compatibility)
+   */
+  assignText(objectId, initialRank = null) {
+    return this.#assignInternal(objectId, "text", initialRank);
+  }
+
+  /**
+   * Internal assignment method
+   */
+  #assignInternal(objectId, type, initialRank) {
+    if (this.objectRank.has(objectId)) {
+      return this.get(objectId);
+    }
+    
+    let rank = initialRank;
+    if (!rank) {
+      // Place at top by default
+      const last = this.#getLastRank();
+      rank = rankAfter(last);
+    }
+    
+    this.objectRank.set(objectId, { rank, type });
+    this.dirty = true;
+    
+    return this.get(objectId);
+  }
+
+  /**
+   * Get DOM z-index for an object (derived from rank order)
    * @param {string} objectId - The object ID
-   * @returns {number} The z-index, or EDITABLE_MIN if not found
+   * @returns {number} The DOM z-index
    */
   get(objectId) {
-    return this.objectZIndexes.get(objectId) || ZIndexRanges.EDITABLE_MIN;
+    const list = this.#sorted();
+    const idx = list.findIndex(o => o.id === objectId);
+    return idx < 0 ? ZIndexRanges.EDITABLE_MIN : (this.baseZ + idx);
   }
 
   /**
-   * Set z-index for an object directly
-   * @param {string} objectId - The object ID
-   * @param {number} zIndex - The desired z-index
-   * @returns {number} The actual z-index set (clamped to valid range)
+   * Get image z-index (for API compatibility)
    */
-  set(objectId, zIndex) {
-    // Clamp to valid range
-    const clamped = Math.max(
-      ZIndexRanges.EDITABLE_MIN,
-      Math.min(ZIndexRanges.EDITABLE_MAX, zIndex)
-    );
-    
-    // Remove from old position
-    this.remove(objectId);
-    
-    // PREVENTION: Deduplicate target z-index if it has existing objects
-    // This prevents duplicates from being created during swaps and assignments
-    const existingObjects = this.zIndexObjects.get(clamped);
-    if (existingObjects && existingObjects.size > 0) {
-      // If there are objects at this z-index (even just 1), we need to handle it
-      // because we're about to add our object, which would create a duplicate
-      if (existingObjects.size === 1) {
-        // Single object exists - move it to a unique z-index to make room
-        const existingObjectId = existingObjects.values().next().value;
-        if (existingObjectId !== objectId) { // Safety check (shouldn't happen after remove, but just in case)
-          // Find a unique z-index for the existing object
-          let newZIndex = clamped + this.stepSize;
-          while (this.zIndexObjects.has(newZIndex)) {
-            newZIndex += this.stepSize;
-          }
-          // Move the existing object
-          this.objectZIndexes.set(existingObjectId, newZIndex);
-          existingObjects.delete(existingObjectId);
-          if (!this.zIndexObjects.has(newZIndex)) {
-            this.zIndexObjects.set(newZIndex, new Set());
-          }
-          this.zIndexObjects.get(newZIndex).add(existingObjectId);
-          this._syncDOMZIndex(existingObjectId, newZIndex);
-          console.log(`[CompactZIndexManager] Prevented duplicate: moved existing object ${existingObjectId} from z-index ${clamped} to ${newZIndex} to make room for ${objectId}`);
-        }
-      } else {
-        // Multiple objects exist - deduplicate them
-        const reassigned = this._deduplicateZIndex(clamped);
-        if (reassigned.length > 0) {
-          console.log(`[CompactZIndexManager] Prevented duplicate: deduplicated ${reassigned.length} objects at z-index ${clamped} before setting ${objectId}`);
-        }
-        // After deduplication, if there's still 1 object, move it too
-        const remainingObjects = this.zIndexObjects.get(clamped);
-        if (remainingObjects && remainingObjects.size === 1) {
-          const remainingObjectId = remainingObjects.values().next().value;
-          if (remainingObjectId !== objectId) {
-            let newZIndex = clamped + this.stepSize;
-            while (this.zIndexObjects.has(newZIndex)) {
-              newZIndex += this.stepSize;
-            }
-            this.objectZIndexes.set(remainingObjectId, newZIndex);
-            remainingObjects.delete(remainingObjectId);
-            if (!this.zIndexObjects.has(newZIndex)) {
-              this.zIndexObjects.set(newZIndex, new Set());
-            }
-            this.zIndexObjects.get(newZIndex).add(remainingObjectId);
-            this._syncDOMZIndex(remainingObjectId, newZIndex);
-            console.log(`[CompactZIndexManager] Prevented duplicate: moved remaining object ${remainingObjectId} from z-index ${clamped} to ${newZIndex} to make room for ${objectId}`);
-          }
-        }
-      }
-    }
-    
-    // Now safe to set - target z-index is guaranteed to be empty
-    this.objectZIndexes.set(objectId, clamped);
-    
-    // Update reverse lookup
-    if (!this.zIndexObjects.has(clamped)) {
-      this.zIndexObjects.set(clamped, new Set());
-    }
-    this.zIndexObjects.get(clamped).add(objectId);
-    
-    // Update range tracking
-    if (clamped > this.maxZIndex) {
-      this.maxZIndex = clamped;
-    }
-    if (clamped < this.minZIndex) {
-      this.minZIndex = clamped;
-    }
-    
-    // Update nextAvailable if we're setting beyond current range
-    if (clamped >= this.nextAvailable) {
-      this.nextAvailable = clamped + 1;
-    }
-    
-    // Sync DOM z-index value
-    this._syncDOMZIndex(objectId, clamped);
-    this._assertUniqueZIndexes('set', { objectId, zIndex: clamped });
-
-    return clamped;
+  getImage(objectId) {
+    return this.get(objectId);
   }
 
   /**
-   * Synchronize DOM z-index with manager value
-   * @param {string} objectId - The object ID
-   * @param {number} zIndex - The z-index value to set in DOM
-   * @private
+   * Get text z-index (for API compatibility)
    */
-  _syncDOMZIndex(objectId, zIndex) {
-    const container = document.getElementById(objectId);
-    if (container) {
-      // Validate current z-index before updating
-      const currentZIndex = parseInt(container.style.zIndex) || 0;
-      if (currentZIndex !== zIndex) {
-        container.style.zIndex = zIndex;
-        
-        // Track successful sync for debugging
-        if (this._debugMode) {
-          console.log(`[CompactZIndexManager] Synced DOM z-index for ${objectId}: ${currentZIndex} → ${zIndex}`);
-        }
-      }
-    } else {
-      // Element doesn't exist in DOM - log warning and track failure
-      //console.warn(`[CompactZIndexManager] Cannot sync z-index for ${objectId} - element not found in DOM`);
-      
-      // Track failed sync attempts for debugging
-      if (!this._failedSyncs) {
-        this._failedSyncs = new Map();
-      }
-      
-      const failCount = (this._failedSyncs.get(objectId) || 0) + 1;
-      this._failedSyncs.set(objectId, failCount);
-      
-      // If element consistently fails to sync, it may have been removed
-      if (failCount >= 3) {
-        //console.error(`[CompactZIndexManager] Element ${objectId} has failed to sync ${failCount} times - consider removing from manager`);
-        
-        // Optional: Auto-cleanup after repeated failures
-        if (this._autoCleanup) {
-          //console.warn(`[CompactZIndexManager] Auto-removing ${objectId} from manager due to repeated sync failures`);
-          this.remove(objectId);
-        }
-      }
-      
-      // Invoke callback if provided
-      if (this._onSyncFailed) {
-        this._onSyncFailed(objectId, zIndex);
-      }
-    }
+  getText(objectId) {
+    return this.get(objectId);
   }
 
-  _snapshotState() {
-    return {
-      objectZIndexes: Array.from(this.objectZIndexes.entries()),
-      zIndexObjects: Array.from(this.zIndexObjects.entries()).map(([z, ids]) => [z, Array.from(ids)]),
-      minZIndex: this.minZIndex,
-      maxZIndex: this.maxZIndex,
-      nextAvailable: this.nextAvailable
-    };
+  /**
+   * Get rank string for an object
+   * @param {string} objectId - The object ID
+   * @returns {string} The rank string
+   */
+  getRank(objectId) {
+    return this.objectRank.get(objectId)?.rank || "";
   }
 
-  _assertUniqueZIndexes(context, details = {}) {
-    const debugEnabled = typeof window !== 'undefined' && !!window.WBE_DEBUG_ZINDEX;
-    if (!this._assertUniquenessEnabled || !debugEnabled) {
-      return;
-    }
+  /**
+   * Check if an object exists in the manager
+   * @param {string} objectId - The object ID
+   * @returns {boolean} True if object exists
+   */
+  has(objectId) {
+    return this.objectRank.has(objectId);
+  }
 
-    const duplicates = [];
-    this.zIndexObjects.forEach((ids, zIndex) => {
-      if (ids.size > 1) {
-        duplicates.push({ zIndex, ids: Array.from(ids) });
-      }
-    });
-
-    if (duplicates.length > 0) {
-      console.error(`[CompactZIndexManager] 🚨 Duplicate z-index detected after ${context}`, {
-        timestamp: Date.now(),
-        duplicates,
-        details,
-        snapshot: this._snapshotState()
-      });
+  /**
+   * Set rank for an object directly
+   * @param {string} objectId - The object ID
+   * @param {string} rank - The rank string
+   */
+  setRank(objectId, rank) {
+    const entry = this.objectRank.get(objectId);
+    if (entry) {
+      entry.rank = rank;
+      this.dirty = true;
     }
   }
 
   /**
-   * Remove an object from z-index tracking
-   * @param {string} objectId - The object ID to remove
+   * Remove an object
+   * @param {string} objectId - The object ID
    */
   remove(objectId) {
-    const currentZIndex = this.objectZIndexes.get(objectId);
-    if (currentZIndex !== undefined) {
-      // Remove from primary map
-      this.objectZIndexes.delete(objectId);
-      
-      // Remove from reverse lookup
-      const objectsAtZIndex = this.zIndexObjects.get(currentZIndex);
-      if (objectsAtZIndex) {
-        objectsAtZIndex.delete(objectId);
-        // Clean up empty sets
-        if (objectsAtZIndex.size === 0) {
-          this.zIndexObjects.delete(currentZIndex);
-        }
-      }
-      
-      // Check if automatic compaction is needed after removal (skip during group operations)
-      // TEMPORARILY DISABLED FOR TESTING - prevents compaction from resetting swapped z-indexes
-      // if (!this.isGroupOperation && this._shouldCompact()) {
-      //   //console.log(`[CompactZIndexManager] Automatic compaction triggered after object removal`);
-      //   this.compact();
-      // }
+    this.#removeInternal(objectId);
+  }
 
-      this._assertUniqueZIndexes('remove', { objectId, previousZIndex: currentZIndex });
+  /**
+   * Remove image (for API compatibility)
+   */
+  removeImage(objectId) {
+    this.#removeInternal(objectId);
+  }
+
+  /**
+   * Remove text (for API compatibility)
+   */
+  removeText(objectId) {
+    this.#removeInternal(objectId);
+  }
+
+  /**
+   * Internal removal method
+   */
+  #removeInternal(objectId) {
+    if (this.objectRank.delete(objectId)) {
+      this.dirty = true;
     }
   }
 
   /**
-   * Move object up to next object in the layer stack
-   * @param {string} objectId - The object to move
-   * @returns {Object} Navigation result with success, newZIndex, swappedWith, etc.
+   * Move object up (toward higher z-index / top of stack)
+   * @param {string} objectId - The object ID
+   * @param {number} count - Number of positions to move (default 1)
+   * @returns {object} Result with success flag and changes
    */
-  moveUp(objectId) {
-    const currentZIndex = this.get(objectId);
+  moveUp(objectId, count = 1) {
+    return this.#move(objectId, +Math.abs(count));
+  }
+
+  /**
+   * Move object down (toward lower z-index / bottom of stack)
+   * @param {string} objectId - The object ID
+   * @param {number} count - Number of positions to move (default 1)
+   * @returns {object} Result with success flag and changes
+   */
+  moveDown(objectId, count = 1) {
+    return this.#move(objectId, -Math.abs(count));
+  }
+
+  /**
+   * Internal move method using fractional indexing
+   * @param {string} objectId - The object ID
+   * @param {number} delta - Positive for up, negative for down
+   * @returns {object} Result object
+   */
+  #move(objectId, delta) {
+    const list = this.#sorted();
+    const fromIndex = list.findIndex(o => o.id === objectId);
     
-    // Find next object above current position
-    const nextObjectZIndex = this._findNextObjectAbove(currentZIndex);
+    if (fromIndex < 0) {
+      return { 
+        success: false, 
+        changes: [],
+        atBoundary: false,
+        reason: 'object_not_found'
+      };
+    }
+
+    // Calculate target index
+    let toIndex = fromIndex + delta;
+    toIndex = Math.max(0, Math.min(list.length - 1, toIndex));
     
-    if (nextObjectZIndex === null) {
-      // At top boundary
-      return {
-        success: false,
-        direction: 'up',
+    if (toIndex === fromIndex) {
+      return { 
+        success: true, 
         changes: [],
         atBoundary: true,
-        reason: 'at_top'
+        reason: delta > 0 ? 'at_top' : 'at_bottom'
       };
     }
+
+    // Find ranks of neighbors at target position
+    // When moving up (delta > 0), we want to go AFTER the target position
+    // When moving down (delta < 0), we want to go BEFORE the target position
+    let beforeRank, afterRank;
     
-    // Get object(s) at target position
-    let objectsAtTarget = this.zIndexObjects.get(nextObjectZIndex);
-    
-    // FIX: Deduplicate target z-index before swapping to prevent duplicates
-    if (objectsAtTarget && objectsAtTarget.size > 1) {
-      const reassigned = this._deduplicateZIndex(nextObjectZIndex);
-      if (reassigned.length > 0) {
-        console.log(`[CompactZIndexManager] Deduplicated z-index ${nextObjectZIndex}: reassigned ${reassigned.length} objects`);
-      }
-      objectsAtTarget = this.zIndexObjects.get(nextObjectZIndex);
-    }
-    
-    // After deduplication, there should be only one object at target z-index
-    const targetObjectId = objectsAtTarget ? objectsAtTarget.values().next().value : null;
-    let result;
-    
-    if (targetObjectId && targetObjectId !== objectId) {
-      // Swap positions
-      console.log(`[Swap DEBUG] Before swap: ${objectId}=${currentZIndex}, ${targetObjectId}=${nextObjectZIndex}`);
-      this.set(targetObjectId, currentZIndex);
-      console.log(`[Swap DEBUG] After first set: ${objectId}=${this.get(objectId)}, ${targetObjectId}=${this.get(targetObjectId)}`);
-      this.set(objectId, nextObjectZIndex);
-      console.log(`[Swap DEBUG] After second set: ${objectId}=${this.get(objectId)}, ${targetObjectId}=${this.get(targetObjectId)}`);
-      
-      // FIX: Deduplicate both z-indexes after swap to ensure no duplicates were created
-      const reassignedCurrent = this._deduplicateZIndex(currentZIndex);
-      const reassignedTarget = this._deduplicateZIndex(nextObjectZIndex);
-      if (reassignedCurrent.length > 0 || reassignedTarget.length > 0) {
-        console.log(`[CompactZIndexManager] Post-swap deduplication: ${reassignedCurrent.length} at ${currentZIndex}, ${reassignedTarget.length} at ${nextObjectZIndex}`);
-      }
-      
-      result = {
-        success: true,
-        direction: 'up',
-        changes: [
-          {
-            objectId: objectId,
-            oldZIndex: currentZIndex,
-            newZIndex: nextObjectZIndex,
-            swappedWith: targetObjectId
-          }
-        ],
-        atBoundary: false,
-        swappedWith: {
-          id: targetObjectId,
-          newZIndex: currentZIndex
-        }
-      };
+    if (delta > 0) {
+      // Moving up: insert after toIndex
+      beforeRank = list[toIndex]?.rank ?? "";
+      afterRank = list[toIndex + 1]?.rank ?? "";
     } else {
-      // Move to target position (no collision)
-      this.set(objectId, nextObjectZIndex);
-      
-      // FIX: Deduplicate target z-index after move
-      const reassigned = this._deduplicateZIndex(nextObjectZIndex);
-      if (reassigned.length > 0) {
-        console.log(`[CompactZIndexManager] Post-move deduplication at ${nextObjectZIndex}: reassigned ${reassigned.length} objects`);
-      }
-      
-      result = {
-        success: true,
-        direction: 'up',
-        changes: [
-          {
-            objectId: objectId,
-            oldZIndex: currentZIndex,
-            newZIndex: nextObjectZIndex,
-            swappedWith: null
-          }
-        ],
-        atBoundary: false,
+      // Moving down: insert before toIndex
+      beforeRank = list[toIndex - 1]?.rank ?? "";
+      afterRank = list[toIndex]?.rank ?? "";
+    }
+    
+    const newRank = rankBetween(beforeRank, afterRank);
+    const oldRank = this.objectRank.get(objectId).rank;
+    
+    this.objectRank.get(objectId).rank = newRank;
+    this.dirty = true;
+
+    return { 
+      success: true, 
+      changes: [{
+        objectId: objectId,
+        oldZIndex: this.baseZ + fromIndex,
+        newZIndex: this.baseZ + toIndex,
+        rank: newRank,
         swappedWith: null
-      };
-    }
-
-    this._assertUniqueZIndexes('moveUp', {
-      objectId,
-      currentZIndex,
-      targetZIndex: nextObjectZIndex,
-      swappedWith: result.swappedWith?.id || null
-    });
-
-    return result;
+      }],
+      atBoundary: false
+    };
   }
 
   /**
-   * Move object down to previous object in the layer stack
-   * @param {string} objectId - The object to move
-   * @returns {Object} Navigation result with success, newZIndex, swappedWith, etc.
-   */
-  moveDown(objectId) {
-    const currentZIndex = this.get(objectId);
-    
-    // Find previous object below current position
-    const prevObjectZIndex = this._findNextObjectBelow(currentZIndex);
-    
-    if (prevObjectZIndex === null) {
-      // At bottom boundary
-      return {
-        success: false,
-        direction: 'down',
-        changes: [],
-        atBoundary: true,
-        reason: 'at_bottom'
-      };
-    }
-    
-    // Get object(s) at target position
-    let objectsAtTarget = this.zIndexObjects.get(prevObjectZIndex);
-    
-    // FIX: Deduplicate target z-index before swapping to prevent duplicates
-    if (objectsAtTarget && objectsAtTarget.size > 1) {
-      const reassigned = this._deduplicateZIndex(prevObjectZIndex);
-      if (reassigned.length > 0) {
-        console.log(`[CompactZIndexManager] Deduplicated z-index ${prevObjectZIndex}: reassigned ${reassigned.length} objects`);
-      }
-      objectsAtTarget = this.zIndexObjects.get(prevObjectZIndex);
-    }
-    
-    // After deduplication, there should be only one object at target z-index
-    const targetObjectId = objectsAtTarget ? objectsAtTarget.values().next().value : null;
-    let result;
-    
-    if (targetObjectId && targetObjectId !== objectId) {
-      // Swap positions
-      this.set(targetObjectId, currentZIndex);
-      this.set(objectId, prevObjectZIndex);
-      
-      // FIX: Deduplicate both z-indexes after swap to ensure no duplicates were created
-      const reassignedCurrent = this._deduplicateZIndex(currentZIndex);
-      const reassignedTarget = this._deduplicateZIndex(prevObjectZIndex);
-      if (reassignedCurrent.length > 0 || reassignedTarget.length > 0) {
-        console.log(`[CompactZIndexManager] Post-swap deduplication: ${reassignedCurrent.length} at ${currentZIndex}, ${reassignedTarget.length} at ${prevObjectZIndex}`);
-      }
-      
-      result = {
-        success: true,
-        direction: 'down',
-        changes: [
-          {
-            objectId: objectId,
-            oldZIndex: currentZIndex,
-            newZIndex: prevObjectZIndex,
-            swappedWith: targetObjectId
-          }
-        ],
-        atBoundary: false,
-        swappedWith: {
-          id: targetObjectId,
-          newZIndex: currentZIndex
-        }
-      };
-    } else {
-      // Move to target position (no collision)
-      this.set(objectId, prevObjectZIndex);
-      
-      // FIX: Deduplicate target z-index after move
-      const reassigned = this._deduplicateZIndex(prevObjectZIndex);
-      if (reassigned.length > 0) {
-        console.log(`[CompactZIndexManager] Post-move deduplication at ${prevObjectZIndex}: reassigned ${reassigned.length} objects`);
-      }
-      
-      result = {
-        success: true,
-        direction: 'down',
-        changes: [
-          {
-            objectId: objectId,
-            oldZIndex: currentZIndex,
-            newZIndex: prevObjectZIndex,
-            swappedWith: null
-          }
-        ],
-        atBoundary: false,
-        swappedWith: null
-      };
-    }
-
-    this._assertUniqueZIndexes('moveDown', {
-      objectId,
-      currentZIndex,
-      targetZIndex: prevObjectZIndex,
-      swappedWith: result.swappedWith?.id || null
-    });
-
-    return result;
-  }
-
-  /**
-   * Find the next object above the given z-index
-   * @param {number} currentZIndex - Current z-index position
-   * @returns {number|null} Z-index of next object above, or null if none
-   * @private
-   */
-  _findNextObjectAbove(currentZIndex) {
-    let nextZIndex = null;
-    
-    // Find the smallest z-index that is greater than current
-    for (const zIndex of this.zIndexObjects.keys()) {
-      if (zIndex > currentZIndex) {
-        if (nextZIndex === null || zIndex < nextZIndex) {
-          nextZIndex = zIndex;
-        }
-      }
-    }
-    
-    return nextZIndex;
-  }
-
-  /**
-   * Find the next object below the given z-index
-   * @param {number} currentZIndex - Current z-index position
-   * @returns {number|null} Z-index of next object below, or null if none
-   * @private
-   */
-  _findNextObjectBelow(currentZIndex) {
-    let prevZIndex = null;
-    
-    // Find the largest z-index that is smaller than current
-    for (const zIndex of this.zIndexObjects.keys()) {
-      if (zIndex < currentZIndex) {
-        if (prevZIndex === null || zIndex > prevZIndex) {
-          prevZIndex = zIndex;
-        }
-      }
-    }
-    
-    return prevZIndex;
-  }
-
-  /**
-   * Deduplicate a z-index by reassigning all but one object to unique z-indexes
-   * @param {number} zIndex - The z-index to deduplicate
-   * @returns {Array} Array of objects that were reassigned [{objectId, oldZ, newZ}, ...]
-   * @private
-   */
-  _deduplicateZIndex(zIndex) {
-    const objectsAtZIndex = this.zIndexObjects.get(zIndex);
-    if (!objectsAtZIndex || objectsAtZIndex.size <= 1) {
-      return []; // No duplicates
-    }
-    
-    const reassigned = [];
-    const objectArray = Array.from(objectsAtZIndex);
-    
-    // Keep the first object at the original z-index, reassign the rest
-    for (let i = 1; i < objectArray.length; i++) {
-      const objectId = objectArray[i];
-      // Find a unique z-index above the current one
-      let newZIndex = zIndex + this.stepSize;
-      while (this.zIndexObjects.has(newZIndex)) {
-        newZIndex += this.stepSize;
-      }
-      
-      const oldZ = this.get(objectId);
-      this.set(objectId, newZIndex);
-      reassigned.push({ objectId, oldZ, newZ: newZIndex });
-    }
-    this._assertUniqueZIndexes('_deduplicateZIndex', { zIndex, reassignedCount: reassigned.length });
-
-    return reassigned;
-  }
-
-  /**
-   * Move multiple objects up as a group using step-based spacing
-   * @param {string[]} objectIds - Array of object IDs to move
-   * @returns {Object[]} Array of navigation results
+   * Move object group up
+   * @param {Array<string>} objectIds - Array of object IDs
+   * @returns {Array<object>} Array of results
    */
   moveUpGroup(objectIds) {
-    if (objectIds.length === 0) return [];
-    
-    // Disable compaction during group operations
-    this.isGroupOperation = true;
-    
-    try {
-      // Get current z-indexes for the group
-    const groupZIndexes = objectIds.map(id => this.get(id));
-    const maxGroupZ = Math.max(...groupZIndexes);
-    
-    // Find insertion point for the group
-    const insertionPoint = this._findGroupInsertionPoint(groupZIndexes, 'up');
-    
-    if (insertionPoint === null) {
-      // At boundary - return failure for all objects
-      return objectIds.map(() => ({
-        success: false,
-        direction: 'up',
-        changes: [],
-        atBoundary: true,
-        reason: 'at_top'
-      }));
-    }
-    
-    // Sort objects by current z-index to preserve relative ordering
-    const sortedObjects = objectIds.map(id => ({
-      id,
-      currentZ: this.get(id)
-    })).sort((a, b) => a.currentZ - b.currentZ);
-    
-    // Move group as a block
-    const results = [];
-    const swappedObjects = new Map(); // targetObjectId -> oldZ (where to move swapped object)
-    
-    // FIRST PASS: Identify all swapped objects and collect their old positions
-    sortedObjects.forEach((obj, index) => {
-      const oldZ = obj.currentZ;
-      const newZ = insertionPoint + (index * 5); // Tight spacing within group
-      
-      // Check if there's an object at the target position
-      const objectsAtTarget = this.zIndexObjects.get(newZ);
-      const targetObjectId = objectsAtTarget ? objectsAtTarget.values().next().value : null;
-      
-      if (targetObjectId && targetObjectId !== obj.id) {
-        // Store swapped object info: move targetObjectId to oldZ (the selected object's old position)
-        swappedObjects.set(targetObjectId, oldZ);
-      }
-    });
-    
-    // SECOND PASS: Move swapped objects FIRST (before selected objects) to avoid collisions
-    for (const [swappedId, newZ] of swappedObjects) {
-      this.set(swappedId, newZ);
-    }
-    
-    // THIRD PASS: Now move the selected objects to their new positions
-    sortedObjects.forEach((obj, index) => {
-      const oldZ = obj.currentZ;
-      const newZ = insertionPoint + (index * 5);
-      
-      // Check if there's an object at the target position (should be none now, since we moved swapped objects first)
-      const objectsAtTarget = this.zIndexObjects.get(newZ);
-      const targetObjectId = objectsAtTarget ? objectsAtTarget.values().next().value : null;
-      
-      // Move the object
-      this.set(obj.id, newZ);
-      
-      results.push({
-        success: true,
-        direction: 'up',
-        changes: [{
-          objectId: obj.id,
-          oldZIndex: oldZ,
-          newZIndex: newZ,
-          swappedWith: targetObjectId
-        }],
-        atBoundary: false,
-        swappedWith: targetObjectId ? {
-          id: targetObjectId,
-          newZIndex: oldZ
-        } : null
-      });
-    });
-    
-      // Return results in original input order
-      return objectIds.map(id => {
-        const result = results.find(r => r.changes[0].objectId === id);
-        return result || {
-          success: false,
-          direction: 'up',
-          changes: [],
-          atBoundary: false,
-          reason: 'not_found'
-        };
-      });
-    } finally {
-      // Re-enable compaction
-      this.isGroupOperation = false;
-    }
+    return this.#moveGroup(objectIds, 1);
   }
 
   /**
-   * Move multiple objects down as a group using step-based spacing
-   * @param {string[]} objectIds - Array of object IDs to move
-   * @returns {Object[]} Array of navigation results
+   * Move object group down
+   * @param {Array<string>} objectIds - Array of object IDs
+   * @returns {Array<object>} Array of results
    */
   moveDownGroup(objectIds) {
-    if (objectIds.length === 0) return [];
-    
-    // Disable compaction during group operations
-    this.isGroupOperation = true;
-    
-    try {
-      // Get current z-indexes for the group
-    const groupZIndexes = objectIds.map(id => this.get(id));
-    const minGroupZ = Math.min(...groupZIndexes);
-    
-    // Find insertion point for the group
-    const insertionPoint = this._findGroupInsertionPoint(groupZIndexes, 'down');
-    
-    if (insertionPoint === null) {
-      // At boundary - return failure for all objects
-      return objectIds.map(() => ({
-        success: false,
-        direction: 'down',
-        changes: [],
-        atBoundary: true,
-        reason: 'at_bottom'
-      }));
-    }
-    
-    // Sort objects by current z-index to preserve relative ordering
-    const sortedObjects = objectIds.map(id => ({
-      id,
-      currentZ: this.get(id)
-    })).sort((a, b) => a.currentZ - b.currentZ);
-    
-    // Move group as a block
+    return this.#moveGroup(objectIds, -1);
+  }
+
+  /**
+   * Internal group move method
+   */
+  #moveGroup(objectIds, delta) {
     const results = [];
-    const swappedObjects = new Map(); // targetObjectId -> oldZ (where to move swapped object)
     
-    // FIRST PASS: Identify all swapped objects and collect their old positions
-    sortedObjects.forEach((obj, index) => {
-      const oldZ = obj.currentZ;
-      const newZ = insertionPoint + (index * 5); // Tight spacing within group
-      
-      // Check if there's an object at the target position
-      const objectsAtTarget = this.zIndexObjects.get(newZ);
-      const targetObjectId = objectsAtTarget ? objectsAtTarget.values().next().value : null;
-      
-      if (targetObjectId && targetObjectId !== obj.id) {
-        // Store swapped object info: move targetObjectId to oldZ (the selected object's old position)
-        swappedObjects.set(targetObjectId, oldZ);
-      }
-    });
+    // Sort objects by current position
+    const list = this.#sorted();
+    const positions = objectIds
+      .map(id => ({ id, index: list.findIndex(o => o.id === id) }))
+      .filter(o => o.index >= 0)
+      .sort((a, b) => delta > 0 ? b.index - a.index : a.index - b.index);
     
-    // SECOND PASS: Move swapped objects FIRST (before selected objects) to avoid collisions
-    for (const [swappedId, newZ] of swappedObjects) {
-      this.set(swappedId, newZ);
+    // Move each object
+    for (const {id} of positions) {
+      const result = this.#move(id, delta);
+      results.push(result);
     }
     
-    // THIRD PASS: Now move the selected objects to their new positions
-    sortedObjects.forEach((obj, index) => {
-      const oldZ = obj.currentZ;
-      const newZ = insertionPoint + (index * 5);
-      
-      // Check if there's an object at the target position (should be none now, since we moved swapped objects first)
-      const objectsAtTarget = this.zIndexObjects.get(newZ);
-      const targetObjectId = objectsAtTarget ? objectsAtTarget.values().next().value : null;
-      
-      // Move the object
-      this.set(obj.id, newZ);
-      
-      results.push({
-        success: true,
-        direction: 'down',
-        changes: [{
-          objectId: obj.id,
-          oldZIndex: oldZ,
-          newZIndex: newZ,
-          swappedWith: targetObjectId
-        }],
-        atBoundary: false,
-        swappedWith: targetObjectId ? {
-          id: targetObjectId,
-          newZIndex: oldZ
-        } : null
-      });
-    });
-    
-      // Return results in original input order
-      return objectIds.map(id => {
-        const result = results.find(r => r.changes[0].objectId === id);
-        return result || {
-          success: false,
-          direction: 'down',
-          changes: [],
-          atBoundary: false,
-          reason: 'not_found'
-        };
-      });
-    } finally {
-      // Re-enable compaction
-      this.isGroupOperation = false;
-    }
+    return results;
   }
 
   /**
-   * Find insertion point for group movement
-   * @param {number[]} groupZIndexes - Array of z-indexes in the group
-   * @param {string} direction - 'up' or 'down'
-   * @returns {number|null} Insertion point z-index or null if no space
-   * @private
+   * Apply rank order to DOM z-index values
+   * This is the ONLY place where style.zIndex should be set
+   * Uses requestAnimationFrame to batch DOM updates and prevent multiple reflows
+   * Returns a Promise that resolves when DOM updates are complete
    */
-  _findGroupInsertionPoint(groupZIndexes, direction) {
-    const sortedGroup = [...groupZIndexes].sort((a, b) => a - b);
-    const groupMin = sortedGroup[0];
-    const groupMax = sortedGroup[sortedGroup.length - 1];
-    const groupSize = sortedGroup.length;
+  syncAllDOMZIndexes() {
+    const list = this.#sorted();
     
-    if (direction === 'up') {
-      // Find next object above the group
-      const nextObjectZ = this._findNextObjectAbove(groupMax);
-      if (nextObjectZ === null) return null;
-      
-      // Calculate insertion point - halfway between group max and next object
-      const availableSpace = nextObjectZ - groupMax;
-      const neededSpace = (groupSize - 1) * 5 + 10; // Tight spacing within group + buffer
-      
-      if (availableSpace >= neededSpace) {
-        // Insert group starting at midpoint
-        return groupMax + Math.floor(availableSpace / 2) - Math.floor((groupSize - 1) * 5 / 2);
-      }
-      
-      // Not enough space - use simple swap with next object
-      return nextObjectZ;
-    } else {
-      // Find previous object below the group
-      const prevObjectZ = this._findNextObjectBelow(groupMin);
-      if (prevObjectZ === null) return null;
-      
-      // Calculate insertion point - halfway between previous object and group min
-      const availableSpace = groupMin - prevObjectZ;
-      const neededSpace = (groupSize - 1) * 5 + 10; // Tight spacing within group + buffer
-      
-      if (availableSpace >= neededSpace) {
-        // Insert group starting at midpoint
-        return prevObjectZ + Math.floor(availableSpace / 2) - Math.floor((groupSize - 1) * 5 / 2);
-      }
-      
-      // Not enough space - use simple swap with previous object
-      return prevObjectZ;
-    }
+    // Batch all DOM updates into single reflow using requestAnimationFrame
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        list.forEach((obj, index) => {
+          const el = document.getElementById(obj.id);
+          if (el) {
+            el.style.zIndex = String(this.baseZ + index);
+          }
+        });
+        resolve();
+      });
+    });
   }
 
   /**
-   * Check if range expansion is needed and expand if necessary
-   * Called automatically before new assignments
-   * @private
+   * Sync with existing data (high-level migration method)
+   * @param {Array} existingData - Array of {id, zIndex, rank, type} objects
    */
-  _checkAndExpandRange() {
-    const remainingSpace = ZIndexRanges.EDITABLE_MAX - this.nextAvailable;
-    const expansionThreshold = 100; // Expand when less than 100 slots remain
+  syncWithExisting(existingData) {
+    if (!Array.isArray(existingData)) return;
     
-    // If we're approaching the absolute limit, trigger compaction first
-    if (remainingSpace < expansionThreshold) {
-      console.log(`[CompactZIndexManager] Approaching z-index limit (${remainingSpace} slots remaining), triggering compaction`);
-      this.compact();
+    // Only migrate once per instance
+    if (this._migrationCompleted) {
+      //console.log('[CompactZIndexManager] Migration already completed, skipping');
       return;
     }
     
-    // Calculate current utilization
-    const currentRange = this.maxZIndex - this.minZIndex + 1;
-    const objectCount = this.objectZIndexes.size;
-    const utilization = objectCount > 0 ? objectCount / currentRange : 1;
+    console.log(`[CompactZIndexManager] Starting one-time migration of ${existingData.length} objects`);
     
-    // If utilization is high (>80%), we're efficiently using space - no action needed
-    // If utilization is low (<20%), we have plenty of gaps - no expansion needed
-    // This method primarily ensures we don't run out of space at the top end
-    if (utilization > 0.8 && remainingSpace < (objectCount * 0.5)) {
-      // High utilization and limited remaining space - prepare for more objects
-      console.log(`[CompactZIndexManager] High utilization (${Math.round(utilization * 100)}%) with limited space, range ready for expansion`);
-    }
+    // Pass full data to migration (including rank if present)
+    this.migrateFromLegacy({ 
+      images: existingData.filter(d => d.type === 'image'), 
+      texts: existingData.filter(d => d.type === 'text') 
+    });
+    
+    // After migration, sync DOM z-indexes (fire and forget - migration happens during init)
+    this.syncAllDOMZIndexes().catch(err => {
+      console.warn('[CompactZIndexManager] Error syncing DOM z-indexes after migration:', err);
+    });
+    
+    this._migrationCompleted = true;
+    console.log('[CompactZIndexManager] Migration completed and locked');
   }
 
   /**
-   * Check if automatic compaction is needed based on range utilization
-   * @returns {boolean} True if compaction is recommended
-   * @private
+   * Migrate from legacy z-index data
+   * @param {object} existing - Object with images and/or texts arrays
    */
-  _shouldCompact() {
-    if (this.objectZIndexes.size === 0) return false;
+  migrateFromLegacy(existing) {
+    console.log('[CompactZIndexManager] Starting migration from legacy data');
     
-    const currentRange = this.maxZIndex - this.minZIndex + 1;
-    const objectCount = this.objectZIndexes.size;
-    const utilization = objectCount / currentRange;
+    const all = [];
     
-    // Compact when utilization drops below 20% (excessive gaps)
-    // This means we're using less than 1/5 of our allocated range
-    const compactionThreshold = 0.2;
-    
-    return utilization < compactionThreshold && currentRange > objectCount * 5;
-  }
-
-  /**
-   * Compact the z-index range by removing gaps
-   * This is called automatically when the range becomes too sparse
-   * @returns {boolean} True if compaction was performed
-   */
-  compact() {
-    if (this.objectZIndexes.size === 0) return false;
-    
-    const beforeStats = this.getStats();
-    
-    // Get all used z-indexes in sorted order
-    const usedZIndexes = Array.from(this.zIndexObjects.keys()).sort((a, b) => a - b);
-    
-    // Reassign z-indexes starting from EDITABLE_MIN with step-based spacing
-    let newZIndex = ZIndexRanges.EDITABLE_MIN;
-    const remapping = new Map();
-    
-    for (const oldZIndex of usedZIndexes) {
-      const objectsAtZIndex = this.zIndexObjects.get(oldZIndex);
-      if (objectsAtZIndex && objectsAtZIndex.size > 0) {
-        remapping.set(oldZIndex, newZIndex);
-        newZIndex += this.stepSize; // Use step-based spacing during compaction
-      }
-    }
-    
-    // Apply remapping
-    const newObjectZIndexes = new Map();
-    const newZIndexObjects = new Map();
-    
-    for (const [objectId, oldZIndex] of this.objectZIndexes) {
-      const newZ = remapping.get(oldZIndex);
-      if (newZ !== undefined) {
-        newObjectZIndexes.set(objectId, newZ);
-        
-        if (!newZIndexObjects.has(newZ)) {
-          newZIndexObjects.set(newZ, new Set());
+    // Gather all objects (images and texts)
+    for (const arr of [existing.images || [], existing.texts || []]) {
+      for (const item of arr) {
+        if (item && item.id) {
+          all.push(item);
         }
-        newZIndexObjects.get(newZ).add(objectId);
       }
     }
     
-    // Update internal state
-    this.objectZIndexes = newObjectZIndexes;
-    this.zIndexObjects = newZIndexObjects;
-    this.minZIndex = ZIndexRanges.EDITABLE_MIN;
-    this.maxZIndex = newZIndex - this.stepSize; // Adjust for step-based spacing
-    this.nextAvailable = newZIndex;
+    console.log(`[CompactZIndexManager] Found ${all.length} objects to migrate`);
     
-    const afterStats = this.getStats();
+    // First, preserve existing ranks
+    const withRank = all
+      .filter(x => x.rank && typeof x.rank === 'string')
+      .sort((a, b) => a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : 0);
     
+    console.log(`[CompactZIndexManager] ${withRank.length} objects already have ranks`);
     
-    // Sync all DOM elements after compaction
-    this.syncAllDOMZIndexes();
+    for (const item of withRank) {
+      this.objectRank.set(item.id, { 
+        rank: item.rank, 
+        type: item.type || "image" 
+      });
+    }
     
-    return true;
+    // Then assign ranks to remaining objects based on their z-index
+    const withoutRank = all
+      .filter(x => !x.rank || typeof x.rank !== 'string')
+      .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0));
+    
+    console.log(`[CompactZIndexManager] ${withoutRank.length} objects need rank assignment`);
+    
+    let lastRank = withRank.length > 0 ? withRank[withRank.length - 1].rank : "";
+    
+    for (const item of withoutRank) {
+      lastRank = rankAfter(lastRank);
+      this.objectRank.set(item.id, { 
+        rank: lastRank, 
+        type: item.type || "image" 
+      });
+    }
+    
+    this.dirty = true;
+    
+    console.log(`[CompactZIndexManager] Migration complete: ${this.objectRank.size} objects in rank system`);
   }
 
   /**
-   * Deduplicate all z-indexes by reassigning duplicates to unique values
-   * @returns {number} Number of objects that were reassigned
+   * Clear all data
    */
-  deduplicateAll() {
-    let totalReassigned = 0;
-    const duplicates = [];
-    
-    // Find all z-indexes with multiple objects
-    for (const [zIndex, objects] of this.zIndexObjects.entries()) {
-      if (objects.size > 1) {
-        duplicates.push(zIndex);
-      }
-    }
-    
-    // Deduplicate each z-index
-    for (const zIndex of duplicates) {
-      const reassigned = this._deduplicateZIndex(zIndex);
-      totalReassigned += reassigned.length;
-    }
-    
-    if (totalReassigned > 0) {
-      console.log(`[CompactZIndexManager] Deduplicated ${totalReassigned} objects across ${duplicates.length} z-indexes`);
-      // Sync DOM after deduplication
-      this.syncAllDOMZIndexes();
-    }
-    
-    return totalReassigned;
+  clear() {
+    this.objectRank.clear();
+    this.orderCache = null;
+    this.dirty = true;
+    this.undoHistory = [];
   }
 
   /**
-   * Create an undo point for the current state
+   * Get all objects sorted by rank
+   * @returns {Array} Sorted array of {id, rank, type}
    */
-  createUndoPoint() {
+  getAllObjectsSorted() {
+    return this.#sorted().map(o => ({
+      id: o.id,
+      rank: o.rank,
+      type: o.type
+    }));
+  }
+
+  /**
+   * Create undo point (kept for compatibility)
+   */
+  createUndoPoint(label = '') {
     const snapshot = {
+      label,
       timestamp: Date.now(),
-      objectZIndexes: new Map(this.objectZIndexes),
-      zIndexObjects: new Map(),
-      minZIndex: this.minZIndex,
-      maxZIndex: this.maxZIndex,
-      nextAvailable: this.nextAvailable
+      data: new Map(this.objectRank)
     };
-    
-    // Deep copy zIndexObjects
-    for (const [zIndex, objectSet] of this.zIndexObjects) {
-      snapshot.zIndexObjects.set(zIndex, new Set(objectSet));
-    }
     
     this.undoHistory.push(snapshot);
     
-    // Limit history size
     if (this.undoHistory.length > this.maxUndoSteps) {
       this.undoHistory.shift();
     }
   }
 
   /**
-   * Undo the last z-index changes
-   * @returns {boolean} True if undo was successful, false if no history
+   * Undo last operation (kept for compatibility)
    */
   undo() {
     if (this.undoHistory.length === 0) {
@@ -1012,182 +449,85 @@ export class CompactZIndexManager {
     }
     
     const snapshot = this.undoHistory.pop();
-    
-    // Restore state
-    this.objectZIndexes = snapshot.objectZIndexes;
-    this.zIndexObjects = snapshot.zIndexObjects;
-    this.minZIndex = snapshot.minZIndex;
-    this.maxZIndex = snapshot.maxZIndex;
-    this.nextAvailable = snapshot.nextAvailable;
+    this.objectRank = new Map(snapshot.data);
+    this.dirty = true;
     
     return true;
   }
 
   /**
-   * Get all objects sorted by z-index (lowest to highest)
-   * @returns {Array} Array of {objectId, zIndex} objects
-   */
-  getAllObjectsSorted() {
-    return Array.from(this.objectZIndexes.entries())
-      .map(([objectId, zIndex]) => ({ objectId, zIndex }))
-      .sort((a, b) => a.zIndex - b.zIndex);
-  }
-
-  /**
-   * Get statistics about the current z-index usage
-   * @returns {Object} Statistics object
+   * Get stats about the manager state
    */
   getStats() {
-    const totalObjects = this.objectZIndexes.size;
-    const rangeSize = this.maxZIndex - this.minZIndex + 1;
-    const utilization = totalObjects > 0 ? (totalObjects / rangeSize) * 100 : 0;
-    const shouldCompact = this._shouldCompact();
-    const remainingSpace = ZIndexRanges.EDITABLE_MAX - this.nextAvailable;
-    const remainingSlots = Math.floor(remainingSpace / this.stepSize);
-    
-    // Calculate sync health
-    const totalFailedSyncs = Array.from(this._failedSyncs.values()).reduce((sum, count) => sum + count, 0);
-    const elementsWithFailedSyncs = this._failedSyncs.size;
+    const list = this.#sorted();
+    const rankLengths = list.map(o => o.rank.length);
     
     return {
-      totalObjects,
-      minZIndex: this.minZIndex,
-      maxZIndex: this.maxZIndex,
-      rangeSize,
-      utilization: Math.round(utilization * 100) / 100,
-      nextAvailable: this.nextAvailable,
-      undoHistorySize: this.undoHistory.length,
-      shouldCompact,
-      remainingSpace,
-      remainingSlots, // How many more objects can be assigned
-      stepSize: this.stepSize,
-      compactionThreshold: 20, // 20% utilization threshold
-      nearingLimit: remainingSlots < 20, // Less than 20 slots remaining
-      
-      // DOM sync health metrics
-      syncHealth: {
-        totalFailedSyncs,
-        elementsWithFailedSyncs,
-        failedSyncDetails: Array.from(this._failedSyncs.entries()).map(([id, count]) => ({ id, failCount: count }))
-      }
+      objectCount: this.objectRank.size,
+      minRankLength: rankLengths.length > 0 ? Math.min(...rankLengths) : 0,
+      maxRankLength: rankLengths.length > 0 ? Math.max(...rankLengths) : 0,
+      avgRankLength: rankLengths.length > 0 
+        ? (rankLengths.reduce((a, b) => a + b, 0) / rankLengths.length).toFixed(2)
+        : 0
     };
   }
 
   /**
-   * Force compaction of the z-index range
-   * This can be called manually or is triggered automatically
-   * @returns {boolean} True if compaction was performed
+   * Force compact ranks (for maintenance/debugging)
+   * Reassigns all ranks with even spacing
    */
   forceCompact() {
-    if (this.objectZIndexes.size === 0) {
-      console.log(`[CompactZIndexManager] No objects to compact`);
-      return false;
+    const list = this.#sorted();
+    let currentRank = "U"; // Start at middle of alphabet
+    
+    for (const obj of list) {
+      this.objectRank.get(obj.id).rank = currentRank;
+      currentRank = rankAfter(currentRank);
     }
     
-    console.log(`[CompactZIndexManager] Manual compaction requested`);
-    return this.compact();
+    this.dirty = true;
+    console.log('[CompactZIndexManager] Forced compaction complete');
   }
 
-  /**
-   * Synchronize all DOM z-index values with manager values
-   * Call this after major operations to ensure DOM is in sync
-   * @returns {Object} Sync results with counts and failures
-   */
-  syncAllDOMZIndexes() {
-    let syncCount = 0;
-    let missingCount = 0;
-    const missingElements = [];
-    
-    for (const [objectId, zIndex] of this.objectZIndexes) {
-      const container = document.getElementById(objectId);
-      if (container) {
-        const currentDOMZIndex = parseInt(container.style.zIndex) || 0;
-        if (currentDOMZIndex !== zIndex) {
-          container.style.zIndex = zIndex;
-          syncCount++;
-        }
-      } else {
-        // Track missing elements
-        missingCount++;
-        missingElements.push(objectId);
-        
-        // Update failed sync tracking
-        const failCount = (this._failedSyncs.get(objectId) || 0) + 1;
-        this._failedSyncs.set(objectId, failCount);
-      }
-    }
-    
-    if (syncCount > 0) {
-      console.log(`[CompactZIndexManager] Synced ${syncCount} DOM z-index values`);
-    }
-    
-    if (missingCount > 0) {
-      console.warn(`[CompactZIndexManager] ${missingCount} elements not found in DOM:`, missingElements);
-      
-      // Auto-cleanup if enabled
-      if (this._autoCleanup) {
-        console.warn(`[CompactZIndexManager] Auto-removing ${missingCount} missing elements from manager`);
-        missingElements.forEach(id => this.remove(id));
-      }
-    }
-    
-    return {
-      synced: syncCount,
-      missing: missingCount,
-      missingElements,
-      total: this.objectZIndexes.size
-    };
-  }
+  // ==================== PRIVATE METHODS ====================
 
   /**
-   * Clear all z-index data and reset to initial state
-   * Used for cleanup and testing
+   * Get sorted list of objects (cached)
+   * @returns {Array} Sorted array of {id, rank, type}
    */
-  clear() {
-    this.objectZIndexes.clear();
-    this.zIndexObjects.clear();
-    this.minZIndex = ZIndexRanges.EDITABLE_MIN;
-    this.maxZIndex = ZIndexRanges.EDITABLE_MIN;
-    this.nextAvailable = ZIndexRanges.EDITABLE_MIN;
-    this.undoHistory = [];
-    this._failedSyncs.clear();
+  #sorted() {
+    if (!this.dirty && this.orderCache) {
+      return this.orderCache;
+    }
     
-    console.log('[CompactZIndexManager] All data cleared and reset to initial state');
-  }
-
-  /**
-   * Migrate data from the legacy ZIndexManager
-   * @param {Array} existingData - Array of {id, zIndex, type} objects
-   */
-  migrateFromLegacy(existingData) {
-    console.log(`[CompactZIndexManager] Migrating ${existingData.length} objects from legacy system`);
-    console.log('[CompactZIndexManager] Current state before migration:', {
-      objectCount: this.objectZIndexes.size,
-      reverseCount: Array.from(this.zIndexObjects.values()).reduce((sum, set) => sum + set.size, 0)
+    const list = Array.from(this.objectRank, ([id, data]) => ({
+      id,
+      rank: data.rank,
+      type: data.type
+    }));
+    
+    // Sort by rank, with id as tiebreaker
+    list.sort((a, b) => {
+      if (a.rank < b.rank) return -1;
+      if (a.rank > b.rank) return 1;
+      return a.id < b.id ? -1 : 1;
     });
     
-    // Clear current state
-    this.objectZIndexes.clear();
-    this.zIndexObjects.clear();
+    this.orderCache = list;
+    this.dirty = false;
     
-    // Import existing data
-    for (const { id, zIndex } of existingData) {
-      if (typeof zIndex === 'number' && zIndex >= ZIndexRanges.EDITABLE_MIN && zIndex <= ZIndexRanges.EDITABLE_MAX) {
-        console.log(`[CompactZIndexManager] Migrating ${id} -> ${zIndex}`);
-        this.set(id, zIndex);
-      }
-    }
-    
-    // Update next available to be higher than any existing
-    if (this.objectZIndexes.size > 0) {
-      this.nextAvailable = this.maxZIndex + 1;
-    }
-    
-    console.log(`[CompactZIndexManager] Migration complete: ${this.objectZIndexes.size} objects migrated`);
-    console.log('[CompactZIndexManager] Final state after migration:', {
-      objectCount: this.objectZIndexes.size,
-      reverseCount: Array.from(this.zIndexObjects.values()).reduce((sum, set) => sum + set.size, 0),
-      availableZIndexes: Array.from(this.zIndexObjects.keys()).sort((a,b) => a-b)
-    });
+    return list;
+  }
+
+  /**
+   * Get rank of last (topmost) object
+   * @returns {string} Last rank or empty string
+   */
+  #getLastRank() {
+    const list = this.#sorted();
+    return list.length > 0 ? list[list.length - 1].rank : "";
   }
 }
+
+// Export singleton instance (for backward compatibility)
+export const ZIndexManager = new CompactZIndexManager();

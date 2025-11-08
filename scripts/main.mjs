@@ -12,6 +12,9 @@ import { TextTools } from "./modules/whiteboard-text.mjs";
 import { ImageTools } from "./modules/whiteboard-image.mjs";
 import { MassSelection } from "./modules/whiteboard-select.mjs";
 
+// Server sequence for rank updates (GM authority)
+let serverSeq = 0;
+
 
 
 
@@ -355,14 +358,13 @@ Hooks.once("ready", async () => {
                 console.log(`[WB-E] Skipping width update for ${id} - element is locked (lockedSize=true)`);
               }
 
-              // CRITICAL FIX: Update z-index in DOM when receiving socket updates
+              // EXPERIMENT PHASE 1: Only update Manager if value actually changed (idempotent)
               if (textData.zIndex !== undefined && textData.zIndex !== null) {
-                const currentDOMZIndex = parseInt(existing.style.zIndex) || 0;
-                if (currentDOMZIndex !== textData.zIndex) {
-                  existing.style.zIndex = textData.zIndex;
-                  // Also sync with ZIndexManager to keep state consistent
-                  if (window.ZIndexManager && typeof window.ZIndexManager.set === 'function') {
+                if (window.ZIndexManager && typeof window.ZIndexManager.set === 'function') {
+                  const currentManagerZ = window.ZIndexManager.get(id);
+                  if (currentManagerZ !== textData.zIndex) {
                     window.ZIndexManager.set(id, textData.zIndex);
+                    // Manager's _syncDOMZIndex will update DOM automatically
                   }
                 }
               }
@@ -475,15 +477,19 @@ Hooks.once("ready", async () => {
             // Обновляем существующий элемент
             ImageTools.updateImageElement(existing, imageData);
             
-            // CRITICAL FIX: Update z-index in DOM when receiving socket updates
-            if (imageData.zIndex !== undefined && imageData.zIndex !== null) {
-              const currentDOMZIndex = parseInt(existing.style.zIndex) || 0;
-              if (currentDOMZIndex !== imageData.zIndex) {
-                existing.style.zIndex = imageData.zIndex;
-                // Also sync with ZIndexManager to keep state consistent
-                if (window.ZIndexManager && typeof window.ZIndexManager.set === 'function') {
-                  window.ZIndexManager.set(id, imageData.zIndex);
+            // Sync rank if present in socket data (fractional indexing)
+            // Only update if rank actually changed to avoid unnecessary DOM updates
+            if (imageData.rank && typeof imageData.rank === 'string') {
+              if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+                const currentRank = window.ZIndexManager.getRank(id);
+                if (currentRank !== imageData.rank) {
+                  window.ZIndexManager.setRank(id, imageData.rank);
                 }
+              }
+            } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
+              // If no rank and object doesn't exist in manager, assign new rank
+              if (typeof window.ZIndexManager.assignImage === 'function') {
+                window.ZIndexManager.assignImage(id);
               }
             }
           } else {
@@ -492,21 +498,26 @@ Hooks.once("ready", async () => {
             const maskTypeData = imageData.maskType || 'rect';
             const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
             const circleRadiusData = imageData.circleRadius || null;
-            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
+            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
           }
 
-            // Обновляем глобальные переменные для каждой картинки
-            ImageTools.updateImageLocalVars(id, {
-              maskType: imageData.maskType || 'rect',
-              circleOffset: imageData.circleOffset || { x: 0, y: 0 },
-              circleRadius: imageData.circleRadius,
-              crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
-              scale: imageData.scale || 1,
-              isCropping: imageData.isCropping || false
-            });
-          }
+          // Обновляем глобальные переменные для каждой картинки
+          ImageTools.updateImageLocalVars(id, {
+            maskType: imageData.maskType || 'rect',
+            circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+            circleRadius: imageData.circleRadius,
+            crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+            scale: imageData.scale || 1,
+            isCropping: imageData.isCropping || false
+          });
+        }
 
-          // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
+        // Sync DOM z-indexes after updating all ranks
+        if (window.ZIndexManager && typeof window.ZIndexManager.syncAllDOMZIndexes === 'function') {
+          await window.ZIndexManager.syncAllDOMZIndexes();
+        }
+
+        // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
           // AND not actively being edited/manipulated (to prevent race conditions during rapid updates)
           existingElements.forEach(element => {
             if (!existingIds.has(element.id)) {
@@ -563,15 +574,19 @@ Hooks.once("ready", async () => {
             // Обновляем существующий элемент
             ImageTools.updateImageElement(existing, imageData);
             
-            // CRITICAL FIX: Update z-index in DOM when receiving socket updates
-            if (imageData.zIndex !== undefined && imageData.zIndex !== null) {
-              const currentDOMZIndex = parseInt(existing.style.zIndex) || 0;
-              if (currentDOMZIndex !== imageData.zIndex) {
-                existing.style.zIndex = imageData.zIndex;
-                // Also sync with ZIndexManager to keep state consistent
-                if (window.ZIndexManager && typeof window.ZIndexManager.set === 'function') {
-                  window.ZIndexManager.set(id, imageData.zIndex);
+            // Sync rank if present in socket data (fractional indexing)
+            // Only update if rank actually changed to avoid unnecessary DOM updates
+            if (imageData.rank && typeof imageData.rank === 'string') {
+              if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+                const currentRank = window.ZIndexManager.getRank(id);
+                if (currentRank !== imageData.rank) {
+                  window.ZIndexManager.setRank(id, imageData.rank);
                 }
+              }
+            } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
+              // If no rank and object doesn't exist in manager, assign new rank
+              if (typeof window.ZIndexManager.assignImage === 'function') {
+                window.ZIndexManager.assignImage(id);
               }
             }
           } else {
@@ -580,7 +595,7 @@ Hooks.once("ready", async () => {
             const maskTypeData = imageData.maskType || 'rect';
             const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
             const circleRadiusData = imageData.circleRadius || null;
-            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
+            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
           }
 
           // Обновляем глобальные переменные для каждой картинки
@@ -592,6 +607,11 @@ Hooks.once("ready", async () => {
             scale: imageData.scale || 1,
             isCropping: imageData.isCropping || false
           });
+        }
+
+        // Sync DOM z-indexes after updating all ranks
+        if (window.ZIndexManager && typeof window.ZIndexManager.syncAllDOMZIndexes === 'function') {
+          await window.ZIndexManager.syncAllDOMZIndexes();
         }
 
         // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
@@ -670,6 +690,71 @@ Hooks.once("ready", async () => {
         ImageTools.setImageFrozen(data.data.imageId, data.data.frozen, false);
       } catch (error) {
         console.error('[WB-E] Failed to apply freeze sync:', error);
+      }
+    }
+
+    // Rank update handler (GM authority for fractional indexing)
+    if (data.type === "rankUpdate") {
+      if (game.user.isGM) {
+        try {
+          console.log(`[WB-E] GM received rank update for ${data.objectType} ${data.id}: ${data.rank}`);
+          
+          if (data.objectType === "image") {
+            const images = await ImageTools.getAllImages();
+            if (!images[data.id]) {
+              console.warn(`[WB-E] Cannot update rank for non-existent image ${data.id}`);
+              return;
+            }
+            
+            // Update only the rank for this specific image in database
+            images[data.id].rank = data.rank;
+            // Save to database without triggering socket broadcast (we'll use rankConfirm instead)
+            await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
+            await new Promise(resolve => setTimeout(resolve, 50));
+            await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, images);
+            
+            // Broadcast confirmation to all clients (including sender)
+            serverSeq++;
+            game.socket.emit(`module.${MODID}`, {
+              type: "rankConfirm",
+              objectType: data.objectType,
+              id: data.id,
+              rank: data.rank,
+              serverSeq: serverSeq
+            });
+            
+            console.log(`[WB-E] GM confirmed rank update for ${data.id}, serverSeq: ${serverSeq}`);
+          }
+        } catch (error) {
+          console.error('[WB-E] GM failed to process rank update:', error);
+        }
+      }
+    }
+
+    // Rank confirmation handler (all clients)
+    if (data.type === "rankConfirm") {
+      try {
+        console.log(`[WB-E] Received rank confirmation for ${data.objectType} ${data.id}: ${data.rank}, serverSeq: ${data.serverSeq}`);
+        
+        if (data.objectType === "image") {
+          // Update local rank in manager
+          if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+            const currentRank = window.ZIndexManager.getRank(data.id);
+            // Only update if rank actually changed (avoid unnecessary DOM updates)
+            if (currentRank !== data.rank) {
+              window.ZIndexManager.setRank(data.id, data.rank);
+              
+              // Refresh DOM z-index order
+              await window.ZIndexManager.syncAllDOMZIndexes();
+              
+              console.log(`[WB-E] Applied rank ${data.rank} to ${data.id} (was ${currentRank})`);
+            } else {
+              console.log(`[WB-E] Rank ${data.rank} already applied to ${data.id}, skipping`);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[WB-E] Failed to apply rank confirmation:', error);
       }
     }
 
@@ -1231,16 +1316,15 @@ const ZIndexManager = new Proxy(ZIndexManagerInstance, {
         return new Promise((resolve) => {
           processZIndexOperation(async () => {
             const result = target[prop](objectId);
-            // After each z-index operation, check for and resolve any duplicates
-            // This ensures duplicates created during swaps are cleaned up
-            const reassigned = target.deduplicateAll();
-            if (reassigned > 0) {
-              console.log(`[CompactZIndexManager] Auto-deduplication after ${prop}: reassigned ${reassigned} objects`);
-            }
+            // With fractional indexing, no deduplication needed - each object has a unique rank
             resolve(result);
           });
         });
       };
+    }
+    // Bind methods to preserve 'this' context
+    if (typeof target[prop] === 'function') {
+      return target[prop].bind(target);
     }
     return target[prop];
   }
@@ -1249,17 +1333,16 @@ const ZIndexManager = new Proxy(ZIndexManagerInstance, {
 // ===== Utility Functions =====
 // Helper functions for prefix-based filtering and migration
 
-let migrationCompleted = false;
-
 /**
  * Get all text objects with their z-indexes
  * @returns {Array} Array of [id, zIndex] tuples for text objects
  */
 function getAllTexts() {
   const texts = [];
-  for (const [id, zIndex] of ZIndexManager.objectZIndexes) {
-    if (id.startsWith('wbe-text-')) {
-      texts.push([id, zIndex]);
+  const allObjects = ZIndexManager.getAllObjectsSorted();
+  for (const obj of allObjects) {
+    if (obj.id.startsWith('wbe-text-')) {
+      texts.push([obj.id, ZIndexManager.get(obj.id)]);
     }
   }
   return texts;
@@ -1271,9 +1354,10 @@ function getAllTexts() {
  */
 function getAllImages() {
   const images = [];
-  for (const [id, zIndex] of ZIndexManager.objectZIndexes) {
-    if (id.startsWith('wbe-image-')) {
-      images.push([id, zIndex]);
+  const allObjects = ZIndexManager.getAllObjectsSorted();
+  for (const obj of allObjects) {
+    if (obj.id.startsWith('wbe-image-')) {
+      images.push([obj.id, ZIndexManager.get(obj.id)]);
     }
   }
   return images;
@@ -1285,7 +1369,7 @@ function getAllImages() {
  * @returns {boolean} True if object exists
  */
 function hasText(textId) {
-  return ZIndexManager.objectZIndexes.has(textId);
+  return ZIndexManager.has(textId);
 }
 
 /**
@@ -1294,34 +1378,7 @@ function hasText(textId) {
  * @returns {boolean} True if object exists
  */
 function hasImage(imageId) {
-  return ZIndexManager.objectZIndexes.has(imageId);
-}
-
-/**
- * Sync manager with existing z-index values (one-time migration)
- * @param {Array} existingZIndexes - Array of [id, zIndex] tuples
- */
-function syncWithExisting(existingZIndexes) {
-  if (!Array.isArray(existingZIndexes)) return;
-  
-  // Only migrate once
-  if (migrationCompleted) {
-    //console.log('[ZIndexManager] Migration already completed, skipping');
-    return;
-  }
-  
-  console.log(`[ZIndexManager] Starting one-time migration of ${existingZIndexes.length} objects`);
-  
-  const migrationData = existingZIndexes.map(([id, zIndex]) => ({
-    id,
-    zIndex,
-    type: id.startsWith('wbe-text-') ? 'text' : 
-          id.startsWith('wbe-image-') ? 'image' : 'editable'
-  }));
-  
-  ZIndexManager.migrateFromLegacy(migrationData);
-  migrationCompleted = true;
-  console.log('[ZIndexManager] Migration completed and locked');
+  return ZIndexManager.has(imageId);
 }
 
 // Attach utility functions to ZIndexManager for backward compatibility
@@ -1329,7 +1386,6 @@ ZIndexManager.getAllTexts = getAllTexts;
 ZIndexManager.getAllImages = getAllImages;
 ZIndexManager.hasText = hasText;
 ZIndexManager.hasImage = hasImage;
-ZIndexManager.syncWithExisting = syncWithExisting;
 
 
 
@@ -1357,11 +1413,11 @@ window.ZIndexConstants = ZIndexConstants;
  * Fix interaction issues after z-index system changes
  * Call this to restore proper functionality after major z-index operations
  */
-function fixInteractionIssues() {
+async function fixInteractionIssues() {
   console.log('[WB-E] Fixing interaction issues after z-index changes...');
   
   // Fix 1: Sync all DOM z-index values with manager
-  const syncCount = ZIndexManager.syncAllDOMZIndexes();
+  await ZIndexManager.syncAllDOMZIndexes();
   
   // Fix 2: Re-initialize unfreeze icons
   let unfreezeCount = 0;
@@ -1580,7 +1636,7 @@ async function pasteMultiSelection() {
     const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
     const circleRadiusData = imageData.circleRadius || null;
 
-    ImageTools.createImageElement(newId, imageData.src, newLeft, newTop, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
+    ImageTools.createImageElement(newId, imageData.src, newLeft, newTop, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
 
     // Save the new image
     await ImageTools.persistImageState(newId, document.getElementById(newId)?.querySelector(".wbe-canvas-image"), document.getElementById(newId));
@@ -1783,11 +1839,24 @@ async function loadCanvasElements() {
   const texts = await TextTools.getAllTexts();
   const images = await ImageTools.getAllImages();
 
-  // Sync ZIndexManager with existing z-index values to avoid conflicts
-  const textZIndexes = Object.entries(texts).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
-  const imageZIndexes = Object.entries(images).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
-  const allZIndexes = [...textZIndexes, ...imageZIndexes];
-  ZIndexManager.syncWithExisting(allZIndexes);
+  // Sync ZIndexManager with existing z-index and rank values
+  // IMPORTANT: Include ALL objects even without zIndex/rank - migration will assign ranks to them
+  const textData = Object.entries(texts).map(([id, data]) => ({
+    id,
+    zIndex: data.zIndex,
+    rank: data.rank,
+    type: 'text'
+  }));
+  
+  const imageData = Object.entries(images).map(([id, data]) => ({
+    id,
+    zIndex: data.zIndex,
+    rank: data.rank,
+    type: 'image'
+  }));
+  
+  const allData = [...textData, ...imageData];
+  ZIndexManager.syncWithExisting(allData);
 
   // Восстановить тексты
   for (const [id, data] of Object.entries(texts)) {
@@ -1831,7 +1900,7 @@ async function loadCanvasElements() {
     const circleRadiusData = data.circleRadius || null;
 
     try {
-      ImageTools.createImageElement(id, data.src, data.left, data.top, data.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, data.zIndex, data.isFrozen || false);
+      ImageTools.createImageElement(id, data.src, data.left, data.top, data.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, data.isFrozen || false);
     } catch (error) {
       console.error(`[WB-E] Failed to restore image ${id}:`, error);
     }
