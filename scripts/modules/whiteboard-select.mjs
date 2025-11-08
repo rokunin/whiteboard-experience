@@ -830,10 +830,11 @@ async function handleKeyDown(e) {
       const oldZIndex = ZIndexManager.get(objectId);
       const result = await ZIndexManager.moveDown(objectId);
       
-      if (result.success) {
+      if (result.success && result.changes.length > 0) {
         const change = result.changes[0];
         const objectType = objectId.startsWith('wbe-text-') ? 'TEXT' : objectId.startsWith('wbe-image-') ? 'IMAGE' : 'UNKNOWN';
-        console.log(`[Z-Index] SINGLE SELECTION | ${objectType} | ID: ${objectId} | z-index: ${oldZIndex} → ${change.newZIndex}`);
+        const newZIndex = ZIndexManager.get(objectId);
+        console.log(`[Z-Index] SINGLE SELECTION | ${objectType} | ID: ${objectId} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
         
         if (result.swappedWith) {
           console.log(`    ↳ Swapped with: ${result.swappedWith.id} → z-index: ${result.swappedWith.newZIndex}`);
@@ -865,8 +866,22 @@ async function handleKeyDown(e) {
           }
         }
         
+        // Send rank update for images (optimistic update already applied locally)
+        if (objectType === 'IMAGE' && change.rank) {
+          game.socket.emit("module.whiteboard-experience", {
+            type: "rankUpdate",
+            objectType: "image",
+            id: objectId,
+            rank: change.rank,
+            userId: game.user.id
+          });
+        }
+        
         // Save selected object
         await saveSelectedObjectsWithUpdates();
+      } else if (result.atBoundary) {
+        // At boundary - provide feedback
+        console.log(`[Z-Index] SINGLE SELECTION | ID: ${objectId} | Cannot move down - ${result.reason}`);
       }
       return;
     }
@@ -958,10 +973,11 @@ async function handleKeyDown(e) {
       const oldZIndex = ZIndexManager.get(objectId);
       const result = await ZIndexManager.moveUp(objectId);
       
-      if (result.success) {
+      if (result.success && result.changes.length > 0) {
         const change = result.changes[0];
         const objectType = objectId.startsWith('wbe-text-') ? 'TEXT' : objectId.startsWith('wbe-image-') ? 'IMAGE' : 'UNKNOWN';
-        console.log(`[Z-Index] SINGLE SELECTION | ${objectType} | ID: ${objectId} | z-index: ${oldZIndex} → ${change.newZIndex}`);
+        const newZIndex = ZIndexManager.get(objectId);
+        console.log(`[Z-Index] SINGLE SELECTION | ${objectType} | ID: ${objectId} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
         
         if (result.swappedWith) {
           console.log(`    ↳ Swapped with: ${result.swappedWith.id} → z-index: ${result.swappedWith.newZIndex}`);
@@ -993,8 +1009,22 @@ async function handleKeyDown(e) {
           }
         }
         
+        // Send rank update for images (optimistic update already applied locally)
+        if (objectType === 'IMAGE' && change.rank) {
+          game.socket.emit("module.whiteboard-experience", {
+            type: "rankUpdate",
+            objectType: "image",
+            id: objectId,
+            rank: change.rank,
+            userId: game.user.id
+          });
+        }
+        
         // Save selected object
         await saveSelectedObjectsWithUpdates();
+      } else if (result.atBoundary) {
+        // At boundary - provide feedback
+        console.log(`[Z-Index] SINGLE SELECTION | ID: ${objectId} | Cannot move up - ${result.reason}`);
       }
       return;
     }

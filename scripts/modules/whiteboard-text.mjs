@@ -453,18 +453,10 @@ function extractTextState(id, textElement, container, options = {}) {
   const top = parseFloat(container.style.top);
   const width = textElement.style.width ? parseFloat(textElement.style.width) : null;
   
-  // OPTIMIZATION: Only read z-index if not skipping (for high-speed operations like drag/resize/text input)
-  // If skipping, use cached value from pending updates or fall back to manager
-  let zIndex;
-  if (options.skipZIndex) {
-    // Skip z-index read - use cached value from pending updates or manager
-    const cached = pendingTextUpdates.get(id);
-    zIndex = cached?.zIndex || ZIndexManager.get(id);
-  } else {
-    // Read z-index from DOM first (source of truth), then fall back to manager
-    // This matches image pattern and prevents wrong z-index during rapid updates
-    zIndex = parseInt(container.style.zIndex) || ZIndexManager.get(id);
-  }
+  // EXPERIMENT PHASE 1: Manager is single source of truth for z-index
+  // DOM is just a view that _syncDOMZIndex keeps in sync
+  // This eliminates DOM as competing source of truth and prevents flicker
+  const zIndex = ZIndexManager.get(id);
 
   // Get text from span if it exists, otherwise from textElement
   const textSpan = textElement.querySelector(".wbe-text-background-span");
@@ -587,25 +579,17 @@ const debouncedFlushTextUpdates = debounce(async () => {
     });
   }
   
-  // Then merge with DB state (in case DOM is missing something)
-  const dbTexts = await getAllTexts();
-  const dbIds = Object.keys(dbTexts);
-  console.log(`[WB-E] debouncedFlushTextUpdates: DB has ${dbIds.length} texts:`, dbIds.slice(0, 5));
+  // EXPERIMENT PHASE 1: Don't merge DB state - Manager already has all objects
+  // DB is just for persistence, not a source of truth
+  // If an object is missing from DOM, it was deleted - trust that
   
-  // Merge DB into texts (DOM takes precedence, but DB fills gaps)
-  Object.keys(dbTexts).forEach(id => {
-    if (!texts[id]) {
-      texts[id] = dbTexts[id];
-    }
-  });
-  
-  // Apply all pending updates (these override both DOM and DB)
+  // Apply all pending updates (these override DOM)
   pendingTextUpdates.forEach((state, id) => {
     texts[id] = state;
   });
   
   const finalIds = Object.keys(texts);
-  console.log(`[WB-E] debouncedFlushTextUpdates: Final state has ${finalIds.length} texts (${domExtractedCount} from DOM, ${Object.keys(dbTexts).length} from DB):`, finalIds.slice(0, 5));
+  console.log(`[WB-E] debouncedFlushTextUpdates: Final state has ${finalIds.length} texts (${domExtractedCount} from DOM):`, finalIds.slice(0, 5));
   
   logDuplicateZIndexesInTextPayload('debouncedFlushTextUpdates', texts);
 
@@ -614,7 +598,7 @@ const debouncedFlushTextUpdates = debounce(async () => {
   
   // Send complete state
   await setAllTexts(texts);
-}, 100); // 200ms debounce for rapid z-index changes
+}, 200); // 200ms debounce for rapid z-index changes
 
 async function persistTextState(id, textElement, container, options = {}) {
   if (!id || !textElement || !container) return;
@@ -2880,9 +2864,9 @@ async function setAllTexts(texts) {
       console.log(`[WB-E] setAllTexts: [${timestamp}] Sending ${textIds.length} texts:`, textIds.slice(0, 5));
       console.log(`[WB-E] setAllTexts: [${timestamp}] Call stack:`, stackTrace);
       
-      // Sync ZIndexManager with existing z-index values to avoid conflicts
-      const existingZIndexes = Object.entries(texts).map(([id, data]) => [id, data.zIndex]).filter(([id, zIndex]) => zIndex);
-      ZIndexManager.syncWithExisting(existingZIndexes);
+      // EXPERIMENT PHASE 1: Don't sync z-indexes - Manager is already authoritative
+      // syncWithExisting was causing conflicts when non-GM sends updates
+      // Manager already has correct values from local operations
       
       if (game.user.isGM) {
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);

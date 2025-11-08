@@ -136,9 +136,10 @@ const debouncedFlushImageUpdates = debounce(async () => {
             circleOffset: existingCropData.circleOffset || { x: 0, y: 0 },
             circleRadius: existingCropData.circleRadius || null,
             isFrozen: existingContainer.dataset.frozen === 'true' || false,
-            // CRITICAL FIX: Read z-index from DOM first (source of truth), then fall back to manager
-            // This prevents wrong z-index during rapid updates and matches text pattern
-            zIndex: parseInt(existingContainer.style.zIndex) || ZIndexManager.get(existingId)
+            // EXPERIMENT PHASE 1: Manager is single source of truth for z-index
+            // DOM is just a view that _syncDOMZIndex keeps in sync
+            zIndex: ZIndexManager.get(existingId),
+            rank: ZIndexManager.getRank(existingId)
           };
           images[existingId] = existingImageData;
           domExtractedCount++;
@@ -147,25 +148,17 @@ const debouncedFlushImageUpdates = debounce(async () => {
     });
   }
   
-  // Then merge with DB state (in case DOM is missing something)
-  const dbImages = await getAllImages();
-  const dbIds = Object.keys(dbImages);
-  console.log(`[WB-E] debouncedFlushImageUpdates: DB has ${dbIds.length} images:`, dbIds.slice(0, 5));
+  // EXPERIMENT PHASE 1: Don't merge DB state - Manager already has all objects
+  // DB is just for persistence, not a source of truth
+  // If an object is missing from DOM, it was deleted - trust that
   
-  // Merge DB into images (DOM takes precedence, but DB fills gaps)
-  Object.keys(dbImages).forEach(id => {
-    if (!images[id]) {
-      images[id] = dbImages[id];
-    }
-  });
-  
-  // Apply all pending updates (these override both DOM and DB)
+  // Apply all pending updates (these override DOM)
   pendingImageUpdates.forEach((imageData, id) => {
     images[id] = imageData;
   });
   
   const finalIds = Object.keys(images);
-  console.log(`[WB-E] debouncedFlushImageUpdates: Final state has ${finalIds.length} images (${domExtractedCount} from DOM, ${Object.keys(dbImages).length} from DB):`, finalIds.slice(0, 5));
+  console.log(`[WB-E] debouncedFlushImageUpdates: Final state has ${finalIds.length} images (${domExtractedCount} from DOM):`, finalIds.slice(0, 5));
   
   logDuplicateZIndexesInImagePayload('debouncedFlushImageUpdates', images);
 
@@ -190,9 +183,9 @@ async function persistImageState(id, imageElement, container, options = {}) {
     const cached = pendingImageUpdates.get(id);
     zIndex = cached?.zIndex || ZIndexManager.get(id);
   } else {
-    // Read z-index from DOM first (source of truth), then fall back to manager
-    // This prevents wrong z-index during rapid updates and matches text pattern
-    zIndex = parseInt(container.style.zIndex) || ZIndexManager.get(id);
+    // Read z-index from manager (single source of truth)
+    // DOM is updated by syncAllDOMZIndexes() but may not be updated yet due to requestAnimationFrame
+    zIndex = ZIndexManager.get(id);
   }
   
   const imageData = {
@@ -205,7 +198,8 @@ async function persistImageState(id, imageElement, container, options = {}) {
     circleOffset: cropData.circleOffset || { x: 0, y: 0 },
     circleRadius: cropData.circleRadius || null,
     isFrozen: container.dataset.frozen === 'true' || false,
-    zIndex: zIndex
+    zIndex: zIndex,
+    rank: ZIndexManager.getRank(id)
   };
   
   // Queue the update for debounced batching
@@ -2724,9 +2718,8 @@ document.addEventListener("keydown", async (e) => {
     const oldZIndex = ZIndexManager.get(selectedImageId);
     const result = await ZIndexManager.moveDown(selectedImageId);
     
-    if (result.success) {
+    if (result.success && result.changes.length > 0) {
       const change = result.changes[0];
-      // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
       
       const imageElement = container.querySelector('.wbe-canvas-image');
       if (!imageElement) {
@@ -2734,17 +2727,25 @@ document.addEventListener("keydown", async (e) => {
         return;
       }
       
-      // Persist swapped occupant if any (cross-type aware)
-      if (result.swappedWith) {
-        await persistSwappedLayerTarget(result.swappedWith);
-        console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
-      } else {
-        console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${change.newZIndex} (moved down to next object)`);
-      }
+      // Sync all DOM z-indexes (ensures consistency across all objects)
+      await ZIndexManager.syncAllDOMZIndexes();
+      const newZIndex = ZIndexManager.get(selectedImageId);
+      
+      // Emit rank update to GM (player sends request, GM broadcasts confirmation)
+      const rank = ZIndexManager.getRank(selectedImageId);
+      game.socket.emit('module.whiteboard-experience', {
+        type: 'rankUpdate',
+        objectType: 'image',
+        id: selectedImageId,
+        rank: rank,
+        userId: game.user.id
+      });
+      
+      console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
       
       // Persist selected image using debounced batching
       await persistImageState(selectedImageId, imageElement, container);
-    } else {
+    } else if (result.atBoundary) {
       // At boundary - provide feedback
       console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | Cannot move down - ${result.reason}`);
     }
@@ -2760,9 +2761,8 @@ document.addEventListener("keydown", async (e) => {
     const oldZIndex = ZIndexManager.get(selectedImageId);
     const result = await ZIndexManager.moveUp(selectedImageId);
     
-    if (result.success) {
+    if (result.success && result.changes.length > 0) {
       const change = result.changes[0];
-      // DOM already updated by CompactZIndexManager.set() via _syncDOMZIndex()
       
       const imageElement = container.querySelector('.wbe-canvas-image');
       if (!imageElement) {
@@ -2770,17 +2770,25 @@ document.addEventListener("keydown", async (e) => {
         return;
       }
       
-      // Persist swapped occupant if any (cross-type aware)
-      if (result.swappedWith) {
-        await persistSwappedLayerTarget(result.swappedWith);
-        console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
-      } else {
-        console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${change.newZIndex} (moved up to next object)`);
-      }
+      // Sync all DOM z-indexes (ensures consistency across all objects)
+      await ZIndexManager.syncAllDOMZIndexes();
+      const newZIndex = ZIndexManager.get(selectedImageId);
+      
+      // Emit rank update to GM (player sends request, GM broadcasts confirmation)
+      const rank = ZIndexManager.getRank(selectedImageId);
+      game.socket.emit('module.whiteboard-experience', {
+        type: 'rankUpdate',
+        objectType: 'image',
+        id: selectedImageId,
+        rank: rank,
+        userId: game.user.id
+      });
+      
+      console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
       
       // Persist selected image using debounced batching
       await persistImageState(selectedImageId, imageElement, container);
-    } else {
+    } else if (result.atBoundary) {
       // At boundary - provide feedback
       console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | Cannot move up - ${result.reason}`);
     }
@@ -3468,14 +3476,12 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
   const container = document.createElement("div");
   container.id = id;
   container.className = "wbe-canvas-image-container";
-  // Get z-index from ZIndexManager or use existing
-  //layer.appendChild(container);
-  const zIndex = existingZIndex || ZIndexManager.assign(id);
-
-  // If using existing z-index, make sure it's registered
-  if (existingZIndex) {
-    ZIndexManager.set(id, existingZIndex);
+  
+  // Register in ZIndexManager if not already registered (migration handles existing objects)
+  if (!ZIndexManager.has(id)) {
+    ZIndexManager.assignImage(id);
   }
+  const zIndex = ZIndexManager.get(id);
 
   container.style.cssText = `
       position: absolute;
@@ -4906,7 +4912,8 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       circleOffset: circleOffsetData,
       circleRadius: circleRadiusData,
       isFrozen: copiedImageData.isFrozen || false,
-      zIndex: ZIndexManager.get(newImageId)
+      zIndex: ZIndexManager.get(newImageId),
+      rank: ZIndexManager.getRank(newImageId)
     };
     await setAllImages(images);
 
@@ -5163,7 +5170,7 @@ async function setAllImages(images) {
             const maskTypeData = imageData.maskType || 'rect';
             const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
             const circleRadiusData = imageData.circleRadius || null;
-            createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, imageData.zIndex, imageData.isFrozen || false);
+            createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
           }
 
           // Update global variables for each image
@@ -5782,7 +5789,8 @@ async function globalPasteImage() {
     circleOffset: circleOffsetData,
     circleRadius: circleRadiusData,
     isFrozen: copiedImageData.isFrozen || false,
-      zIndex: ZIndexManager.get(newImageId)
+      zIndex: ZIndexManager.get(newImageId),
+      rank: ZIndexManager.getRank(newImageId)
   };
   await setAllImages(images);
 
