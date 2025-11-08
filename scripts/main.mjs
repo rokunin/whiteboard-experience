@@ -128,9 +128,21 @@ Hooks.once("ready", async () => {
     if (data.type === "textUpdateRequest") {
       // Игрок просит GM сохранить изменения
       if (game.user.isGM) {
+        console.log(`[WB-E] GM received textUpdateRequest from user ${data.userId || 'unknown'}:`, Object.keys(data.texts || {}).slice(0, 5));
         const requestTexts = data.texts || {};
         const requestTextIds = Object.keys(requestTexts);
         const isEmpty = requestTextIds.length === 0;
+        
+        // Check if this is a deletion
+        const currentTexts = await TextTools.getAllTexts();
+        const currentTextIds = Object.keys(currentTexts);
+        const isDeletion = requestTextIds.length < currentTextIds.length;
+        const deletedIds = currentTextIds.filter(id => !requestTextIds.includes(id));
+        
+        if (isDeletion && deletedIds.length > 0) {
+          console.log(`[WB-E] GM detected deletion in textUpdateRequest: removing ${deletedIds.length} texts:`, deletedIds);
+        }
+        
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
         await new Promise(resolve => setTimeout(resolve, 50));
         await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, requestTexts);
@@ -152,6 +164,7 @@ Hooks.once("ready", async () => {
           for (const [id, textData] of Object.entries(requestTexts)) {
             existingIds.add(id);
             const existing = document.getElementById(id);
+            console.log(`[WB-E] GM processing textUpdateRequest for ${id}: existing=${!!existing}, left=${textData.left}, top=${textData.top}, rank=${textData.rank}`);
             if (existing) {
               // CRITICAL FIX: Skip locked text elements (GM socket handler)
               // Check both dataset.lockedBy AND lock overlay (more reliable - works even if lock restored after socket update)
@@ -216,6 +229,28 @@ Hooks.once("ready", async () => {
                 TextTools.updateTextUI(existing);
               }
             } else {
+              // Sync rank BEFORE creating element (like images) - ensures correct rank is used during creation
+              if (textData.rank && typeof textData.rank === 'string') {
+                if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+                  // Register object with correct rank before creation
+                  if (!window.ZIndexManager.has || !window.ZIndexManager.has(id)) {
+                    // Object doesn't exist yet - register it with the rank from socket data
+                    window.ZIndexManager.setRank(id, textData.rank);
+                  } else {
+                    // Object exists - update rank if different
+                    const currentRank = window.ZIndexManager.getRank(id);
+                    if (currentRank !== textData.rank) {
+                      window.ZIndexManager.setRank(id, textData.rank);
+                    }
+                  }
+                }
+              } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
+                // If no rank and object doesn't exist in manager, assign new rank
+                if (typeof window.ZIndexManager.assignText === 'function') {
+                  window.ZIndexManager.assignText(id);
+                }
+              }
+              
               // Создаем новый элемент
               const createdContainer = TextTools.createTextElement(
                 id,
@@ -274,22 +309,13 @@ Hooks.once("ready", async () => {
           });
         }
 
-        const textUpdatePayload = { type: "textUpdate", texts: requestTexts };
-        if (data.userId) {
-          textUpdatePayload.senderId = data.userId;
-        }
-        game.socket.emit(`module.${MODID}`, textUpdatePayload);
+        // Эмитим всем (включая отправителя) - как для картинок
+        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts: requestTexts });
       }
     }
 
     if (data.type === "textUpdate") {
-      // Обновляем UI у всех (включая отправителя)
-      // Умное обновление: обновляем только измененные тексты
-      // FIX: Skip update if this is the sender's own update
-      if (data.senderId && data.senderId === game.user.id) {
-        console.log("[WB-E] Skipping own textUpdate");
-        return;
-      }
+      // Обновляем UI у всех (включая отправителя) - как для картинок
       const layer = getOrCreateLayer();
       if (layer) {
         // Получаем все существующие текстовые элементы
@@ -478,10 +504,23 @@ Hooks.once("ready", async () => {
     if (data.type === "imageUpdateRequest") {
       // Игрок просит GM сохранить изменения
       if (game.user.isGM) {
-        const isEmpty = Object.keys(data.images || {}).length === 0;
+        const requestImages = data.images || {};
+        const requestImageIds = Object.keys(requestImages);
+        const isEmpty = requestImageIds.length === 0;
+        
+        // Check if this is a deletion
+        const currentImages = await ImageTools.getAllImages();
+        const currentImageIds = Object.keys(currentImages);
+        const isDeletion = requestImageIds.length < currentImageIds.length;
+        const deletedIds = currentImageIds.filter(id => !requestImageIds.includes(id));
+        
+        if (isDeletion && deletedIds.length > 0) {
+          console.log(`[WB-E] GM detected deletion in imageUpdateRequest: removing ${deletedIds.length} images:`, deletedIds);
+        }
+        
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
         await new Promise(resolve => setTimeout(resolve, 50));
-        await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, data.images);
+        await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, requestImages);
 
         // Обновляем локально для немедленной реакции UI у GM
         const layer = getOrCreateLayer();
@@ -575,7 +614,8 @@ Hooks.once("ready", async () => {
         }
 
         // Эмитим всем (включая отправителя)
-        game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: data.images });
+        console.log(`[WB-E] GM emitting imageUpdate with ${requestImageIds.length} images (authoritative state from player)`);
+        game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: requestImages });
       }
     }
 
@@ -736,6 +776,13 @@ Hooks.once("ready", async () => {
               return;
             }
             
+            // CRITICAL FIX: Update Manager FIRST (before DB) so rankConfirm handler can skip if already applied
+            // This ensures GM's DOM is updated immediately when receiving rankUpdate from player
+            if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+              window.ZIndexManager.setRank(data.id, data.rank);
+              await window.ZIndexManager.syncAllDOMZIndexes();
+            }
+            
             // Update only the rank for this specific image in database
             images[data.id].rank = data.rank;
             // Save to database without triggering socket broadcast (we'll use rankConfirm instead)
@@ -759,6 +806,13 @@ Hooks.once("ready", async () => {
             if (!texts[data.id]) {
               console.warn(`[WB-E] Cannot update rank for non-existent text ${data.id}`);
               return;
+            }
+            
+            // CRITICAL FIX: Update Manager FIRST (before DB) so rankConfirm handler can skip if already applied
+            // This ensures GM's DOM is updated immediately when receiving rankUpdate from player
+            if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
+              window.ZIndexManager.setRank(data.id, data.rank);
+              await window.ZIndexManager.syncAllDOMZIndexes();
             }
             
             // Update only the rank for this specific text in database
