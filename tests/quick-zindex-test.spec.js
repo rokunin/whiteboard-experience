@@ -251,8 +251,23 @@ test.describe('Quick Z-Index Test', () => {
     await page.waitForTimeout(1000);
     
     // Cleanup
+    // Cleanup
     await page.evaluate(async () => {
-      await window.WhiteboardExperience.clearCanvasElements();
+      try {
+        if (globalThis.canvas?.scene?.unsetFlag) {
+          await Promise.all([
+            globalThis.canvas.scene.unsetFlag("whiteboard-experience", "texts"),
+            globalThis.canvas.scene.unsetFlag("whiteboard-experience", "images"),
+            globalThis.canvas.scene.unsetFlag("whiteboard-experience", "cards")
+          ]);
+        }
+      } catch (err) {
+        console.error('[TEST] Failed to unset whiteboard flags:', err);
+      }
+
+      if (globalThis.WhiteboardExperience?.clearCanvasElements) {
+        await globalThis.WhiteboardExperience.clearCanvasElements();
+      }
     });
     await page.waitForTimeout(1000);
   }
