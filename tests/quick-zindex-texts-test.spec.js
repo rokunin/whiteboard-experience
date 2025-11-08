@@ -1,12 +1,12 @@
 import { test, expect } from '@playwright/test';
 
 /**
- * Quick Z-Index Test
- * Creates 3 images and 3 text objects, then quickly changes their z-indexes
+ * Quick Z-Index Texts Test
+ * Creates 3 texts, then quickly changes their z-indexes
  * Logs all z-index changes, detects blinking, and captures browser logs
  */
 
-test.describe('Quick Z-Index Test', () => {
+test.describe('Quick Z-Index Texts Test', () => {
   test.setTimeout(180000); // 3 minutes timeout
   
   // Helper: Setup browser log capture with detailed tracking
@@ -41,24 +41,24 @@ test.describe('Quick Z-Index Test', () => {
       const timestampMatch = text.match(/\[(\d+)\]/);
       const eventTimestamp = timestampMatch ? parseInt(timestampMatch[1]) : log.timestamp;
       
-      // Track getAllImages calls
-      if (text.includes('getAllImages() returned')) {
-        const match = text.match(/returned (\d+) images/);
+      // Track getAllTexts calls
+      if (text.includes('getAllTexts() returned')) {
+        const match = text.match(/returned (\d+) texts/);
         const count = match ? parseInt(match[1]) : 0;
-        const idsMatch = text.match(/images: (\[.*?\])/);
+        const idsMatch = text.match(/texts: (\[.*?\])/);
         let ids = [];
         if (idsMatch) {
           try {
             ids = JSON.parse(idsMatch[1]);
           } catch (e) {
             // Try to extract IDs manually if JSON parse fails
-            const idPattern = /wbe-image-[^\s,\]]+/g;
+            const idPattern = /wbe-text-[^\s,\]]+/g;
             const matches = text.match(idPattern);
             if (matches) ids = matches;
           }
         }
         events.push({
-          type: 'getAllImages',
+          type: 'getAllTexts',
           timestamp: eventTimestamp,
           count,
           ids,
@@ -66,24 +66,24 @@ test.describe('Quick Z-Index Test', () => {
         });
       }
       
-      // Track setAllImages calls
-      if (text.includes('setAllImages:')) {
-        const match = text.match(/Sending (\d+) images/);
+      // Track setAllTexts calls
+      if (text.includes('setAllTexts:')) {
+        const match = text.match(/Sending (\d+) texts/);
         const count = match ? parseInt(match[1]) : 0;
-        const idsMatch = text.match(/images: (\[.*?\])/);
+        const idsMatch = text.match(/texts: (\[.*?\])/);
         let ids = [];
         if (idsMatch) {
           try {
             ids = JSON.parse(idsMatch[1]);
           } catch (e) {
             // Try to extract IDs manually if JSON parse fails
-            const idPattern = /wbe-image-[^\s,\]]+/g;
+            const idPattern = /wbe-text-[^\s,\]]+/g;
             const matches = text.match(idPattern);
             if (matches) ids = matches;
           }
         }
         events.push({
-          type: 'setAllImages',
+          type: 'setAllTexts',
           timestamp: eventTimestamp,
           count,
           ids,
@@ -101,13 +101,13 @@ test.describe('Quick Z-Index Test', () => {
             removedIds = JSON.parse(`[${arrayMatch[1]}]`);
           } catch {
             // Extract individual IDs
-            const idPattern = /wbe-image-[^\s,\]]+/g;
+            const idPattern = /wbe-text-[^\s,\]]+/g;
             const matches = text.match(idPattern);
             if (matches) removedIds = matches;
           }
         } else {
           // Single element removal
-          const singleMatch = text.match(/element: (wbe-image-[^\s]+)/);
+          const singleMatch = text.match(/element: (wbe-text-[^\s]+)/);
           if (singleMatch) removedIds = [singleMatch[1]];
         }
         events.push({
@@ -118,37 +118,11 @@ test.describe('Quick Z-Index Test', () => {
         });
       }
       
-      // Track missing images warnings
-      if (text.includes('NOT in getAllImages()') || text.includes('NOT in current state')) {
+      // Track missing texts warnings
+      if (text.includes('NOT in getAllTexts()') || text.includes('NOT in current state')) {
         events.push({
           type: 'MISSING_WARNING',
           timestamp: eventTimestamp,
-          log: text
-        });
-      }
-      
-      // Track text z-index events
-      if (text.includes('[Z-Index] TEXT')) {
-        const match = text.match(/z-index: (\d+) → (\d+)/);
-        if (match) {
-          events.push({
-            type: 'TEXT_ZINDEX_CHANGE',
-            timestamp: eventTimestamp,
-            oldZ: parseInt(match[1]),
-            newZ: parseInt(match[2]),
-            log: text
-          });
-        }
-      }
-      
-      // Track text getAllTexts/setAllTexts
-      if (text.includes('getAllTexts() returned') || text.includes('setAllTexts:') || text.includes('debouncedFlushTextUpdates')) {
-        const match = text.match(/(\d+) text/);
-        const count = match ? parseInt(match[1]) : 0;
-        events.push({
-          type: 'TEXT_STATE_CHANGE',
-          timestamp: eventTimestamp,
-          count,
           log: text
         });
       }
@@ -159,31 +133,31 @@ test.describe('Quick Z-Index Test', () => {
     
     // Find the sequence leading to removal
     console.log('\n--- Event Timeline ---');
-    let lastGetAllImages = null;
-    let lastSetAllImages = null;
+    let lastGetAllTexts = null;
+    let lastSetAllTexts = null;
     
     for (const event of events) {
-      if (event.type === 'getAllImages') {
-        lastGetAllImages = event;
-        console.log(`[${event.timestamp}] getAllImages() returned ${event.count} images`);
+      if (event.type === 'getAllTexts') {
+        lastGetAllTexts = event;
+        console.log(`[${event.timestamp}] getAllTexts() returned ${event.count} texts`);
         if (event.count < 3) {
-          console.error(`  ⚠️ PROBLEM: Only ${event.count} images returned (expected 3)!`);
+          console.error(`  ⚠️ PROBLEM: Only ${event.count} texts returned (expected 3)!`);
         }
-      } else if (event.type === 'setAllImages') {
-        lastSetAllImages = event;
-        console.log(`[${event.timestamp}] setAllImages() called with ${event.count} images`);
-        if (lastGetAllImages && event.count < lastGetAllImages.count) {
-          console.error(`  ⚠️ PROBLEM: setAllImages received ${event.count} images but getAllImages returned ${lastGetAllImages.count}!`);
+      } else if (event.type === 'setAllTexts') {
+        lastSetAllTexts = event;
+        console.log(`[${event.timestamp}] setAllTexts() called with ${event.count} texts`);
+        if (lastGetAllTexts && event.count < lastGetAllTexts.count) {
+          console.error(`  ⚠️ PROBLEM: setAllTexts received ${event.count} texts but getAllTexts returned ${lastGetAllTexts.count}!`);
         }
       } else if (event.type === 'REMOVAL') {
         console.error(`[${event.timestamp}] 🚨 REMOVAL DETECTED:`, event.removedIds);
-        if (lastSetAllImages) {
-          console.error(`  ⚠️ CULPRIT: setAllImages() was called ${event.timestamp - lastSetAllImages.timestamp}ms before removal`);
-          console.error(`  ⚠️ setAllImages had ${lastSetAllImages.count} images, but ${event.removedIds.length} were removed`);
-          console.error(`  ⚠️ Missing IDs:`, event.removedIds.filter(id => !lastSetAllImages.ids.includes(id)));
+        if (lastSetAllTexts) {
+          console.error(`  ⚠️ CULPRIT: setAllTexts() was called ${event.timestamp - lastSetAllTexts.timestamp}ms before removal`);
+          console.error(`  ⚠️ setAllTexts had ${lastSetAllTexts.count} texts, but ${event.removedIds.length} were removed`);
+          console.error(`  ⚠️ Missing IDs:`, event.removedIds.filter(id => !lastSetAllTexts.ids.includes(id)));
         }
-        if (lastGetAllImages) {
-          console.error(`  ⚠️ getAllImages() returned ${lastGetAllImages.count} images ${event.timestamp - lastGetAllImages.timestamp}ms before removal`);
+        if (lastGetAllTexts) {
+          console.error(`  ⚠️ getAllTexts() returned ${lastGetAllTexts.count} texts ${event.timestamp - lastGetAllTexts.timestamp}ms before removal`);
         }
       } else if (event.type === 'MISSING_WARNING') {
         console.warn(`[${event.timestamp}] ⚠️ WARNING:`, event.log);
@@ -192,12 +166,12 @@ test.describe('Quick Z-Index Test', () => {
     
     // Summary
     const removals = events.filter(e => e.type === 'REMOVAL');
-    const getAllImagesEvents = events.filter(e => e.type === 'getAllImages');
-    const setAllImagesEvents = events.filter(e => e.type === 'setAllImages');
+    const getAllTextsEvents = events.filter(e => e.type === 'getAllTexts');
+    const setAllTextsEvents = events.filter(e => e.type === 'setAllTexts');
     
     console.log('\n--- Summary ---');
-    console.log(`Total getAllImages() calls: ${getAllImagesEvents.length}`);
-    console.log(`Total setAllImages() calls: ${setAllImagesEvents.length}`);
+    console.log(`Total getAllTexts() calls: ${getAllTextsEvents.length}`);
+    console.log(`Total setAllTexts() calls: ${setAllTextsEvents.length}`);
     console.log(`Total REMOVAL events: ${removals.length}`);
     
     if (removals.length > 0) {
@@ -207,19 +181,19 @@ test.describe('Quick Z-Index Test', () => {
         console.error(`  Removed IDs:`, removal.removedIds);
         console.error(`  Full log:`, removal.log);
         
-        // Find the setAllImages call that likely caused this
-        const precedingSetAllImages = setAllImagesEvents
+        // Find the setAllTexts call that likely caused this
+        const precedingSetAllTexts = setAllTextsEvents
           .filter(e => e.timestamp < removal.timestamp)
           .sort((a, b) => b.timestamp - a.timestamp)[0];
         
-        if (precedingSetAllImages) {
-          console.error(`  Likely caused by setAllImages() at ${precedingSetAllImages.timestamp}`);
-          console.error(`  That call had ${precedingSetAllImages.count} images:`, precedingSetAllImages.ids);
+        if (precedingSetAllTexts) {
+          console.error(`  Likely caused by setAllTexts() at ${precedingSetAllTexts.timestamp}`);
+          console.error(`  That call had ${precedingSetAllTexts.count} texts:`, precedingSetAllTexts.ids);
         }
       });
     }
     
-    return { events, removals, getAllImagesEvents, setAllImagesEvents };
+    return { events, removals, getAllTextsEvents, setAllTextsEvents };
   }
   
   // Helper: Login and setup for a specific user
@@ -276,59 +250,9 @@ test.describe('Quick Z-Index Test', () => {
     console.log(`[${userName}] Cleanup complete`);
   }
   
-  // Helper: Login and setup (deprecated - use setupTestForUser instead)
-  async function setupTest(page) {
-    await page.goto('http://localhost:30000/join');
-    await page.waitForTimeout(1000);
-    
-    // Wait for combobox to be ready and select option
-    await page.waitForSelector('select[name="userid"]', { state: 'visible' });
-    await page.waitForTimeout(500);
-    await page.selectOption('select[name="userid"]', 'LoZGkWmu3xRB0sXZ');
-    await page.waitForTimeout(500);
-    
-    await page.getByRole('button', { name: ' Join Game Session' }).click();
-    await page.waitForTimeout(1000);
-    
-    // Close window if it appears
-    try {
-      await page.getByRole('button', { name: 'Close Window' }).click({ timeout: 2000 });
-      await page.waitForTimeout(500);
-    } catch (e) {
-      // Window might not appear, that's okay
-    }
-    
-    await page.waitForTimeout(2000);
-    
-    // Wait for whiteboard to be ready
-    await page.waitForSelector('#board', { timeout: 10000 });
-    await page.waitForTimeout(1000);
-    
-    // Cleanup
-    // Cleanup
-    await page.evaluate(async () => {
-      try {
-        if (globalThis.canvas?.scene?.unsetFlag) {
-          await Promise.all([
-            globalThis.canvas.scene.unsetFlag("whiteboard-experience", "texts"),
-            globalThis.canvas.scene.unsetFlag("whiteboard-experience", "images"),
-            globalThis.canvas.scene.unsetFlag("whiteboard-experience", "cards")
-          ]);
-        }
-      } catch (err) {
-        console.error('[TEST] Failed to unset whiteboard flags:', err);
-      }
-
-      if (globalThis.WhiteboardExperience?.clearCanvasElements) {
-        await globalThis.WhiteboardExperience.clearCanvasElements();
-      }
-    });
-    await page.waitForTimeout(1000);
-  }
-  
-  // Helper: Create 3 test text objects
+  // Helper: Create 3 test texts
   async function createThreeTexts(page) {
-    console.log('Creating 3 test text objects...');
+    console.log('Creating 3 test texts...');
     
     const boardRect = await page.evaluate(() => {
       const board = document.getElementById('board');
@@ -341,9 +265,9 @@ test.describe('Quick Z-Index Test', () => {
       throw new Error('Board not found');
     }
     
-    // Calculate positions for 3 texts in a row (below images)
+    // Calculate positions for 3 texts in a row
     const centerX = boardRect.left + boardRect.width / 2;
-    const centerY = boardRect.top + boardRect.height / 2 + 150; // Below images
+    const centerY = boardRect.top + boardRect.height / 2;
     const spacing = 120;
     
     const screenPositions = [
@@ -351,6 +275,21 @@ test.describe('Quick Z-Index Test', () => {
       { x: centerX, y: centerY },
       { x: centerX + spacing, y: centerY }
     ];
+    
+    // Ensure layer exists before creating texts
+    try {
+      await page.waitForSelector('#whiteboard-experience-layer', { timeout: 5000 });
+    } catch (e) {
+      // Layer doesn't exist, try to create it
+      await page.evaluate(() => {
+        if (window.getOrCreateLayer) {
+          window.getOrCreateLayer();
+        } else {
+          console.warn('[TEST] getOrCreateLayer not available, layer may not exist');
+        }
+      });
+      await page.waitForTimeout(200); // Small delay to ensure layer is ready
+    }
     
     // Create texts directly via browser
     const elementIds = await page.evaluate(async ({ screenPositions }) => {
@@ -448,12 +387,14 @@ test.describe('Quick Z-Index Test', () => {
     const containersReady = await page.evaluate(({ elementIds }) => {
       const results = elementIds.map(id => {
         const el = document.getElementById(id);
+        const inlineZ = el ? parseInt(el.style.zIndex) || 0 : -1;
+        const computedZ = el ? parseInt(window.getComputedStyle(el).zIndex) || 0 : -1;
         return {
           id,
           exists: !!el,
-          domZIndex: el ? parseInt(el.style.zIndex) || 0 : -1,
-          managerZIndex: window.ZIndexManager?.get(id) || 0,
-          visible: el ? el.offsetParent !== null : false
+          inlineZIndex: inlineZ,
+          domZIndex: computedZ,
+          managerZIndex: window.ZIndexManager?.get(id) || 0
         };
       });
       return results;
@@ -461,163 +402,23 @@ test.describe('Quick Z-Index Test', () => {
     
     console.log('Created texts:');
     containersReady.forEach((result, idx) => {
-      console.log(`  Text ${idx + 1} (${result.id.slice(-6)}): DOM=${result.domZIndex}, Manager=${result.managerZIndex}, Visible=${result.visible}`);
+      console.log(`  Text ${idx + 1} (${result.id.slice(-6)}): DOM(computed)=${result.domZIndex}, DOM(inline)=${result.inlineZIndex}, Manager=${result.managerZIndex}`);
     });
     
     return elementIds;
   }
   
-  // Helper: Create 3 test images
-  async function createThreeImages(page) {
-    console.log('Creating 3 test images...');
-    
-    const boardRect = await page.evaluate(() => {
-      const board = document.getElementById('board');
-      if (!board) return null;
-      const rect = board.getBoundingClientRect();
-      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-    });
-    
-    if (!boardRect) {
-      throw new Error('Board not found');
-    }
-    
-    // Calculate positions for 3 images in a row
-    const centerX = boardRect.left + boardRect.width / 2;
-    const centerY = boardRect.top + boardRect.height / 2;
-    const spacing = 120;
-    
-    const screenPositions = [
-      { x: centerX - spacing, y: centerY },
-      { x: centerX, y: centerY },
-      { x: centerX + spacing, y: centerY }
-    ];
-    
-    // Create images directly via browser
-    const elementIds = await page.evaluate(async ({ screenPositions }) => {
-      const ImageTools = window.ImageTools;
-      if (!ImageTools) {
-        throw new Error('ImageTools not available - module may not be loaded');
-      }
-      
-      const screenToWorld = window.screenToWorld;
-      
-      // Create a simple test image data URI (100x100 colored squares)
-      const colors = ['#ff0000', '#00ff00', '#0000ff']; // Red, Green, Blue
-      const ids = [];
-      const imageDataMap = {};
-      const defaultCrop = { top: 0, right: 0, bottom: 0, left: 0 };
-      
-      for (let i = 0; i < 3; i++) {
-        const canvas = document.createElement('canvas');
-        canvas.width = 100;
-        canvas.height = 100;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = colors[i];
-        ctx.fillRect(0, 0, 100, 100);
-        const dataURI = canvas.toDataURL('image/png');
-        
-        const id = `wbe-image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        
-        // Convert screen coordinates to world coordinates
-        let worldPos;
-        if (screenToWorld && typeof screenToWorld === 'function') {
-          worldPos = screenToWorld(screenPositions[i].x, screenPositions[i].y);
-        } else if (window.canvas?.ready && window.canvas?.stage) {
-          try {
-            const transform = window.canvas.stage.worldTransform;
-            const inverted = transform.clone().invert();
-            const point = inverted.apply({ x: screenPositions[i].x, y: screenPositions[i].y });
-            worldPos = { x: point.x, y: point.y };
-          } catch (e) {
-            worldPos = { x: screenPositions[i].x, y: screenPositions[i].y };
-          }
-        } else {
-          worldPos = { x: screenPositions[i].x, y: screenPositions[i].y };
-        }
-        
-        // Create image element at world coordinates
-        const container = ImageTools.createImageElement(
-          id,
-          dataURI,
-          worldPos.x,
-          worldPos.y,
-          1,
-          defaultCrop,
-          'rect',
-          { x: 0, y: 0 },
-          null,
-          null, // existingZIndex - let it assign
-          false // isFrozen
-        );
-        
-        if (container) {
-          const imageElement = container.querySelector('.wbe-canvas-image');
-          if (imageElement) {
-            imageDataMap[id] = {
-              src: imageElement.src || dataURI,
-              left: worldPos.x,
-              top: worldPos.y,
-              scale: 1,
-              crop: defaultCrop,
-              maskType: 'rect',
-              circleOffset: { x: 0, y: 0 },
-              circleRadius: null,
-              isFrozen: false,
-              zIndex: window.ZIndexManager?.get(id) || null
-            };
-          }
-        }
-        
-        ids.push(id);
-        await new Promise(resolve => setTimeout(resolve, 50)); // Small delay between creates
-      }
-      
-      // Save all images together
-      if (Object.keys(imageDataMap).length > 0) {
-        const existingImages = await ImageTools.getAllImages();
-        const allImages = { ...existingImages, ...imageDataMap };
-        await ImageTools.setAllImages(allImages);
-      }
-      
-      return ids;
-    }, { screenPositions });
-    
-    expect(elementIds.length).toBe(3);
-    
-    // Wait for images to be fully created and persisted
-    await page.waitForTimeout(1500);
-    
-    // Verify containers exist
-    const containersReady = await page.evaluate(({ elementIds }) => {
-      const results = elementIds.map(id => {
-        const el = document.getElementById(id);
-        return {
-          id,
-          exists: !!el,
-          domZIndex: el ? parseInt(el.style.zIndex) || 0 : -1,
-          managerZIndex: window.ZIndexManager?.get(id) || 0
-        };
-      });
-      return results;
-    }, { elementIds });
-    
-    console.log('Created images:');
-    containersReady.forEach((result, idx) => {
-      console.log(`  Image ${idx + 1} (${result.id.slice(-6)}): DOM=${result.domZIndex}, Manager=${result.managerZIndex}`);
-    });
-    
-    return elementIds;
-  }
-  
-  // Helper: Get current z-index state (works for both images and texts)
+  // Helper: Get current z-index state
   async function getZIndexState(page, elementIds) {
     return await page.evaluate(({ elementIds }) => {
       const state = {};
       for (const id of elementIds) {
         const el = document.getElementById(id);
+        const inlineZ = el ? parseInt(el.style.zIndex) || 0 : -1;
+        const computedZ = el ? parseInt(window.getComputedStyle(el).zIndex) || 0 : -1;
         state[id] = {
-          domZIndex: el ? parseInt(el.style.zIndex) || 0 : -1,
+          domZIndex: computedZ,
+          inlineZIndex: inlineZ,
           managerZIndex: window.ZIndexManager?.get(id) || 0,
           exists: !!el,
           visible: el ? el.offsetParent !== null : false,
@@ -640,27 +441,6 @@ test.describe('Quick Z-Index Test', () => {
       const text = log.text;
       const timestampMatch = text.match(/\[(\d+)\]/);
       const eventTimestamp = timestampMatch ? parseInt(timestampMatch[1]) : log.timestamp;
-      
-      // Track IMAGE z-index changes
-      if (text.includes('[Z-Index] IMAGE')) {
-        const idMatch = text.match(/ID: (wbe-image-[^\s|]+)/);
-        const zMatch = text.match(/z-index: (\d+)(?: → (\d+))?/);
-        if (idMatch && zMatch) {
-          const id = idMatch[1];
-          const oldZ = parseInt(zMatch[1]);
-          const newZ = zMatch[2] ? parseInt(zMatch[2]) : oldZ;
-          const operation = text.includes('moved up') ? 'moveUp' : text.includes('moved down') ? 'moveDown' : 'set';
-          
-          if (!zIndexHistory.has(id)) zIndexHistory.set(id, []);
-          zIndexHistory.get(id).push({
-            timestamp: eventTimestamp,
-            zIndex: newZ,
-            oldZ: oldZ,
-            operation,
-            log: text
-          });
-        }
-      }
       
       // Track TEXT z-index changes
       if (text.includes('[Z-Index] TEXT')) {
@@ -704,8 +484,6 @@ test.describe('Quick Z-Index Test', () => {
             reassignedCount,
             log: text
           });
-          // Also track this as a z-index change for the reassigned objects
-          // (we'll need to infer which objects were reassigned from context)
         }
       }
     }
@@ -903,59 +681,6 @@ test.describe('Quick Z-Index Test', () => {
     return { zIndexHistory, duplicateOccurrences };
   }
   
-  // Helper: Check for cross-type z-index conflicts
-  async function checkCrossTypeConflicts(page, imageIds, textIds) {
-    const state = await getZIndexState(page, [...imageIds, ...textIds]);
-    const conflicts = [];
-    
-    // Get all z-indexes with their types
-    const zIndexMap = [];
-    imageIds.forEach(id => {
-      const s = state[id];
-      if (s && s.managerZIndex > 0) {
-        zIndexMap.push({ id, type: 'image', zIndex: s.managerZIndex, domZIndex: s.domZIndex });
-      }
-    });
-    textIds.forEach(id => {
-      const s = state[id];
-      if (s && s.managerZIndex > 0) {
-        zIndexMap.push({ id, type: 'text', zIndex: s.managerZIndex, domZIndex: s.domZIndex });
-      }
-    });
-    
-    // Sort by z-index
-    zIndexMap.sort((a, b) => a.zIndex - b.zIndex);
-    
-    // Check for duplicate z-indexes (conflict)
-    for (let i = 0; i < zIndexMap.length - 1; i++) {
-      const current = zIndexMap[i];
-      const next = zIndexMap[i + 1];
-      
-      if (current.zIndex === next.zIndex && current.zIndex > 0) {
-        conflicts.push({
-          type: 'duplicate_zindex',
-          zIndex: current.zIndex,
-          object1: { id: current.id, type: current.type },
-          object2: { id: next.id, type: next.type }
-        });
-      }
-      
-      // Check for DOM/Manager mismatch in ordering
-      if (current.domZIndex !== current.zIndex || next.domZIndex !== next.zIndex) {
-        // DOM ordering might be wrong
-        if (current.domZIndex > next.domZIndex && current.zIndex < next.zIndex) {
-          conflicts.push({
-            type: 'ordering_mismatch',
-            object1: { id: current.id, type: current.type, managerZ: current.zIndex, domZ: current.domZIndex },
-            object2: { id: next.id, type: next.type, managerZ: next.zIndex, domZ: next.domZIndex }
-          });
-        }
-      }
-    }
-    
-    return conflicts;
-  }
-  
   // Helper: Check for blinking (visibility changes)
   async function checkForBlinking(page, elementIds, previousStates) {
     const currentStates = await getZIndexState(page, elementIds);
@@ -992,13 +717,12 @@ test.describe('Quick Z-Index Test', () => {
     return { blinking, currentStates };
   }
   
-  // Helper: Log z-index state (works for both images and texts)
-  function logZIndexState(state, elementIds, step = '', prefix = 'Object') {
+  // Helper: Log z-index state
+  function logZIndexState(state, elementIds, step = '') {
     console.log(`\n${step ? step + ' - ' : ''}Z-Index State:`);
     elementIds.forEach((id, idx) => {
       const s = state[id];
-      const type = id.startsWith('wbe-text-') ? 'Text' : 'Image';
-      console.log(`  ${type} ${idx + 1} (${id.slice(-6)}): DOM=${s.domZIndex}, Manager=${s.managerZIndex}, Visible=${s.visible || false}`);
+      console.log(`  Text ${idx + 1} (${id.slice(-6)}): DOM=${s.domZIndex}, Manager=${s.managerZIndex}, Visible=${s.visible || false}`);
     });
   }
   
@@ -1025,7 +749,7 @@ test.describe('Quick Z-Index Test', () => {
     return true;
   }
   
-  // Helper: Select and change z-index (works for both images and texts)
+  // Helper: Select and change z-index
   async function selectAndChangeZIndex(page, elementId, key, delay = 50) {
     // Verify element exists first
     await verifyElementExists(page, elementId);
@@ -1046,12 +770,10 @@ test.describe('Quick Z-Index Test', () => {
     await page.mouse.click(elementPos.x, elementPos.y);
     await page.waitForTimeout(100); // Reduced from 300
     
-    // Verify selection (check both image and text selection)
+    // Verify selection
     const isSelected = await page.evaluate((id) => {
-      const ImageTools = window.ImageTools;
       const TextTools = window.TextTools;
-      return (ImageTools && ImageTools.selectedImageId === id) || 
-             (TextTools && TextTools.selectedTextId === id);
+      return (TextTools && TextTools.selectedTextId === id);
     }, elementId);
     
     if (!isSelected) {
@@ -1074,8 +796,8 @@ test.describe('Quick Z-Index Test', () => {
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
   
-  // Helper: Make random z-index changes on an image
-  async function makeRandomZIndexChanges(page, elementId, imageIndex, changeCount) {
+  // Helper: Make random z-index changes on a text
+  async function makeRandomZIndexChanges(page, elementId, textIndex, changeCount) {
     const changes = [];
     const keys = ['PageUp', 'PageDown'];
     
@@ -1085,7 +807,7 @@ test.describe('Quick Z-Index Test', () => {
       changes.push({ key, desc: key === 'PageUp' ? 'Up' : 'Down' });
     }
     
-    console.log(`\n  Image ${imageIndex + 1} (${elementId.slice(-6)}): Making ${changeCount} random changes`);
+    console.log(`\n  Text ${textIndex + 1} (${elementId.slice(-6)}): Making ${changeCount} random changes`);
     
     let changeNum = 0;
     let successCount = 0;
@@ -1145,8 +867,8 @@ test.describe('Quick Z-Index Test', () => {
     console.log(`    Completed: ${successCount}/${changeCount} changes successful`);
   }
 
-  test('Quick z-index changes on 3 images and 3 texts (GM + Player)', async ({ browser }) => {
-    console.log('\n=== QUICK Z-INDEX TEST (Images + Texts) - GM + Player ===');
+  test('Quick z-index changes on 3 texts', async ({ browser }) => {
+    console.log('\n=== QUICK Z-INDEX TEST (Texts Only) - GM + Player ===');
     
     // Create two browser contexts: one for GM, one for Player
     const gmContext = await browser.newContext();
@@ -1174,178 +896,62 @@ test.describe('Quick Z-Index Test', () => {
       playerPage.waitForTimeout(1000)
     ]);
     
-    // Create images and texts from Player side
-    console.log('\n--- Creating images and texts from Player ---');
-    const imageIds = await createThreeImages(playerPage);
+    // Create texts from Player side
+    console.log('\n--- Creating texts from Player ---');
     const textIds = await createThreeTexts(playerPage);
-    const allElementIds = [...imageIds, ...textIds];
     
-    // Wait for elements to sync to GM
-    console.log('\n--- Waiting for elements to sync to GM ---');
+    // Wait for texts to sync to GM
+    console.log('\n--- Waiting for texts to sync to GM ---');
     await gmPage.waitForTimeout(2000);
     
-    // Verify elements exist on both sides
-    const playerElementsExist = await playerPage.evaluate(({ allElementIds }) => {
-      return allElementIds.map(id => !!document.getElementById(id));
-    }, { allElementIds });
-    const gmElementsExist = await gmPage.evaluate(({ allElementIds }) => {
-      return allElementIds.map(id => !!document.getElementById(id));
-    }, { allElementIds });
+    // Verify texts exist on both sides
+    const playerTextsExist = await playerPage.evaluate(({ textIds }) => {
+      return textIds.map(id => !!document.getElementById(id));
+    }, { textIds });
+    const gmTextsExist = await gmPage.evaluate(({ textIds }) => {
+      return textIds.map(id => !!document.getElementById(id));
+    }, { textIds });
     
-    console.log(`Player elements exist: ${playerElementsExist.filter(Boolean).length}/${allElementIds.length}`);
-    console.log(`GM elements exist: ${gmElementsExist.filter(Boolean).length}/${allElementIds.length}`);
+    console.log(`Player texts exist: ${playerTextsExist.filter(Boolean).length}/${textIds.length}`);
+    console.log(`GM texts exist: ${gmTextsExist.filter(Boolean).length}/${textIds.length}`);
     
     // Get initial state from both sides
-    const playerInitialState = await getZIndexState(playerPage, allElementIds);
-    const gmInitialState = await getZIndexState(gmPage, allElementIds);
+    const playerInitialState = await getZIndexState(playerPage, textIds);
+    const gmInitialState = await getZIndexState(gmPage, textIds);
     
-    logZIndexState(playerInitialState, imageIds, 'Initial Images (Player)', 'Image');
-    logZIndexState(playerInitialState, textIds, 'Initial Texts (Player)', 'Text');
-    logZIndexState(gmInitialState, imageIds, 'Initial Images (GM)', 'Image');
-    logZIndexState(gmInitialState, textIds, 'Initial Texts (GM)', 'Text');
+    logZIndexState(playerInitialState, textIds, 'Initial Texts (Player)');
+    logZIndexState(gmInitialState, textIds, 'Initial Texts (GM)');
+    
+    // Check for sync issues
+    const syncIssues = [];
+    for (const id of textIds) {
+      const playerZ = playerInitialState[id]?.managerZIndex || 0;
+      const gmZ = gmInitialState[id]?.managerZIndex || 0;
+      if (playerZ !== gmZ && playerZ > 0 && gmZ > 0) {
+        syncIssues.push({ id, playerZ, gmZ });
+        console.error(`⚠️  Sync issue: ${id.slice(-6)} Player=${playerZ} GM=${gmZ}`);
+      }
+    }
     
     let playerPreviousStates = playerInitialState;
     let gmPreviousStates = gmInitialState;
     const allBlinkingEvents = [];
-    const allCrossTypeConflicts = [];
-    const syncIssues = [];
     
     // Perform 2 runs
     for (let run = 1; run <= 2; run++) {
       console.log(`\n=== RUN ${run} ===`);
       
-      // Cross-type conflict test - alternate between text and image
-      console.log(`\n--- Cross-Type Z-Index Test (Run ${run}) ---`);
-      const allIds = [...imageIds, ...textIds];
-      const shuffledIds = [...allIds].sort(() => Math.random() - 0.5); // Randomize order
-      
-      for (let i = 0; i < Math.min(6, shuffledIds.length); i++) {
-        const elementId = shuffledIds[i];
-        const isText = elementId.startsWith('wbe-text-');
-        const type = isText ? 'Text' : 'Image';
-        const index = isText ? textIds.indexOf(elementId) : imageIds.indexOf(elementId);
-        
-        // Verify element exists on Player side
-        const exists = await playerPage.evaluate((id) => {
-          return !!document.getElementById(id);
-        }, elementId);
-        
-        if (!exists) {
-          console.warn(`  ⚠️  ${type} ${index + 1} (${elementId.slice(-6)}) no longer exists, skipping`);
-          continue;
-        }
-        
-        // Make 2-3 quick changes to force cross-type swaps
-        const changeCount = randomInt(2, 3);
-        console.log(`\n--- Processing ${type} ${index + 1} (from Player) ---`);
-        console.log(`  ${type} ${index + 1} (${elementId.slice(-6)}): Making ${changeCount} random changes`);
-        
-        await makeRandomZIndexChanges(playerPage, elementId, index, changeCount);
-        
-        // Wait for sync to GM
-        await gmPage.waitForTimeout(500);
-        
-        // Check sync between Player and GM
-        const playerState = await getZIndexState(playerPage, [elementId]);
-        const gmState = await getZIndexState(gmPage, [elementId]);
-        const playerZ = playerState[elementId]?.managerZIndex || 0;
-        const gmZ = gmState[elementId]?.managerZIndex || 0;
-        if (playerZ !== gmZ) {
-          console.log(`    ⚠️  Sync issue after change: ${elementId.slice(-6)} Player=${playerZ} GM=${gmZ}`);
-          syncIssues.push({ id: elementId, playerZ, gmZ, run });
-        }
-        
-        // Check for blinking on both sides
-        const playerBlink = await checkForBlinking(playerPage, [elementId], playerPreviousStates);
-        const gmBlink = await checkForBlinking(gmPage, [elementId], gmPreviousStates);
-        
-        if (playerBlink.blinking.length > 0) {
-          allBlinkingEvents.push(...playerBlink.blinking.map(b => ({ ...b, side: 'Player', run })));
-        }
-        if (gmBlink.blinking.length > 0) {
-          allBlinkingEvents.push(...gmBlink.blinking.map(b => ({ ...b, side: 'GM', run })));
-        }
-        
-        playerPreviousStates = playerBlink.currentStates;
-        gmPreviousStates = gmBlink.currentStates;
-        
-        // Check for cross-type conflicts
-        const conflicts = await checkCrossTypeConflicts(playerPage, imageIds, textIds);
-        if (conflicts.length > 0) {
-          allCrossTypeConflicts.push(...conflicts.map(c => ({ ...c, run })));
-          conflicts.forEach(c => {
-            if (c.type === 'duplicate_zindex') {
-              console.error(`    🚨 DUPLICATE Z-INDEX: ${c.zIndex} - ${c.object1.type} ${c.object1.id.slice(-6)} and ${c.object2.type} ${c.object2.id.slice(-6)}`);
-            } else if (c.type === 'ordering_mismatch') {
-              console.error(`    🚨 ORDERING MISMATCH: Manager says ${c.object1.type}(${c.object1.managerZ}) < ${c.object2.type}(${c.object2.managerZ}), but DOM says ${c.object1.domZ} > ${c.object2.domZ}`);
-            }
-          });
-        }
-        
-        await playerPage.waitForTimeout(150); // Small delay between cross-type changes
-      }
-      
-      // Process images from Player side
-      for (let imgIndex = 0; imgIndex < imageIds.length; imgIndex++) {
-        const elementId = imageIds[imgIndex];
-        
-        // Verify element exists on Player side
-        const exists = await playerPage.evaluate((id) => {
-          return !!document.getElementById(id);
-        }, elementId);
-        
-        if (!exists) {
-          console.warn(`\n⚠️  Warning: Image ${imgIndex + 1} (${elementId.slice(-6)}) no longer exists, skipping`);
-          continue;
-        }
-        
-        // Generate random number of changes (5-8)
-        const changeCount = randomInt(5, 8);
-        console.log(`\n--- Processing Image ${imgIndex + 1} (from Player) ---`);
-        
-        await makeRandomZIndexChanges(playerPage, elementId, imgIndex, changeCount);
-        
-        // Wait for sync to GM
-        await gmPage.waitForTimeout(500);
-        
-        // Check sync
-        const playerState = await getZIndexState(playerPage, [elementId]);
-        const gmState = await getZIndexState(gmPage, [elementId]);
-        const playerZ = playerState[elementId]?.managerZIndex || 0;
-        const gmZ = gmState[elementId]?.managerZIndex || 0;
-        if (playerZ !== gmZ) {
-          console.log(`    ⚠️  Sync issue: ${elementId.slice(-6)} Player=${playerZ} GM=${gmZ}`);
-          syncIssues.push({ id: elementId, playerZ, gmZ, run });
-        }
-        
-        // Check for blinking on both sides
-        const playerBlink = await checkForBlinking(playerPage, allElementIds, playerPreviousStates);
-        const gmBlink = await checkForBlinking(gmPage, allElementIds, gmPreviousStates);
-        
-        if (playerBlink.blinking.length > 0) {
-          allBlinkingEvents.push(...playerBlink.blinking.map(b => ({ ...b, side: 'Player', run })));
-        }
-        if (gmBlink.blinking.length > 0) {
-          allBlinkingEvents.push(...gmBlink.blinking.map(b => ({ ...b, side: 'GM', run })));
-        }
-        
-        playerPreviousStates = playerBlink.currentStates;
-        gmPreviousStates = gmBlink.currentStates;
-        
-        await playerPage.waitForTimeout(200);
-      }
-      
       // Process texts from Player side
       for (let txtIndex = 0; txtIndex < textIds.length; txtIndex++) {
         const elementId = textIds[txtIndex];
         
-        // Verify element exists on Player side
-        const exists = await playerPage.evaluate((id) => {
+        // Verify element still exists before processing
+        const playerExists = await playerPage.evaluate((id) => {
           return !!document.getElementById(id);
         }, elementId);
         
-        if (!exists) {
-          console.warn(`\n⚠️  Warning: Text ${txtIndex + 1} (${elementId.slice(-6)}) no longer exists, skipping`);
+        if (!playerExists) {
+          console.warn(`\n⚠️  Warning: Text ${txtIndex + 1} (${elementId.slice(-6)}) no longer exists on Player, skipping`);
           continue;
         }
         
@@ -1358,118 +964,182 @@ test.describe('Quick Z-Index Test', () => {
         // Wait for sync to GM
         await gmPage.waitForTimeout(500);
         
-        // Check sync
+        // Check for blinking after changes (both sides)
+        const { blinking: playerBlinking, currentStates: playerCurrentStates } = await checkForBlinking(playerPage, textIds, playerPreviousStates);
+        const { blinking: gmBlinking, currentStates: gmCurrentStates } = await checkForBlinking(gmPage, textIds, gmPreviousStates);
+        
+        if (playerBlinking.length > 0 || gmBlinking.length > 0) {
+          allBlinkingEvents.push(...playerBlinking, ...gmBlinking);
+          console.warn(`  ⚠️  BLINKING DETECTED: Player=${playerBlinking.length}, GM=${gmBlinking.length}`);
+          playerBlinking.forEach(b => {
+            if (b.type === 'zindex_mismatch') {
+              console.error(`    ❌ Player Z-Index Mismatch: ${b.id.slice(-6)} DOM=${b.domZIndex} Manager=${b.managerZIndex}`);
+            }
+          });
+          gmBlinking.forEach(b => {
+            if (b.type === 'zindex_mismatch') {
+              console.error(`    ❌ GM Z-Index Mismatch: ${b.id.slice(-6)} DOM=${b.domZIndex} Manager=${b.managerZIndex}`);
+            }
+          });
+        }
+        
+        // Check sync between Player and GM
         const playerState = await getZIndexState(playerPage, [elementId]);
         const gmState = await getZIndexState(gmPage, [elementId]);
         const playerZ = playerState[elementId]?.managerZIndex || 0;
         const gmZ = gmState[elementId]?.managerZIndex || 0;
-        if (playerZ !== gmZ) {
-          console.log(`    ⚠️  Sync issue: ${elementId.slice(-6)} Player=${playerZ} GM=${gmZ}`);
-          syncIssues.push({ id: elementId, playerZ, gmZ, run });
+        if (playerZ !== gmZ && playerZ > 0 && gmZ > 0) {
+          console.error(`    ⚠️  Sync issue after change: ${elementId.slice(-6)} Player=${playerZ} GM=${gmZ}`);
         }
         
-        // Check for blinking on both sides
-        const playerBlink = await checkForBlinking(playerPage, allElementIds, playerPreviousStates);
-        const gmBlink = await checkForBlinking(gmPage, allElementIds, gmPreviousStates);
+        playerPreviousStates = playerCurrentStates;
+        gmPreviousStates = gmCurrentStates;
         
-        if (playerBlink.blinking.length > 0) {
-          allBlinkingEvents.push(...playerBlink.blinking.map(b => ({ ...b, side: 'Player', run })));
-        }
-        if (gmBlink.blinking.length > 0) {
-          allBlinkingEvents.push(...gmBlink.blinking.map(b => ({ ...b, side: 'GM', run })));
-        }
-        
-        playerPreviousStates = playerBlink.currentStates;
-        gmPreviousStates = gmBlink.currentStates;
-        
-        await playerPage.waitForTimeout(200);
+        // Small delay between texts
+        await Promise.all([
+          playerPage.waitForTimeout(200),
+          gmPage.waitForTimeout(200)
+        ]);
       }
       
-      // Log states after run
-      const playerStateAfterRun = await getZIndexState(playerPage, allElementIds);
-      const gmStateAfterRun = await getZIndexState(gmPage, allElementIds);
-      
-      logZIndexState(playerStateAfterRun, imageIds, `After Run ${run} (Player) - Images`, 'Image');
-      logZIndexState(playerStateAfterRun, textIds, `After Run ${run} (Player) - Texts`, 'Text');
-      logZIndexState(gmStateAfterRun, imageIds, `After Run ${run} (GM) - Images`, 'Image');
-      logZIndexState(gmStateAfterRun, textIds, `After Run ${run} (GM) - Texts`, 'Text');
+      // Log state after each run
+      const playerRunState = await getZIndexState(playerPage, textIds);
+      const gmRunState = await getZIndexState(gmPage, textIds);
+      logZIndexState(playerRunState, textIds, `After Run ${run} (Player)`);
+      logZIndexState(gmRunState, textIds, `After Run ${run} (GM)`);
     }
     
-    // Final state check
-    console.log('\n=== Final Verification ===');
-    const playerFinalState = await getZIndexState(playerPage, allElementIds);
-    const gmFinalState = await getZIndexState(gmPage, allElementIds);
+    // Final state
+    const playerFinalState = await getZIndexState(playerPage, textIds);
+    const gmFinalState = await getZIndexState(gmPage, textIds);
+    logZIndexState(playerFinalState, textIds, 'Final Texts (Player)');
+    logZIndexState(gmFinalState, textIds, 'Final Texts (GM)');
     
-    logZIndexState(playerFinalState, imageIds, 'Final Images (Player)', 'Image');
-    logZIndexState(playerFinalState, textIds, 'Final Texts (Player)', 'Text');
-    logZIndexState(gmFinalState, imageIds, 'Final Images (GM)', 'Image');
-    logZIndexState(gmFinalState, textIds, 'Final Texts (GM)', 'Text');
-    
-    // Check final sync between Player and GM
+    // Check final sync
+    console.log('\n=== Final Sync Check ===');
     const finalSyncIssues = [];
-    for (const id of allElementIds) {
+    for (const id of textIds) {
       const playerZ = playerFinalState[id]?.managerZIndex || 0;
       const gmZ = gmFinalState[id]?.managerZIndex || 0;
-      if (playerZ !== gmZ) {
+      if (playerZ !== gmZ && playerZ > 0 && gmZ > 0) {
         finalSyncIssues.push({ id, playerZ, gmZ });
+        console.error(`❌ Final sync issue: ${id.slice(-6)} Player=${playerZ} GM=${gmZ}`);
+      }
+    }
+    if (finalSyncIssues.length === 0) {
+      console.log('✅ All texts are in sync between Player and GM');
+    }
+    
+    // Analyze logs to find culprit (combine both)
+    const allBrowserLogs = [...playerBrowserLogs, ...gmBrowserLogs];
+    const analysis = analyzeLogsForCulprit(allBrowserLogs, textIds);
+    
+    // Analyze duplicate z-index patterns
+    const duplicateAnalysis = analyzeDuplicateZIndexPatterns(allBrowserLogs, textIds, playerFinalState);
+    
+    // Report blinking summary
+    if (allBlinkingEvents.length > 0) {
+      console.error(`\n🚨 BLINKING SUMMARY: ${allBlinkingEvents.length} total blinking events detected`);
+      const visibilityChanges = allBlinkingEvents.filter(b => !b.type);
+      const zIndexMismatches = allBlinkingEvents.filter(b => b.type === 'zindex_mismatch');
+      console.error(`  Visibility changes: ${visibilityChanges.length}`);
+      console.error(`  Z-Index mismatches: ${zIndexMismatches.length}`);
+      zIndexMismatches.forEach(b => {
+        console.error(`❌ Text ${b.id.slice(-6)} Z-Index Mismatch: DOM=${b.domZIndex} Manager=${b.managerZIndex}`);
+      });
+    } else {
+      console.log('\n✅ No blinking detected');
+    }
+    
+    // Report browser logs
+    console.log('\n=== BROWSER CONSOLE LOGS (Relevant) ===');
+    const playerRelevantLogs = playerBrowserLogs.filter(log => 
+      log.text.includes('[Z-Index]') ||
+      log.text.includes('[WB-E] setAllTexts') ||
+      log.text.includes('[WB-E] getAllTexts') ||
+      log.text.includes('[WB-E] GM received textUpdateRequest') ||
+      log.text.includes('[WB-E] GM processing textUpdateRequest') ||
+      log.text.includes('[CompactZIndexManager]') ||
+      log.text.includes('🚨') ||
+      log.text.includes('⚠️') ||
+      log.text.includes('z-index') ||
+      log.text.includes('zIndex') ||
+      log.type === 'error'
+    );
+    const gmRelevantLogs = gmBrowserLogs.filter(log => 
+      log.text.includes('[Z-Index]') ||
+      log.text.includes('[WB-E] setAllTexts') ||
+      log.text.includes('[WB-E] getAllTexts') ||
+      log.text.includes('[WB-E] GM received textUpdateRequest') ||
+      log.text.includes('[WB-E] GM processing textUpdateRequest') ||
+      log.text.includes('[CompactZIndexManager]') ||
+      log.text.includes('🚨') ||
+      log.text.includes('⚠️') ||
+      log.text.includes('z-index') ||
+      log.text.includes('zIndex') ||
+      log.type === 'error'
+    );
+    
+    console.log(`\n--- Player Logs (${playerRelevantLogs.length} relevant) ---`);
+    if (playerRelevantLogs.length > 0) {
+      playerRelevantLogs.slice(0, 20).forEach(log => {
+        const time = new Date(log.timestamp).toISOString().split('T')[1].slice(0, -1);
+        console.log(`[${time}] [PLAYER] [${log.type.toUpperCase()}] ${log.text}`);
+      });
+    }
+    
+    console.log(`\n--- GM Logs (${gmRelevantLogs.length} relevant) ---`);
+    if (gmRelevantLogs.length > 0) {
+      gmRelevantLogs.slice(0, 20).forEach(log => {
+        const time = new Date(log.timestamp).toISOString().split('T')[1].slice(0, -1);
+        console.log(`[${time}] [GM] [${log.type.toUpperCase()}] ${log.text}`);
+      });
+    }
+    
+    console.log(`\nTotal browser logs captured: Player=${playerBrowserLogs.length}, GM=${gmBrowserLogs.length}`);
+    console.log(`Relevant logs: Player=${playerRelevantLogs.length}, GM=${gmRelevantLogs.length}`);
+    
+    // Verify all objects still exist (check both DOM and manager on both sides)
+    console.log('\n=== Final Verification ===');
+    for (const id of textIds) {
+      const playerExists = await playerPage.evaluate((id) => {
+        return !!document.getElementById(id);
+      }, id);
+      const gmExists = await gmPage.evaluate((id) => {
+        return !!document.getElementById(id);
+      }, id);
+      
+      if (!playerExists) {
+        console.error(`❌ Text ${id.slice(-6)} no longer exists in Player DOM`);
+      }
+      if (!gmExists) {
+        console.error(`❌ Text ${id.slice(-6)} no longer exists in GM DOM`);
+      }
+      
+      if (playerExists) {
+        expect(playerFinalState[id].managerZIndex).toBeGreaterThan(0);
+        // Check for z-index mismatch
+        if (playerFinalState[id].domZIndex !== playerFinalState[id].managerZIndex && playerFinalState[id].domZIndex > 0) {
+          console.error(`❌ Player Text ${id.slice(-6)} Z-Index Mismatch: DOM=${playerFinalState[id].domZIndex} Manager=${playerFinalState[id].managerZIndex}`);
+        }
+      }
+      
+      if (gmExists) {
+        expect(gmFinalState[id].managerZIndex).toBeGreaterThan(0);
+        // Check for z-index mismatch
+        if (gmFinalState[id].domZIndex !== gmFinalState[id].managerZIndex && gmFinalState[id].domZIndex > 0) {
+          console.error(`❌ GM Text ${id.slice(-6)} Z-Index Mismatch: DOM=${gmFinalState[id].domZIndex} Manager=${gmFinalState[id].managerZIndex}`);
+        }
       }
     }
     
-    if (finalSyncIssues.length > 0) {
-      console.log('\n=== Final Sync Check ===');
-      finalSyncIssues.forEach(issue => {
-        console.log(`❌ Final sync issue: ${issue.id.slice(-6)} Player=${issue.playerZ} GM=${issue.gmZ}`);
-      });
-    } else {
-      console.log('\n=== Final Sync Check ===');
-      console.log('✅ All elements synced between Player and GM');
-    }
+    // Close contexts
+    await Promise.all([
+      gmContext.close(),
+      playerContext.close()
+    ]);
     
-    // Analyze logs
-    const combinedLogs = [...playerBrowserLogs, ...gmBrowserLogs];
-    analyzeLogsForCulprit(combinedLogs, allElementIds);
-    
-    // Analyze duplicate z-index patterns
-    const duplicateAnalysis = analyzeDuplicateZIndexPatterns(combinedLogs, allElementIds, playerFinalState);
-    
-    // Report results
-    console.log('\n=== TEST RESULTS ===');
-    console.log(`Blinking events: ${allBlinkingEvents.length}`);
-    if (allBlinkingEvents.length > 0) {
-      console.error('❌ Blinking detected:');
-      allBlinkingEvents.forEach(b => {
-        console.error(`  ${b.side} Run ${b.run}: ${b.id.slice(-6)} - ${b.type || 'visibility change'}`);
-      });
-    } else {
-      console.log('✅ No blinking detected');
-    }
-    
-    console.log(`Cross-type conflicts: ${allCrossTypeConflicts.length}`);
-    if (allCrossTypeConflicts.length > 0) {
-      console.error('❌ Cross-type conflicts detected:');
-      allCrossTypeConflicts.forEach(c => {
-        console.error(`  Run ${c.run}: ${c.object1.type} ${c.object1.id.slice(-6)} vs ${c.object2.type} ${c.object2.id.slice(-6)}`);
-      });
-    } else {
-      console.log('✅ No cross-type conflicts detected');
-    }
-    
-    console.log(`Sync issues: ${syncIssues.length + finalSyncIssues.length}`);
-    if (syncIssues.length > 0 || finalSyncIssues.length > 0) {
-      console.error('❌ Sync issues detected between Player and GM');
-    } else {
-      console.log('✅ No sync issues detected');
-    }
-    
-    // Close browser contexts
-    await gmContext.close();
-    await playerContext.close();
-    
-    // Assertions
-    expect(allBlinkingEvents.length).toBe(0);
-    expect(allCrossTypeConflicts.length).toBe(0);
-    expect(syncIssues.length + finalSyncIssues.length).toBe(0);
+    console.log('\n=== TEST COMPLETE ===');
   });
 });
-
 

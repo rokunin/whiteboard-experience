@@ -60,43 +60,7 @@ function debounce(func, wait) {
 // Pending image state updates queue (keyed by object ID)
 const pendingImageUpdates = new Map();
 
-function logDuplicateZIndexesInImagePayload(prefix, payload) {
-  const debugEnabled = typeof window !== 'undefined' && !!window.WBE_DEBUG_ZINDEX;
-  if (!debugEnabled) {
-    return;
-  }
-  if (!payload || typeof payload !== 'object') {
-    return;
-  }
 
-  const buckets = new Map();
-  Object.entries(payload).forEach(([id, data]) => {
-    if (!data) return;
-    const zIndex = Number(data.zIndex);
-    if (!Number.isFinite(zIndex)) return;
-    if (!buckets.has(zIndex)) {
-      buckets.set(zIndex, []);
-    }
-    buckets.get(zIndex).push(id);
-  });
-
-  const collisions = [];
-  buckets.forEach((ids, zIndex) => {
-    if (ids.length > 1) {
-      collisions.push({ zIndex, ids, sample: ids.slice(0, 5) });
-    }
-  });
-
-  if (collisions.length > 0) {
-    console.error(`[WB-E] ${prefix}: 🚨 Payload contains duplicate z-index assignments`, {
-      timestamp: Date.now(),
-      collisions,
-      totalCollisions: collisions.length
-    });
-  }
-}
-
-// Z-index operations are now queued at the ZIndexManager level in main.mjs
 
 // Debounced function to flush all pending image updates
 const debouncedFlushImageUpdates = debounce(async () => {
@@ -160,7 +124,7 @@ const debouncedFlushImageUpdates = debounce(async () => {
   const finalIds = Object.keys(images);
   console.log(`[WB-E] debouncedFlushImageUpdates: Final state has ${finalIds.length} images (${domExtractedCount} from DOM):`, finalIds.slice(0, 5));
   
-  logDuplicateZIndexesInImagePayload('debouncedFlushImageUpdates', images);
+  
 
   // Clear pending updates
   pendingImageUpdates.clear();
@@ -2705,6 +2669,9 @@ document.addEventListener("keydown", async (e) => {
   const container = document.getElementById(selectedImageId);
   if (!container) return;
 
+  // CRITICAL FIX: Don't intercept events if a text is selected (let text handler process it)
+  if (window.TextTools?.selectedTextId) return;
+
   // Z-index controls - raise/lower z-index
   // Skip if mass selection is active (let whiteboard-select handle it)
   if (globalThis.selectedObjects?.size > 1) return;
@@ -5112,37 +5079,77 @@ async function setAllImages(images) {
       // Syncing would cause conflicts and trigger duplicate prevention → flicker
       // Only sync on initial load or when absolutely necessary
       
-      // CRITICAL FIX: Read current state BEFORE unsetFlag to prevent race conditions
-      // If another setAllImages is running concurrently, we need to merge states
+      // CRITICAL FIX: For mass deletion, we receive the authoritative state (without deleted items)
+      // Do NOT merge with current state - use the passed images as authoritative
+      // This ensures deletions are properly propagated
       const currentImages = await getAllImages();
       const currentImageIds = Object.keys(currentImages);
       console.log(`[WB-E] setAllImages: [${timestamp}] getAllImages() returned ${currentImageIds.length} images:`, currentImageIds.slice(0, 5));
       
-      const mergedImages = { ...currentImages, ...images }; // Merge: current state + our updates
-      const mergedIds = Object.keys(mergedImages);
+      // Check if this is a deletion (fewer images than current)
+      const isDeletion = imageIds.length < currentImageIds.length;
+      const deletedIds = currentImageIds.filter(id => !imageIds.includes(id));
       
-      // Log missing images
-      const missingFromCurrent = imageIds.filter(id => !currentImageIds.includes(id));
-      const missingFromMerged = currentImageIds.filter(id => !mergedIds.includes(id));
-      
-      if (missingFromCurrent.length > 0) {
-        console.warn(`[WB-E] setAllImages: [${timestamp}] ⚠️ Images in passed object but NOT in current state:`, missingFromCurrent);
-      }
-      if (missingFromMerged.length > 0) {
-        console.warn(`[WB-E] setAllImages: [${timestamp}] ⚠️ Images in current state but NOT in merged:`, missingFromMerged);
+      if (isDeletion && deletedIds.length > 0) {
+        console.log(`[WB-E] setAllImages: [${timestamp}] Detected deletion: removing ${deletedIds.length} images:`, deletedIds);
       }
       
-      if (mergedIds.length !== imageIds.length) {
-        console.log(`[WB-E] setAllImages: [${timestamp}] Merged ${imageIds.length} updates with ${currentImageIds.length} existing = ${mergedIds.length} total`);
-      }
-      
+      // CRITICAL FIX: Use images as authoritative state (not merged)
+      // This ensures deletions are properly saved and broadcast
       // GM saves to database
       await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
       await new Promise(resolve => setTimeout(resolve, 50));
-      await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, mergedImages);
-      // Emit to all (merged state, not just our updates)
-      console.log(`[WB-E] setAllImages: [${timestamp}] GM emitting socket update with ${mergedIds.length} images`);
-      game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: mergedImages });
+      await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, images);
+      
+      // CRITICAL FIX: Remove elements from DOM that are no longer in images
+      const layer = getOrCreateLayer();
+      if (layer) {
+        const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
+        const existingIds = new Set();
+        
+        // Update existing and create new images locally
+        for (const [id, imageData] of Object.entries(images)) {
+          existingIds.add(id);
+          const existing = document.getElementById(id);
+          if (existing) {
+            // Update existing element
+            updateImageElement(existing, imageData);
+          } else {
+            // Create new element
+            const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+            const maskTypeData = imageData.maskType || 'rect';
+            const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
+            const circleRadiusData = imageData.circleRadius || null;
+            createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
+          }
+          
+          // Update global variables for each image
+          updateImageLocalVars(id, {
+            maskType: imageData.maskType || 'rect',
+            circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+            circleRadius: imageData.circleRadius,
+            crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+            scale: imageData.scale || 1,
+            isCropping: imageData.isCropping || false
+          });
+        }
+        
+        // Remove elements that are no longer in images
+        existingElements.forEach(element => {
+          if (!existingIds.has(element.id)) {
+            // Clear runtime caches to prevent resurrection
+            clearImageCaches(element.id);
+            // Clean up z-index
+            ZIndexManager.remove(element.id);
+            console.log(`[WB-E] setAllImages: [${timestamp}] GM removing element: ${element.id}`);
+            element.remove();
+          }
+        });
+      }
+      
+      // Emit to all (authoritative state, not merged)
+      console.log(`[WB-E] setAllImages: [${timestamp}] GM emitting socket update with ${imageIds.length} images (authoritative state)`);
+      game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images });
     } else {
       const layer = getOrCreateLayer();
       // Player sends request GM through socket

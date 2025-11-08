@@ -1268,7 +1268,7 @@ async function massDeleteSelected() {
     const texts = await TextTools.getAllTexts();
     const images = await ImageTools.getAllImages();
     
-    // Remove selected objects from the data
+    // Remove selected objects from the data (but NOT from DOM yet)
     selectedObjects.forEach(id => {
       const container = document.getElementById(id);
       if (!container) return;
@@ -1278,19 +1278,16 @@ async function massDeleteSelected() {
         delete texts[id];
         // Clean up z-index
         ZIndexManager.remove(id);
-        // Remove from DOM
-        container.remove();
       } else if (container.classList.contains("wbe-canvas-image-container")) {
         // Remove from images data
         delete images[id];
         // Clean up z-index
         ZIndexManager.remove(id);
-        // Remove from DOM
-        container.remove();
       }
     });
     
     // Save all texts and images with socket updates
+    // These functions will handle DOM removal and socket broadcasting
     await TextTools.setAllTexts(texts);
     await ImageTools.setAllImages(images);
     
