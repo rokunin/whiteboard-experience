@@ -2260,6 +2260,9 @@ function createTextElement(
     const keydownHandler = async (e) => {
       if (selectedTextId !== id) return;
       
+      // CRITICAL FIX: Don't intercept events if an image is selected (let image handler process it)
+      if (window.ImageTools?.selectedImageId) return;
+      
       // Z-index controls - raise/lower z-index
       // Skip if mass selection is active (let whiteboard-select handle it)
       if (!isEditing && globalThis.selectedObjects?.size > 1) return;
@@ -3059,7 +3062,20 @@ async function setAllTexts(texts) {
         game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts });
       } else {
         // Игрок отправляет запрос GM через сокет
-        game.socket.emit(`module.${MODID}`, { type: "textUpdateRequest", texts, userId: game.user.id });
+        // CRITICAL FIX: Добавить rank из Manager для всех текстов без rank
+        const textsWithRank = {};
+        for (const [id, textData] of Object.entries(texts)) {
+          textsWithRank[id] = { ...textData };
+          // Если rank отсутствует, получить из Manager
+          if (!textsWithRank[id].rank && window.ZIndexManager && typeof window.ZIndexManager.getRank === 'function') {
+            const rank = window.ZIndexManager.getRank(id);
+            if (rank) {  // Защита: добавляем только если rank существует
+              textsWithRank[id].rank = rank;
+            }
+          }
+        }
+        
+        game.socket.emit(`module.${MODID}`, { type: "textUpdateRequest", texts: textsWithRank, userId: game.user.id });
         
         // Обновляем локально для немедленной реакции UI у игрока
         const layer = getOrCreateLayer();
