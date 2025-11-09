@@ -186,6 +186,8 @@ Hooks.once("ready", async () => {
                 }
 
                 // Safe to update now
+                const isSelected = TextTools.selectedTextId === id;
+                
                 // Update text content - check for span first
                 const textSpan = textElement.querySelector(".wbe-text-background-span");
                 if (textSpan) {
@@ -227,6 +229,22 @@ Hooks.once("ready", async () => {
 
                 // Update resize handle position after scale/size changes
                 TextTools.updateTextUI(existing);
+                
+                // FIX: Always update panel position if text is selected (like local drag does)
+                if (isSelected) {
+                  requestAnimationFrame(() => {
+                    // Double-check selection is still valid after DOM update
+                    if (TextTools.selectedTextId === id) {
+                      if (window.wbeColorPanel && window.wbeColorPanelUpdate) {
+                        // Panel exists - just update position
+                        window.wbeColorPanelUpdate();
+                      } else if (window.wbeSafeReshowColorPicker) {
+                        // Panel was killed - recreate it
+                        window.wbeSafeReshowColorPicker(id, 0);
+                      }
+                    }
+                  });
+                }
               }
             } else {
               // Sync rank BEFORE creating element (like images) - ensures correct rank is used during creation
@@ -347,6 +365,8 @@ Hooks.once("ready", async () => {
               }
 
               // Safe to update now
+              const isSelected = TextTools.selectedTextId === id;
+              
               // Update text content - check for span first
               const textSpan = textElement.querySelector(".wbe-text-background-span");
               if (textSpan) {
@@ -407,6 +427,22 @@ Hooks.once("ready", async () => {
 
               // Update resize handle position after scale/size changes
               TextTools.updateTextUI(existing);
+              
+              // FIX: Always update panel position if text is selected (like local drag does)
+              if (isSelected) {
+                requestAnimationFrame(() => {
+                  // Double-check selection is still valid after DOM update
+                  if (TextTools.selectedTextId === id) {
+                    if (window.wbeColorPanel && window.wbeColorPanelUpdate) {
+                      // Panel exists - just update position
+                      window.wbeColorPanelUpdate();
+                    } else if (window.wbeSafeReshowColorPicker) {
+                      // Panel was killed - recreate it
+                      window.wbeSafeReshowColorPicker(id, 0);
+                    }
+                  }
+                });
+              }
             }
           } else {
             // Создаем новый элемент
@@ -543,8 +579,32 @@ Hooks.once("ready", async () => {
               console.log(`[WB-E] GM skipping socket update for image ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
               continue; // Don't update! This prevents crop changes!
             }
+            const isSelected = ImageTools.selectedImageId === id;
+            
             // Обновляем существующий элемент
             ImageTools.updateImageElement(existing, imageData);
+            
+            // FIX: Always update panel position if image is selected (like local drag does)
+            if (isSelected) {
+              requestAnimationFrame(() => {
+                // Double-check selection is still valid after DOM update
+                if (ImageTools.selectedImageId === id) {
+                  if (window.wbeImageControlPanel && window.wbeImageControlPanelUpdate) {
+                    // Panel exists - just update position
+                    window.wbeImageControlPanelUpdate();
+                  } else if (window.wbeShowImageControlPanel) {
+                    // Panel was killed - recreate it
+                    const imageElement = existing.querySelector(".wbe-canvas-image");
+                    if (imageElement) {
+                      const maskType = ImageTools.getImageLocalVars(id)?.maskType || 'rect';
+                      // Create panel without callbacks - they're only needed for crop mode
+                      // and will be set up when crop mode is activated
+                      window.wbeShowImageControlPanel(imageElement, existing, maskType, {});
+                    }
+                  }
+                }
+              });
+            }
             
             // Sync rank if present in socket data (fractional indexing)
             // Only update if rank actually changed to avoid unnecessary DOM updates
@@ -641,8 +701,32 @@ Hooks.once("ready", async () => {
               console.log(`[WB-E] Skipping socket update for image ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
               continue; // Don't update! This prevents crop changes!
             }
+            const isSelected = ImageTools.selectedImageId === id;
+            
             // Обновляем существующий элемент
             ImageTools.updateImageElement(existing, imageData);
+            
+            // FIX: Always update panel position if image is selected (like local drag does)
+            if (isSelected) {
+              requestAnimationFrame(() => {
+                // Double-check selection is still valid after DOM update
+                if (ImageTools.selectedImageId === id) {
+                  if (window.wbeImageControlPanel && window.wbeImageControlPanelUpdate) {
+                    // Panel exists - just update position
+                    window.wbeImageControlPanelUpdate();
+                  } else if (window.wbeShowImageControlPanel) {
+                    // Panel was killed - recreate it
+                    const imageElement = existing.querySelector(".wbe-canvas-image");
+                    if (imageElement) {
+                      const maskType = ImageTools.getImageLocalVars(id)?.maskType || 'rect';
+                      // Create panel without callbacks - they're only needed for crop mode
+                      // and will be set up when crop mode is activated
+                      window.wbeShowImageControlPanel(imageElement, existing, maskType, {});
+                    }
+                  }
+                }
+              });
+            }
             
             // Sync rank if present in socket data (fractional indexing)
             // Only update if rank actually changed to avoid unnecessary DOM updates
