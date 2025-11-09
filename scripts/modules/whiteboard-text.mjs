@@ -36,8 +36,8 @@ const DEFAULT_FONT_FAMILY = "Arial";
 const DEFAULT_FONT_SIZE = 16;
 
 // Resize handle positioning
-const RESIZE_HANDLE_OFFSET_X = -3; // pixels from right edge (negative = inside, positive = outside)
-const RESIZE_HANDLE_OFFSET_Y = -3; // pixels from bottom edge (negative = inside, positive = outside)
+const RESIZE_HANDLE_OFFSET_X = -6; // pixels from right edge (negative = inside, positive = outside) - half of handle width (12px)
+const RESIZE_HANDLE_OFFSET_Y = -6; // pixels from bottom edge (negative = inside, positive = outside) - half of handle height (12px)
 
 // Map of element-id -> disposer function
 let pendingColorPickerTimeout = null;
@@ -1283,8 +1283,42 @@ async function showColorPicker() {
 
   const updatePanelPosition = () => {
     const rect = textElement.getBoundingClientRect();
-    panel.style.left = `${rect.left + rect.width / 2}px`;
-    panel.style.top = `${rect.top - 110}px`;
+    
+    // Get panel dimensions (use fallback values if panel is not yet rendered)
+    const panelRect = panel.getBoundingClientRect();
+    const panelWidth = panelRect.width || 300; // Fallback panel width
+    const panelHeight = panelRect.height || 120; // Fallback panel height
+    
+    const minMargin = 10; // Minimum margin from screen edges
+    const topThreshold = 150; // Threshold for switching panel to bottom position
+    
+    // HORIZONTAL POSITIONING
+    // Center panel relative to object
+    let panelCenterX = rect.left + rect.width / 2;
+    const halfPanelWidth = panelWidth / 2;
+    
+    // Check left boundary - shift panel if it would overflow
+    if (panelCenterX - halfPanelWidth < minMargin) {
+      panelCenterX = minMargin + halfPanelWidth;
+    }
+    
+    // Check right boundary - shift panel if it would overflow
+    if (panelCenterX + halfPanelWidth > window.innerWidth - minMargin) {
+      panelCenterX = window.innerWidth - minMargin - halfPanelWidth;
+    }
+    
+    panel.style.left = `${panelCenterX}px`;
+    
+    // VERTICAL POSITIONING
+    // If object is too close to top edge, place panel below object
+    if (rect.top < topThreshold) {
+      // Place panel below object
+      panel.style.top = `${rect.bottom + minMargin}px`;
+    } else {
+      // Place panel above object (original behavior: 110px above object top)
+      panel.style.top = `${rect.top - 110}px`;
+    }
+    
     positionSubpanel();
   };
 
@@ -1333,6 +1367,7 @@ async function showColorPicker() {
   panel.cleanup = cleanup;
   window.wbeColorPanel = panel;
   window.wbeColorPanelUpdate = updatePanelPosition;
+  window.wbeSafeReshowColorPicker = safeReshowColorPicker; // Export for main.mjs socket handler
 }
 
 function safeReshowColorPicker(targetId, delayMs = 0) {
@@ -1724,10 +1759,10 @@ function createTextElement(
     textSpan.style.cssText = `
       display: inline;
       background-color: ${spanBgColor};
-      padding: 4px 8px 4px 2px;
+      padding: 4px 4px 4px 2px;
       box-decoration-break: clone;
       -webkit-box-decoration-break: clone;
-      line-height: 1.68;
+      line-height: 1.53;
     `;
     
     textElement.appendChild(textSpan);
@@ -1780,17 +1815,16 @@ function createTextElement(
       position: absolute;
       left: 0;
       top: 0;
-      width: 6px;
-      height: 6px;
+      width: 12px;
+      height: 12px;
       display: none;
-      background:rgb(255, 255, 255);
-      border: 1px solid #4a9eff;
+      background: #4a9eff;
+      border: 2px solid white;
       border-radius: 50%;
       cursor: nwse-resize;
       z-index: ${ZIndexConstants.TEXT_RESIZE_HANDLE};
       pointer-events: auto;
       user-select: none;
-      transform-origin: right center;
     `;
     container.appendChild(resizeHandle);
     
@@ -1831,9 +1865,8 @@ function createTextElement(
     const editBlurHandler = async (e) => {
       if (!isEditing) return;
       
-      // Ignore if clicking on the text element itself or the span
-      const textSpan = textElement.querySelector(".wbe-text-background-span");
-      if (textElement.contains(e.target) || (textSpan && textSpan.contains(e.target))) return;
+      // Ignore if clicking anywhere inside the container (including textElement, span, and all children)
+      if (container.contains(e.target)) return;
       
       // Ignore if clicking on color panel
       if (window.wbeColorPanel?.contains(e.target)) return;
@@ -1925,13 +1958,11 @@ function createTextElement(
       if (isSelected) {
         resizeHandle.style.display = "flex";
         resizeHandle.style.opacity = "0";
-        resizeHandle.style.transform = "scale(0.8)";
         
         setTimeout(() => {
           requestAnimationFrame(() => {
-            resizeHandle.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+            resizeHandle.style.transition = "opacity 0.2s ease";
             resizeHandle.style.opacity = "1";
-            resizeHandle.style.transform = "scale(1)";
           });
         }, 100);
       }
@@ -1940,20 +1971,20 @@ function createTextElement(
     
     // Двойной клик для редактирования
     textElement.addEventListener("dblclick", async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      
       // NEW: Check if locked by another user
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
         return;
       }
       
-      // NEW: Toggle edit mode
+      // NEW: If already editing, don't interfere - let browser handle word selection
       if (isEditing) {
-        // Already editing - exit edit mode
-        await exitEditMode();
+        // Already editing - don't prevent default, let browser select word
         return;
       }
+      
+      // Prevent default only when entering edit mode
+      e.preventDefault();
+      e.stopPropagation();
       
       // NEW: Enter edit mode with lock
       isEditing = true;
@@ -1993,20 +2024,14 @@ function createTextElement(
       
       // Hide scale gizmo during editing with smooth animation
       if (resizeHandle.style.display !== "none") {
-        resizeHandle.style.transition = "opacity 0.15s ease, transform 0.15s ease";
+        resizeHandle.style.transition = "opacity 0.15s ease";
         resizeHandle.style.opacity = "0";
-        resizeHandle.style.transform = "scale(0.8)";
         setTimeout(() => {
           resizeHandle.style.display = "none";
         }, 150);
       }
       
-      // Выделяем весь текст
-      const range = document.createRange();
-      range.selectNodeContents(editableElement);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
+      // Don't auto-select text on double-click - let user position cursor naturally
       
     });
 
@@ -2121,14 +2146,12 @@ function createTextElement(
       // container.style.setProperty("cursor", "move", "important"); // Removed move cursor
       resizeHandle.style.display = "flex";
       resizeHandle.style.opacity = "0";
-      resizeHandle.style.transform = "scale(0.8)";
       updateHandlePosition();
       
       // Animate scale handle appearance
       requestAnimationFrame(() => {
-        resizeHandle.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+        resizeHandle.style.transition = "opacity 0.2s ease";
         resizeHandle.style.opacity = "1";
-        resizeHandle.style.transform = "scale(1)";
       });
       
       
@@ -2686,9 +2709,8 @@ function createTextElement(
         resizeStartScale = textElement.offsetWidth;
         
         // Hide scaling gizmo during resize with smooth animation
-        resizeHandle.style.transition = "opacity 0.15s ease, transform 0.15s ease";
+        resizeHandle.style.transition = "opacity 0.15s ease";
         resizeHandle.style.opacity = "0";
-        resizeHandle.style.transform = "scale(0.8)";
         setTimeout(() => {
           resizeHandle.style.display = "none";
         }, 150);
@@ -2712,9 +2734,8 @@ function createTextElement(
         resizeStartScale = textElement.offsetWidth;
         
         // Hide scaling gizmo during resize with smooth animation
-        resizeHandle.style.transition = "opacity 0.15s ease, transform 0.15s ease";
+        resizeHandle.style.transition = "opacity 0.15s ease";
         resizeHandle.style.opacity = "0";
-        resizeHandle.style.transform = "scale(0.8)";
         setTimeout(() => {
           resizeHandle.style.display = "none";
         }, 150);
@@ -2737,7 +2758,7 @@ function createTextElement(
       const clampedScale = Math.max(0.3, Math.min(3.0, newScale));
       
       // Применяем ТОЛЬКО scale к textElement
-      textElement.style.transform = `scale(${clampedScale})`;
+      textElement.style.transform = `scale(${newScale})`;
       
       // Обновляем позицию handle
       updateHandlePosition();
@@ -2785,14 +2806,12 @@ function createTextElement(
         if (isSelected) {
           resizeHandle.style.display = "flex";
           resizeHandle.style.opacity = "0";
-          resizeHandle.style.transform = "scale(0.8)";
           
           // Animate scale handle reappearance with slight delay
           setTimeout(() => {
             requestAnimationFrame(() => {
-              resizeHandle.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+              resizeHandle.style.transition = "opacity 0.2s ease";
               resizeHandle.style.opacity = "1";
-              resizeHandle.style.transform = "scale(1)";
             });
           }, 100);
         }

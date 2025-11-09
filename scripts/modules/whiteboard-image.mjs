@@ -2379,8 +2379,42 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
 
   const updatePanelPosition = () => {
     const rect = imageElement.getBoundingClientRect();
-    panel.style.left = `${rect.left + rect.width / 2}px`;
-    panel.style.top = `${rect.top - 110}px`;
+    
+    // Get panel dimensions (use fallback values if panel is not yet rendered)
+    const panelRect = panel.getBoundingClientRect();
+    const panelWidth = panelRect.width || 300; // Fallback panel width
+    const panelHeight = panelRect.height || 120; // Fallback panel height
+    
+    const minMargin = 10; // Minimum margin from screen edges
+    const topThreshold = 150; // Threshold for switching panel to bottom position
+    
+    // HORIZONTAL POSITIONING
+    // Center panel relative to object
+    let panelCenterX = rect.left + rect.width / 2;
+    const halfPanelWidth = panelWidth / 2;
+    
+    // Check left boundary - shift panel if it would overflow
+    if (panelCenterX - halfPanelWidth < minMargin) {
+      panelCenterX = minMargin + halfPanelWidth;
+    }
+    
+    // Check right boundary - shift panel if it would overflow
+    if (panelCenterX + halfPanelWidth > window.innerWidth - minMargin) {
+      panelCenterX = window.innerWidth - minMargin - halfPanelWidth;
+    }
+    
+    panel.style.left = `${panelCenterX}px`;
+    
+    // VERTICAL POSITIONING
+    // If object is too close to top edge, place panel below object
+    if (rect.top < topThreshold) {
+      // Place panel below object
+      panel.style.top = `${rect.bottom + minMargin}px`;
+    } else {
+      // Place panel above object (original behavior: 110px above object top)
+      panel.style.top = `${rect.top - 110}px`;
+    }
+    
     positionSubpanel();
   };
 
@@ -2489,6 +2523,7 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
 
   window.wbeImageControlPanel = panel;
   window.wbeImageControlPanelUpdate = updatePanelPosition;
+  window.wbeShowImageControlPanel = showImageControlPanel; // Export for main.mjs socket handler
 }
 
 
@@ -2503,24 +2538,138 @@ function installGlobalMaskPanHooks() {
 
   let isCanvasPanningGlobal = false;
   let savedImageIdBeforePan = null;
+  let rightMouseDownX = null;
+  let rightMouseDownY = null;
+  const RIGHT_CLICK_DRAG_THRESHOLD = 5; // pixels
+  
+  // Track click targets that need pointer-events restoration
+  const clickTargetsToRestore = new Map();
 
-  // Start pan on ANY right-button down; close panel immediately
+  // Helper: Temporarily disable pointer-events on click targets to allow canvas pan/zoom
+  const disableClickTargetsForCanvasEvents = () => {
+    if (!selectedImageId) return;
+    const container = document.getElementById(selectedImageId);
+    if (!container) return;
+    
+    // CRITICAL: Don't disable if in crop mode - crop handles need the click target
+    const isCropping = container.dataset.lockedBy === game.user.id && 
+                       (container.dataset.cropping === 'true' || 
+                        container.querySelector('.wbe-crop-handle-top'));
+    if (isCropping) return;
+    
+    const clickTarget = container.querySelector('.wbe-image-click-target');
+    if (clickTarget && clickTarget.style.pointerEvents !== 'none') {
+      // Save original state
+      clickTargetsToRestore.set(clickTarget, clickTarget.style.pointerEvents);
+      // Temporarily disable to allow events to pass through to canvas
+      clickTarget.style.setProperty("pointer-events", "none", "important");
+    }
+  };
+
+  // Helper: Restore pointer-events on click targets
+  const restoreClickTargets = () => {
+    clickTargetsToRestore.forEach((originalValue, clickTarget) => {
+      if (clickTarget.parentNode) { // Element still exists
+        clickTarget.style.setProperty("pointer-events", originalValue || "auto", "important");
+      }
+    });
+    clickTargetsToRestore.clear();
+  };
+
+  // Track right mouse button drag (not just click)
+  // This allows right-click menu in the future while still enabling pan on drag
+  let clickRestoreTimeout = null;
+  
   document.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
 
-    // Kill panels completely (like text panels do)
-    killImageControlPanel();
-    isCanvasPanningGlobal = true;
+    // Save initial position to detect drag vs click
+    rightMouseDownX = e.clientX;
+    rightMouseDownY = e.clientY;
+    isCanvasPanningGlobal = false; // Will be set to true on first movement
+    
+    // CRITICAL: Disable pointer-events IMMEDIATELY on right-click mousedown
+    // This allows Foundry's pan handler to see events from the canvas, not our clickTarget
+    // If it's just a click (no drag), we'll restore it quickly
+    disableClickTargetsForCanvasEvents();
+    
+    // Clear any pending restore timeout
+    if (clickRestoreTimeout) {
+      clearTimeout(clickRestoreTimeout);
+      clickRestoreTimeout = null;
+    }
+    
+    // Set a timeout to restore pointer-events if no drag is detected
+    // This allows right-click menu to work if user just clicks without dragging
+    clickRestoreTimeout = setTimeout(() => {
+      if (!isCanvasPanningGlobal) {
+        // No drag detected - restore pointer-events for potential right-click menu
+        restoreClickTargets();
+      }
+      clickRestoreTimeout = null;
+    }, 100); // 100ms should be enough to detect a click vs drag
+  }, true);
+
+  // Detect right-button drag (mousedown + mousemove)
+  document.addEventListener("mousemove", (e) => {
+    if (rightMouseDownX === null || rightMouseDownY === null) return;
+    if (!e.buttons || (e.buttons & 2) === 0) {
+      // Right button not pressed anymore - restore click targets
+      if (clickRestoreTimeout) {
+        clearTimeout(clickRestoreTimeout);
+        clickRestoreTimeout = null;
+      }
+      restoreClickTargets();
+      rightMouseDownX = null;
+      rightMouseDownY = null;
+      return;
+    }
+
+    // Check if mouse moved enough to be considered a drag
+    const deltaX = Math.abs(e.clientX - rightMouseDownX);
+    const deltaY = Math.abs(e.clientY - rightMouseDownY);
+    
+    if (deltaX > RIGHT_CLICK_DRAG_THRESHOLD || deltaY > RIGHT_CLICK_DRAG_THRESHOLD) {
+      // This is a drag, not a click - enable pan
+      if (!isCanvasPanningGlobal) {
+        isCanvasPanningGlobal = true;
+        
+        // Cancel the restore timeout - we're dragging, so keep pointer-events disabled
+        if (clickRestoreTimeout) {
+          clearTimeout(clickRestoreTimeout);
+          clickRestoreTimeout = null;
+        }
+        
+        // Kill panels when drag starts
+        killImageControlPanel();
+        // Ensure click target is disabled (it should already be from mousedown, but double-check)
+        disableClickTargetsForCanvasEvents();
+      }
+    }
   }, true);
 
   // On pan end, reopen for the currently selected image (if any)
   document.addEventListener("mouseup", (e) => {
     if (e.button !== 2) return;
-    if (!isCanvasPanningGlobal) return;
+    
+    const wasPanning = isCanvasPanningGlobal;
     isCanvasPanningGlobal = false;
+    
+    // Clear any pending restore timeout
+    if (clickRestoreTimeout) {
+      clearTimeout(clickRestoreTimeout);
+      clickRestoreTimeout = null;
+    }
+    
+    // Restore click targets immediately
+    restoreClickTargets();
+    
+    rightMouseDownX = null;
+    rightMouseDownY = null;
 
-    // Recreate appropriate panel after canvas settles (like text panels do)
-    if (selectedImageId) {
+    // Only restore panel if we were actually panning (not just a click)
+    if (wasPanning && selectedImageId) {
+      // Recreate appropriate panel after canvas settles (like text panels do)
       // Check if the selected image is frozen to show the right panel
       if (isImageFrozen(selectedImageId)) {
         // Show frozen panel for frozen images
@@ -2532,24 +2681,35 @@ function installGlobalMaskPanHooks() {
     }
   }, true);
 
-  // Zoom wheel should also temporarily hide + then restore
+  // Zoom wheel should always work, even over selected images
+  // Temporarily disable click target to allow wheel events to reach canvas
   document.addEventListener("wheel", (e) => {
     if (e.deltaY === 0) return;
-    if (!selectedImageId) return;
-
-    // Kill and recreate appropriate panel (like text panels do)
-    killImageControlPanel();
+    
+    // Temporarily disable click target to allow wheel events to pass through to canvas
+    disableClickTargetsForCanvasEvents();
+    
+    // CRITICAL: Restore after Foundry has processed the event (use double RAF for better timing)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        restoreClickTargets();
+      });
+    });
+    
+    // Manage panels
     if (selectedImageId) {
-      // Check if the selected image is frozen to show the right panel
-      if (isImageFrozen(selectedImageId)) {
-        // Show frozen panel for frozen images
-        safeReshowFrozenPanel(selectedImageId, 200);
-      } else {
-        // Show normal panel for normal images
-        safeReshowImagePanel(selectedImageId, 200);
+      killImageControlPanel();
+      // Restore panel after zoom
+      if (selectedImageId) {
+        // Check if the selected image is frozen to show the right panel
+        if (isImageFrozen(selectedImageId)) {
+          safeReshowFrozenPanel(selectedImageId, 200);
+        } else {
+          safeReshowImagePanel(selectedImageId, 200);
+        }
       }
     }
-  }, { passive: true });
+  }, { capture: true, passive: true });
 }
 
 function safeReshowImagePanel(targetId, delayMs = 0) {
@@ -5432,6 +5592,11 @@ function updateImageUIStates(container, isSelected, isCropping) {
     if (selectionBorder) selectionBorder.style.display = "none";
     if (resizeHandle) resizeHandle.style.display = "none";
 
+    // CRITICAL: Ensure permanent border has pointer-events: none to allow canvas pan/zoom
+    if (permanentBorder) {
+      permanentBorder.style.setProperty("pointer-events", "none", "important");
+    }
+
     // Disable click target pointer events when not selected to allow canvas drag/pan
     if (clickTarget) {
       clickTarget.style.setProperty("pointer-events", "none", "important");
@@ -5825,7 +5990,17 @@ async function handleImagePasteFromClipboard(file) {
     if (isGM) {
       // GM: Try direct upload only
       try {
-        uploadResult = await foundry.applications.apps.FilePicker.implementation.upload("data", `worlds/${game.world.id}/`, newFile, { name: filename });
+        let uploadMethod;
+    
+        // V12+ использует новый путь
+        if (foundry.applications?.apps?.FilePicker?.implementation) {
+            uploadMethod = foundry.applications.apps.FilePicker.implementation;
+        } else {
+            // V11 и ниже используют глобальный FilePicker
+            uploadMethod = FilePicker;
+        }
+        
+        uploadResult = await uploadMethod.upload("data", `worlds/${game.world.id}/`, newFile, { name: filename });
         const directTime = Date.now() - startTime;
       } catch (error) {
         const directTime = Date.now() - startTime;
@@ -5835,7 +6010,19 @@ async function handleImagePasteFromClipboard(file) {
     } else {
       // Player: Try direct upload only (no timeout, no base64 fallback)
       try {
-        uploadResult = await foundry.applications.apps.FilePicker.implementation.upload("data", `worlds/${game.world.id}/`, newFile, { name: filename });
+        
+        let uploadMethod;
+    
+        // V12+ использует новый путь
+        if (foundry.applications?.apps?.FilePicker?.implementation) {
+            uploadMethod = foundry.applications.apps.FilePicker.implementation;
+        } else {
+            // V11 и ниже используют глобальный FilePicker
+            uploadMethod = FilePicker;
+        }
+        uploadResult = await uploadMethod.upload("data", `worlds/${game.world.id}/`, newFile, { name: filename });
+        
+        
         const directTime = Date.now() - startTime;
       } catch (error) {
         const directTime = Date.now() - startTime;
