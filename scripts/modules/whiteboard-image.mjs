@@ -2412,7 +2412,7 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
       panel.style.top = `${rect.bottom + minMargin}px`;
     } else {
       // Place panel above object (original behavior: 110px above object top)
-      panel.style.top = `${rect.top - 110}px`;
+    panel.style.top = `${rect.top - 110}px`;
     }
     
     positionSubpanel();

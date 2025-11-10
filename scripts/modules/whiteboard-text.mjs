@@ -24,7 +24,7 @@ const SCALE_SENSITIVITY = 0.01; // Sensitivity for text scaling
 
 const DEFAULT_TEXT_COLOR = "#000000";
 const DEFAULT_BACKGROUND_COLOR = "#ffffff";
-const DEFAULT_SPAN_BACKGROUND_COLOR = "#ffffff 0.5";
+const DEFAULT_SPAN_BACKGROUND_COLOR = "#ffffff";
 const DEFAULT_BORDER_HEX = DEFAULT_TEXT_COLOR;
 const DEFAULT_BORDER_OPACITY = 100;
 const DEFAULT_BORDER_WIDTH = 0;
@@ -1641,51 +1641,48 @@ async function handleTextPasteFromClipboard(text) {
 }
 
 async function injectTextTool() {
-    const sc = ui.controls;
-    if (!sc || !sc.controls) return;
+  const sc = ui.controls;
+  if (!sc || !sc.controls) return;
+
+  const isV11 = Array.isArray(sc.controls);
+  const controlsData = sc.controls;
   
-    const groupsObj = sc.controls;
-    const group =
-      groupsObj.tokens || groupsObj.token || groupsObj.notes ||
-      Object.values(groupsObj)[0];
-  
-    if (!group) return;
-  
-    const toolName = "wbe-text-tool";
-    const tool = {
-      name: toolName,
-      title: "Добавить текст на стол",
-      icon: "fas fa-font",
-      button: true,
-      onChange: async () => {
-        const { lastClickX, lastClickY } = getSharedVars();
-        await addTextToCanvas(lastClickX, lastClickY);
-      }
-    };
-  
-    const t = group.tools;
-    const exists = Array.isArray(t) ? t.some(x => x?.name === toolName) : t?.[toolName];
-    if (exists) return;
-  
-    if (Array.isArray(t)) t.push(tool);
-    else if (t && typeof t === "object") {
-      t[toolName] = tool;
-      if (Array.isArray(group._toolOrder)) group._toolOrder.push(toolName);
-    } else group.tools = [tool];
-  
-    await sc.render?.(true);
+  const group = isV11 
+    ? controlsData.find(g => g.name === "token" || g.name === "tokens")
+    : (controlsData.token || controlsData.tokens);
     
-    // Отслеживаем клики на кнопке инструмента
-    setTimeout(() => {
-      const toolButton = document.querySelector(`[data-tool="${toolName}"]`);
-      if (toolButton && !toolButton.dataset.wbeTextListener) {
-        toolButton.addEventListener("click", (e) => {
-          setLastClickX(e.clientX);
-          setLastClickY(e.clientY);
-        });
-        toolButton.dataset.wbeTextListener = "1";
-      }
-    }, 100);
+  if (!group) return;
+
+  const toolName = "wbe-text-tool";
+  
+  const exists = isV11
+    ? group.tools.find(t => t.name === toolName)
+    : group.tools[toolName];
+    
+  if (exists) return;
+
+  // Обработчик - создаёт текст в последней позиции мыши
+  const handler = async () => {
+    const { lastClickX, lastClickY } = getSharedVars();
+    await this.addTextToCanvas(lastClickX, lastClickY);
+  };
+
+  const tool = {
+    name: toolName,
+    title: "Добавить текст на стол",
+    icon: "fas fa-font",
+    button: true,
+    ...(isV11 ? { visible: true } : {}),
+    [isV11 ? 'onClick' : 'onChange']: handler
+  };
+
+  if (isV11) {
+    group.tools.push(tool);
+  } else {
+    group.tools[toolName] = tool;
+  }
+
+  setTimeout(() => sc.render(true), 10);
 }
 
 function createTextElement(
