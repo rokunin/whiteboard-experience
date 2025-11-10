@@ -1343,98 +1343,69 @@ async function injectFateCardTool() {
 }
 
 /* ----------------------- Mass Selection Tool ------------------ */
-// Load toggle state from localStorage, default to false (Ctrl+drag mode)
+// Load toggle state from localStorage, default to false (Shift+drag mode)
 let massSelectionToggleState = localStorage.getItem('wbe-mass-selection-toggle') === 'true';
 
 async function injectMassSelectionTool() {
   const sc = ui.controls;
   if (!sc || !sc.controls) return;
 
-  const groupsObj = sc.controls;
-  const group =
-    groupsObj.tokens || groupsObj.token || groupsObj.notes ||
-    Object.values(groupsObj)[0];
-
+  const isV11 = Array.isArray(sc.controls);
+  const controlsData = sc.controls;
+  
+  // Найти группу инструментов
+  const group = isV11 
+    ? controlsData.find(g => g.name === "token" || g.name === "tokens")
+    : (controlsData.token || controlsData.tokens);
+    
   if (!group) return;
 
   const toolName = "wbe-mass-selection";
-  const tool = {
-    name: toolName,
-    title: massSelectionToggleState ?
-      "Mass Selection: ON (Default drag to select)" :
-      "Mass Selection: OFF (Ctrl+drag to select)",
-    icon: massSelectionToggleState ? "fas fa-mouse-pointer" : "fas fa-mouse-pointer",
-    button: true,
-    active: massSelectionToggleState,
-    onChange: async () => {
-      // Toggle mass selection mode
-      massSelectionToggleState = !massSelectionToggleState;
+  
+  // Проверить существование
+  const exists = isV11
+    ? group.tools.find(t => t.name === toolName)
+    : group.tools[toolName];
+    
+  if (exists) return;
 
-      // Save toggle state to localStorage
-      localStorage.setItem('wbe-mass-selection-toggle', massSelectionToggleState.toString());
-
-      // Update the tool state
-      tool.active = massSelectionToggleState;
-      tool.title = massSelectionToggleState ?
-        "Mass Selection: ON (Default drag to select)" :
-        "Mass Selection: OFF (Ctrl+drag to select)";
-
-      // Update MassSelection system
-      MassSelection.setToggleState(massSelectionToggleState);
-
-      // Clear any current selection when toggling
-      MassSelection.clear();
-
-      // Update button visual state
-      setTimeout(() => {
-        const toolButton = document.querySelector(`[data-tool="wbe-mass-selection"]`);
-        if (toolButton) {
-          toolButton.classList.remove("wbe-mass-selection-toggle-on", "wbe-mass-selection-toggle-off");
-          toolButton.classList.add(massSelectionToggleState ? "wbe-mass-selection-toggle-on" : "wbe-mass-selection-toggle-off");
-        }
-      }, 100);
-
-      // Show notification
-      if (massSelectionToggleState) {
-        ui.notifications.info("Mass Selection: ON - Default mouse drag to select objects");
-      } else {
-        ui.notifications.info("Mass Selection: OFF - Ctrl+drag to select objects");
-      }
-
-      // Re-render to update button appearance
-      await sc.render?.(true);
+  // Общий обработчик для обеих версий
+  const handler = async () => {
+    massSelectionToggleState = !massSelectionToggleState;
+    localStorage.setItem('wbe-mass-selection-toggle', massSelectionToggleState.toString());
+    
+    MassSelection.setToggleState(massSelectionToggleState);
+    MassSelection.clear();
+    
+    if (massSelectionToggleState) {
+      ui.notifications.info("Mass Selection: ON - Default mouse drag to select objects");
+    } else {
+      ui.notifications.info("Mass Selection: OFF - Shift+drag to select objects");
     }
+    
+    setTimeout(() => sc.render(true), 10);
   };
 
-  const t = group.tools;
-  const exists = Array.isArray(t) ? t.some(x => x?.name === toolName) : t?.[toolName];
-  if (exists) {
-    // Update existing tool
-    const existingTool = Array.isArray(t) ? t.find(x => x?.name === toolName) : t[toolName];
-    if (existingTool) {
-      existingTool.active = massSelectionToggleState;
-      existingTool.title = massSelectionToggleState ?
-        "Mass Selection: ON (Default drag to select)" :
-        "Mass Selection: OFF (Ctrl+drag to select)";
-    }
-    return;
+  // Создать инструмент с правильным полем для версии
+  const tool = {
+    name: toolName,
+    title: massSelectionToggleState 
+      ? "Mass Selection: ON (Default drag to select)" 
+      : "Mass Selection: OFF (Shift+drag to select)",
+    icon: "fas fa-mouse-pointer",
+    button: true,
+    ...(isV11 ? { visible: true } : { active: massSelectionToggleState }),
+    [isV11 ? 'onClick' : 'onChange']: handler // Computed property name!
+  };
+
+  // Добавить инструмент
+  if (isV11) {
+    group.tools.unshift(tool);
+  } else {
+    group.tools[toolName] = tool;
   }
 
-  if (Array.isArray(t)) t.push(tool);
-  else if (t && typeof t === "object") {
-    t[toolName] = tool;
-    if (Array.isArray(group._toolOrder)) group._toolOrder.unshift(toolName); // Add to beginning
-  } else group.tools = [tool];
-
-  await sc.render?.(true);
-
-  // Apply initial visual state
-  setTimeout(() => {
-    const toolButton = document.querySelector(`[data-tool="wbe-mass-selection"]`);
-    if (toolButton) {
-      toolButton.classList.add(massSelectionToggleState ? "wbe-mass-selection-toggle-on" : "wbe-mass-selection-toggle-off");
-    }
-  }, 100);
+  setTimeout(() => sc.render(true), 10);
 }
 
 /* ----------------------- Text Tool ------------------ */

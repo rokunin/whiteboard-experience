@@ -3,15 +3,15 @@
  * Provides Foundry-style mass selection for text and image objects
  * 
  * Features:
- * - Ctrl+Click to select multiple objects
- * - Drag selection box to select multiple objects
+ * - Shift+Click to select multiple objects
+ * - Shift+Drag selection box to select multiple objects
  * - Keyboard shortcuts: Delete, Arrow keys, Ctrl+C/V, Escape
  * - Mass operations: move, delete, copy, paste
  * - Visual feedback with selection indicators
  * 
  * Usage:
- * 1. Hold Ctrl and click objects to select them
- * 2. Or drag a selection box around objects
+ * 1. Hold Shift and click objects to select them
+ * 2. Or Shift+Drag a selection box around objects
  * 3. Use keyboard shortcuts for operations:
  *    - Delete: Remove selected objects
  *    - Arrow keys: Move selected objects
@@ -46,7 +46,7 @@ let boundingBox = null; // Bounding box around all selected objects
 let selectionStartX = 0;
 let selectionStartY = 0;
 let isSelecting = false;
-let toggleState = false; // false = Ctrl+drag, true = default drag
+let toggleState = false; // false = Shift+drag, true = default drag
 
 // Mass drag state
 let massDragState = {
@@ -349,10 +349,10 @@ function installEventListeners() {
 function handleMassSelectedObjectClick(e, clickedContainer) {
   // For mass-selected objects, we only allow:
   // 1. Mass dragging (handled by installMassDragHandler)
-  // 2. Toggle selection (Ctrl+click to deselect from mass selection)
+  // 2. Toggle selection (Shift+click to deselect from mass selection)
   
-  if (e.ctrlKey || e.metaKey) {
-    // Ctrl+click: Toggle this object out of mass selection
+  if (e.shiftKey) {
+    // Shift+click: Toggle this object out of mass selection
     toggleObjectSelection(clickedContainer);
   }
   // Otherwise, do nothing - prevent individual selection
@@ -442,7 +442,7 @@ function installMassDragHandler() {
     // Check if we should start mass dragging based on toggle state
     const shouldStartMassDrag = toggleState ? 
       true : // Default mode - always start mass drag
-      (e.ctrlKey || e.metaKey); // Ctrl mode - only with Ctrl
+      e.shiftKey; // Shift mode - only with Shift
     
     e.preventDefault();
     e.stopPropagation();
@@ -579,7 +579,7 @@ function startBoundingBox(e) {
   // Check if we should start mass selection based on toggle state
   const shouldStartSelection = toggleState ? 
     true : // Default drag mode - always start selection
-    (e.ctrlKey || e.metaKey); // Ctrl+drag mode - only with Ctrl
+    e.shiftKey; // Shift+drag mode - only with Shift
   
   if (shouldStartSelection) {
     e.preventDefault();
