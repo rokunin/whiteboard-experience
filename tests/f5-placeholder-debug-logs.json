@@ -1,0 +1,128 @@
+{
+  "pasteLogs": [
+    {
+      "type": "log",
+      "text": "[F5 LOAD] Loading image from DB {id: wbe-image-1763120929014, scale: 0.585284, displayWidth: 349.999832, displayHeight: 283.27745600000003, displayWidthType: number}"
+    },
+    {
+      "type": "log",
+      "text": "[F5 LOAD] Calling createImageElement with {id: wbe-image-1763120929014, displayWidth: 349.999832, displayHeight: 283.27745600000003, displayWidthType: number, displayHeightType: number}"
+    },
+    {
+      "type": "log",
+      "text": "[PLACEHOLDER INIT] Raw params {id: wbe-image-1763120929014, displayWidth: false, displayHeight: 349.999832, displayWidthType: boolean, displayHeightType: number}"
+    },
+    {
+      "type": "log",
+      "text": "[PLACEHOLDER INIT] Using default placeholder {id: wbe-image-1763120929014, placeholderWidth: 200, placeholderHeight: 349.999832, scale: 0.585284, baseWidth: 341.71444973722157}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Preload callback {id: wbe-image-1763120929014, naturalWidth: 598, naturalHeight: 484, scale: 0.585284, finalScale: 0.585284}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Should update placeholder? {id: wbe-image-1763120929014, shouldUpdatePlaceholder: false, imageElementComplete: true, imageElementNaturalWidth: 598, placeholderWidth: 349.999832}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Skipped placeholder update (imageElement already complete) {id: wbe-image-1763120929014, currentWidth: 341.714px, currentHeight: 598px, currentTransform: scale(0.585284)}"
+    },
+    {
+      "type": "log",
+      "text": "[SAVE STATE] Calculated displayWidth/Height {id: wbe-image-1763120929014, displayWidth: 349.999832, displayHeight: 283.27745600000003, scale: 0.585284, complete: true}"
+    },
+    {
+      "type": "log",
+      "text": "[PLACEHOLDER INIT] Raw params {id: wbe-image-1763121355164, displayWidth: null, displayHeight: null, displayWidthType: object, displayHeightType: object}"
+    },
+    {
+      "type": "log",
+      "text": "[PLACEHOLDER INIT] Using default placeholder {id: wbe-image-1763121355164, placeholderWidth: 200, placeholderHeight: 200, scale: 0.12345679012345678, baseWidth: 1620}"
+    },
+    {
+      "type": "log",
+      "text": "[PLACEHOLDER INIT] Raw params {id: wbe-image-1763120929014, displayWidth: 349.999832, displayHeight: 283.27745600000003, displayWidthType: number, displayHeightType: number}"
+    },
+    {
+      "type": "log",
+      "text": "[PLACEHOLDER INIT] Using displayWidth/Height {id: wbe-image-1763120929014, displayWidth: 349.999832, displayHeight: 283.27745600000003, scale: 0.585284, baseWidth: 598}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Preload callback {id: wbe-image-1763120929014, naturalWidth: 598, naturalHeight: 484, scale: 0.585284, finalScale: 0.585284}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Size comparison {id: wbe-image-1763120929014, widthMatch: true, heightMatch: true, calculatedDisplayWidth: 349.999832, displayWidth: 349.999832}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Should update placeholder? {id: wbe-image-1763120929014, shouldUpdatePlaceholder: false, imageElementComplete: true, imageElementNaturalWidth: 598, placeholderWidth: 349.999832}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Skipped placeholder update (imageElement already complete) {id: wbe-image-1763120929014, currentWidth: 598px, currentHeight: 484px, currentTransform: scale(0.585284)}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Preload callback {id: wbe-image-1763121355164, naturalWidth: 2362, naturalHeight: 2835, scale: 0.12345679012345678, finalScale: 0.12345679012345678}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Should update placeholder? {id: wbe-image-1763121355164, shouldUpdatePlaceholder: false, imageElementComplete: true, imageElementNaturalWidth: 2362, placeholderWidth: 291.6049382716049}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Skipped placeholder update (imageElement already complete) {id: wbe-image-1763121355164, currentWidth: 1620px, currentHeight: 1620px, currentTransform: scale(0.123457)}"
+    },
+    {
+      "type": "log",
+      "text": "[SAVE STATE] Calculated displayWidth/Height {id: wbe-image-1763121355164, displayWidth: 291.605434, displayHeight: 350.000595, scale: 0.123457, complete: true}"
+    },
+    {
+      "type": "log",
+      "text": "[SAVE STATE] Calculated displayWidth/Height {id: wbe-image-1763120929014, displayWidth: 349.999832, displayHeight: 283.27745600000003, scale: 0.585284, complete: true}"
+    }
+  ],
+  "f5Logs": [
+    {
+      "type": "log",
+      "text": "[F5 LOAD] Loading image from DB {id: wbe-image-1763120929014, scale: 0.585284, displayWidth: 349.999832, displayHeight: 283.27745600000003, displayWidthType: number}"
+    },
+    {
+      "type": "log",
+      "text": "[F5 LOAD] Calling createImageElement with {id: wbe-image-1763120929014, displayWidth: 349.999832, displayHeight: 283.27745600000003, displayWidthType: number, displayHeightType: number}"
+    },
+    {
+      "type": "log",
+      "text": "[PLACEHOLDER INIT] Raw params {id: wbe-image-1763120929014, displayWidth: false, displayHeight: 349.999832, displayWidthType: boolean, displayHeightType: number}"
+    },
+    {
+      "type": "log",
+      "text": "[PLACEHOLDER INIT] Using default placeholder {id: wbe-image-1763120929014, placeholderWidth: 200, placeholderHeight: 349.999832, scale: 0.585284, baseWidth: 341.71444973722157}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Preload callback {id: wbe-image-1763120929014, naturalWidth: 598, naturalHeight: 484, scale: 0.585284, finalScale: 0.585284}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Should update placeholder? {id: wbe-image-1763120929014, shouldUpdatePlaceholder: false, imageElementComplete: true, imageElementNaturalWidth: 598, placeholderWidth: 349.999832}"
+    },
+    {
+      "type": "log",
+      "text": "[PRELOAD] Skipped placeholder update (imageElement already complete) {id: wbe-image-1763120929014, currentWidth: 341.714px, currentHeight: 598px, currentTransform: scale(0.585284)}"
+    },
+    {
+      "type": "log",
+      "text": "[SAVE STATE] Calculated displayWidth/Height {id: wbe-image-1763120929014, displayWidth: 349.999832, displayHeight: 283.27745600000003, scale: 0.585284, complete: true}"
+    },
+    {
+      "type": "log",
+      "text": "[SAVE STATE] Calculated displayWidth/Height {id: wbe-image-1763120929014, displayWidth: 349.999832, displayHeight: 283.27745600000003, scale: 0.585284, complete: true}"
+    }
+  ],
+  "imageAfterReload": false,
+  "imageDataAfterReload": null
+}

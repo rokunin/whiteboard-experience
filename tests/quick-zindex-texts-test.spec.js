@@ -198,7 +198,7 @@ test.describe('Quick Z-Index Texts Test', () => {
   
   // Helper: Login and setup for a specific user
   async function setupTestForUser(page, userId, userName) {
-    await page.goto('http://localhost:30000/join');
+    await page.goto('http://192.168.192.200:30000/join');
     await page.waitForTimeout(1000);
     
     // Wait for combobox to be ready and select option
@@ -1055,6 +1055,7 @@ test.describe('Quick Z-Index Texts Test', () => {
     console.log('\n=== BROWSER CONSOLE LOGS (Relevant) ===');
     const playerRelevantLogs = playerBrowserLogs.filter(log => 
       log.text.includes('[Z-Index]') ||
+      log.text.includes('[ZINDEX_ANALYSIS]') ||
       log.text.includes('[WB-E] setAllTexts') ||
       log.text.includes('[WB-E] getAllTexts') ||
       log.text.includes('[WB-E] GM received textUpdateRequest') ||
@@ -1068,6 +1069,7 @@ test.describe('Quick Z-Index Texts Test', () => {
     );
     const gmRelevantLogs = gmBrowserLogs.filter(log => 
       log.text.includes('[Z-Index]') ||
+      log.text.includes('[ZINDEX_ANALYSIS]') ||
       log.text.includes('[WB-E] setAllTexts') ||
       log.text.includes('[WB-E] getAllTexts') ||
       log.text.includes('[WB-E] GM received textUpdateRequest') ||
@@ -1082,18 +1084,48 @@ test.describe('Quick Z-Index Texts Test', () => {
     
     console.log(`\n--- Player Logs (${playerRelevantLogs.length} relevant) ---`);
     if (playerRelevantLogs.length > 0) {
-      playerRelevantLogs.slice(0, 20).forEach(log => {
-        const time = new Date(log.timestamp).toISOString().split('T')[1].slice(0, -1);
-        console.log(`[${time}] [PLAYER] [${log.type.toUpperCase()}] ${log.text}`);
-      });
+      // Show INVESTIGATE logs first, then others
+      const investigateLogs = playerRelevantLogs.filter(l => l.text.includes('[INVESTIGATE]'));
+      const otherLogs = playerRelevantLogs.filter(l => !l.text.includes('[INVESTIGATE]'));
+      
+      if (investigateLogs.length > 0) {
+        console.log(`\n[INVESTIGATE] logs (${investigateLogs.length}):`);
+        investigateLogs.slice(0, 100).forEach(log => {
+          const time = new Date(log.timestamp).toISOString().split('T')[1].slice(0, -1);
+          console.log(`[${time}] [PLAYER] [${log.type.toUpperCase()}] ${log.text}`);
+        });
+      }
+      
+      if (otherLogs.length > 0) {
+        console.log(`\nOther relevant logs (${otherLogs.length}):`);
+        otherLogs.slice(0, 20).forEach(log => {
+          const time = new Date(log.timestamp).toISOString().split('T')[1].slice(0, -1);
+          console.log(`[${time}] [PLAYER] [${log.type.toUpperCase()}] ${log.text}`);
+        });
+      }
     }
     
     console.log(`\n--- GM Logs (${gmRelevantLogs.length} relevant) ---`);
     if (gmRelevantLogs.length > 0) {
-      gmRelevantLogs.slice(0, 20).forEach(log => {
-        const time = new Date(log.timestamp).toISOString().split('T')[1].slice(0, -1);
-        console.log(`[${time}] [GM] [${log.type.toUpperCase()}] ${log.text}`);
-      });
+      // Show INVESTIGATE logs first, then others
+      const investigateLogs = gmRelevantLogs.filter(l => l.text.includes('[INVESTIGATE]'));
+      const otherLogs = gmRelevantLogs.filter(l => !l.text.includes('[INVESTIGATE]'));
+      
+      if (investigateLogs.length > 0) {
+        console.log(`\n[INVESTIGATE] logs (${investigateLogs.length}):`);
+        investigateLogs.slice(0, 100).forEach(log => {
+          const time = new Date(log.timestamp).toISOString().split('T')[1].slice(0, -1);
+          console.log(`[${time}] [GM] [${log.type.toUpperCase()}] ${log.text}`);
+        });
+      }
+      
+      if (otherLogs.length > 0) {
+        console.log(`\nOther relevant logs (${otherLogs.length}):`);
+        otherLogs.slice(0, 20).forEach(log => {
+          const time = new Date(log.timestamp).toISOString().split('T')[1].slice(0, -1);
+          console.log(`[${time}] [GM] [${log.type.toUpperCase()}] ${log.text}`);
+        });
+      }
     }
     
     console.log(`\nTotal browser logs captured: Player=${playerBrowserLogs.length}, GM=${gmBrowserLogs.length}`);

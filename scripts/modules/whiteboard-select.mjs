@@ -574,8 +574,6 @@ function startBoundingBox(e) {
     return;
   }
 
-  
-  
   // Check if we should start mass selection based on toggle state
   const shouldStartSelection = toggleState ? 
     true : // Default drag mode - always start selection
@@ -616,6 +614,7 @@ function dragBoundingBox(e) {
   const top = Math.min(selectionStartY, currentY);
   const width = Math.abs(currentX - selectionStartX);
   const height = Math.abs(currentY - selectionStartY);
+  
   
   selectionBox.style.left = `${left}px`;
   selectionBox.style.top = `${top}px`;
@@ -737,12 +736,13 @@ function updateSelectionFromBox(left, top, width, height) {
         // Use the click target's actual position and dimensions (already cropped and scaled)
         const clickTargetRect = clickTarget.getBoundingClientRect();
         
-        // Check if selection box intersects with the click target area
-        if (clickTargetRect.left < left + width && 
+        const intersects = clickTargetRect.left < left + width && 
             clickTargetRect.right > left && 
             clickTargetRect.top < top + height && 
-            clickTargetRect.bottom > top) {
+            clickTargetRect.bottom > top;
           
+        // Check if selection box intersects with the click target area
+        if (intersects) {
           selectedObjects.add(container.id);
           container.classList.add("wbe-mass-selected");
         } else {
@@ -806,11 +806,18 @@ function updateSelectionFromBox(left, top, width, height) {
  * Handle keyboard shortcuts
  */
 async function handleKeyDown(e) {
+  // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track keydown in whiteboard-select
+  console.log(`[INVESTIGATE] whiteboard-select handleKeyDown: key=${e.key}, selectedObjects.size=${selectedObjects.size}, selectedTextId=${window.TextTools?.selectedTextId?.slice(-6) || 'null'}, selectedImageId=${window.ImageTools?.selectedImageId?.slice(-6) || 'null'}`);
+  
   // Only handle if we have selected objects
-  if (selectedObjects.size === 0) return;
+  if (selectedObjects.size === 0) {
+    console.log(`[INVESTIGATE] whiteboard-select handleKeyDown: No mass selection, returning early`);
+    return;
+  }
   
   // Z-index controls for mass selection
   if (e.key === '[' || e.key === 'PageDown') {
+    console.log(`[INVESTIGATE] whiteboard-select handleKeyDown: Processing [ or PageDown for mass selection`);
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
@@ -835,7 +842,6 @@ async function handleKeyDown(e) {
         const objectType = objectId.startsWith('wbe-text-') ? 'TEXT' : objectId.startsWith('wbe-image-') ? 'IMAGE' : 'UNKNOWN';
         const newZIndex = ZIndexManager.get(objectId);
         console.log(`[Z-Index] SINGLE SELECTION | ${objectType} | ID: ${objectId} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
-        
         if (result.swappedWith) {
           console.log(`    ↳ Swapped with: ${result.swappedWith.id} → z-index: ${result.swappedWith.newZIndex}`);
         }
@@ -882,8 +888,8 @@ async function handleKeyDown(e) {
       } else if (result.atBoundary) {
         // At boundary - provide feedback
         console.log(`[Z-Index] SINGLE SELECTION | ID: ${objectId} | Cannot move down - ${result.reason}`);
+        return;
       }
-      return;
     }
     
     // Multi-selection: use moveDownGroup()
@@ -902,7 +908,6 @@ async function handleKeyDown(e) {
       if (result.success) {
         const change = result.changes[0];
         console.log(`  ${objectType} | ID: ${id} | z-index: ${oldZIndexes[index]} → ${change.newZIndex}`);
-        
         // FIX #2 & #3: Track swapped objects for DOM update and persistence
         if (result.swappedWith) {
           swappedObjects.set(result.swappedWith.id, result.swappedWith.newZIndex);
@@ -954,6 +959,7 @@ async function handleKeyDown(e) {
   }
   
   if (e.key === ']' || e.key === 'PageUp') {
+    console.log(`[INVESTIGATE] whiteboard-select handleKeyDown: Processing ] or PageUp for mass selection`);
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
@@ -978,7 +984,6 @@ async function handleKeyDown(e) {
         const objectType = objectId.startsWith('wbe-text-') ? 'TEXT' : objectId.startsWith('wbe-image-') ? 'IMAGE' : 'UNKNOWN';
         const newZIndex = ZIndexManager.get(objectId);
         console.log(`[Z-Index] SINGLE SELECTION | ${objectType} | ID: ${objectId} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
-        
         if (result.swappedWith) {
           console.log(`    ↳ Swapped with: ${result.swappedWith.id} → z-index: ${result.swappedWith.newZIndex}`);
         }
@@ -1025,8 +1030,8 @@ async function handleKeyDown(e) {
       } else if (result.atBoundary) {
         // At boundary - provide feedback
         console.log(`[Z-Index] SINGLE SELECTION | ID: ${objectId} | Cannot move up - ${result.reason}`);
+        return;
       }
-      return;
     }
     
     // Multi-selection: use moveUpGroup()
@@ -1045,7 +1050,6 @@ async function handleKeyDown(e) {
       if (result.success) {
         const change = result.changes[0];
         console.log(`  ${objectType} | ID: ${id} | z-index: ${oldZIndexes[index]} → ${change.newZIndex}`);
-        
         // FIX #2 & #3: Track swapped objects for DOM update and persistence
         if (result.swappedWith) {
           swappedObjects.set(result.swappedWith.id, result.swappedWith.newZIndex);
@@ -1098,8 +1102,13 @@ async function handleKeyDown(e) {
   
   // Delete selected objects
   if (e.key === "Delete") {
+    // Only handle if mass selection is active
+    if (selectedObjects.size > 0) {
     e.preventDefault();
+      e.stopPropagation(); // Prevent event from reaching individual image/text handlers
     massDeleteSelected();
+      return; // Exit early to prevent other handlers
+    }
   }
   
   // Arrow keys for movement
@@ -1611,18 +1620,20 @@ async function pasteCopiedObjects() {
     const newLeft = worldPos.x + (imageData.left || 0) + offset;
     const newTop = worldPos.y + (imageData.top || 0) + offset;
     
-    // Create new image element using ImageTools
-    const container = ImageTools.createImageElement(
-      newId,
-      imageData.src,
-      newLeft,
-      newTop,
-      imageData.scale,
-      imageData.crop,
-      imageData.maskType,
-      imageData.circleOffset,
-      imageData.circleRadius
-    );
+    // Create new image element using ImageTools (duplicate from mass selection)
+    const container = ImageTools.createImageElement({
+      id: newId,
+      src: imageData.src,
+      left: newLeft,
+      top: newTop,
+      scale: imageData.scale,
+      crop: imageData.crop,
+      maskType: imageData.maskType,
+      circleOffset: imageData.circleOffset,
+      circleRadius: imageData.circleRadius,
+      isFrozen: imageData.isFrozen || false
+      // displayWidth/displayHeight not passed - will be calculated after duplication
+    });
     
     if (container) {
       // Save to scene flags

@@ -328,8 +328,6 @@ export class CompactZIndexManager {
       return;
     }
     
-    console.log(`[CompactZIndexManager] Starting one-time migration of ${existingData.length} objects`);
-    
     // Pass full data to migration (including rank if present)
     this.migrateFromLegacy({ 
       images: existingData.filter(d => d.type === 'image'), 
@@ -342,7 +340,6 @@ export class CompactZIndexManager {
     });
     
     this._migrationCompleted = true;
-    console.log('[CompactZIndexManager] Migration completed and locked');
   }
 
   /**
@@ -350,8 +347,6 @@ export class CompactZIndexManager {
    * @param {object} existing - Object with images and/or texts arrays
    */
   migrateFromLegacy(existing) {
-    console.log('[CompactZIndexManager] Starting migration from legacy data');
-    
     const all = [];
     
     // Gather all objects (images and texts)
@@ -363,14 +358,10 @@ export class CompactZIndexManager {
       }
     }
     
-    console.log(`[CompactZIndexManager] Found ${all.length} objects to migrate`);
-    
     // First, preserve existing ranks
     const withRank = all
       .filter(x => x.rank && typeof x.rank === 'string')
       .sort((a, b) => a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : 0);
-    
-    console.log(`[CompactZIndexManager] ${withRank.length} objects already have ranks`);
     
     for (const item of withRank) {
       this.objectRank.set(item.id, { 
@@ -384,8 +375,6 @@ export class CompactZIndexManager {
       .filter(x => !x.rank || typeof x.rank !== 'string')
       .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0));
     
-    console.log(`[CompactZIndexManager] ${withoutRank.length} objects need rank assignment`);
-    
     let lastRank = withRank.length > 0 ? withRank[withRank.length - 1].rank : "";
     
     for (const item of withoutRank) {
@@ -397,8 +386,6 @@ export class CompactZIndexManager {
     }
     
     this.dirty = true;
-    
-    console.log(`[CompactZIndexManager] Migration complete: ${this.objectRank.size} objects in rank system`);
   }
 
   /**
@@ -486,7 +473,6 @@ export class CompactZIndexManager {
     }
     
     this.dirty = true;
-    console.log('[CompactZIndexManager] Forced compaction complete');
   }
 
   // ==================== PRIVATE METHODS ====================

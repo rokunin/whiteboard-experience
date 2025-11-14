@@ -1,6 +1,5 @@
 ﻿ /*********************************************************
- * FATE Table Card — v13+
- * Многокарточные визитки на столе (синхрон у всех).
+ * FATE Table Card � v13+
  *********************************************************/
 const MODID = "whiteboard-experience";
 const FLAG_SCOPE = MODID;
@@ -15,10 +14,6 @@ import { MassSelection } from "./modules/whiteboard-select.mjs";
 // Server sequence for rank updates (GM authority)
 let serverSeq = 0;
 
-
-
-
-// Debounce функция для предотвращения частых обновлений
 function debounce(func, wait) {
   let timeout;
   return function executedFunction(...args) {
@@ -35,17 +30,21 @@ function debounce(func, wait) {
 
 
 Hooks.once("ready", async () => {
-  // Контролы могут быть собраны до наших хуков — пересоберём мягко
+
   try { ui.controls?.render?.(true); } catch (e) { }
 
-  // Создать слой для карточек на canvas
+  // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track all keydown events
+  document.addEventListener("keydown", (e) => {
+    if (e.key === '[' || e.key === ']' || e.key === 'PageDown' || e.key === 'PageUp') {
+      console.log(`[INVESTIGATE] GLOBAL keydown: key=${e.key}, target=${e.target?.tagName || 'null'}, selectedTextId=${window.TextTools?.selectedTextId?.slice(-6) || 'null'}, selectedImageId=${window.ImageTools?.selectedImageId?.slice(-6) || 'null'}`);
+    }
+  }, true); // Capture phase to see all events
+
   createCardsLayer();
 
-  // Поднять все карточки со сцены
   const all = await getAllStates();
   for (const [id, st] of Object.entries(all)) FateTableCardApp.show(id, st);
 
-  // Поднять все тексты и картинки
   await loadCanvasElements();
 
   // Request active locks from all users after loading elements
@@ -56,9 +55,6 @@ Hooks.once("ready", async () => {
   MassSelection.initialize();
   MassSelection.setToggleState(massSelectionToggleState);
 
- 
-
-  // Инъекция инструментов в левый тулбар
   injectMassSelectionTool(); // Mass selection first (top priority)
   TextTools.injectTextTool();
   
@@ -70,12 +66,8 @@ Hooks.once("ready", async () => {
     TextTools.injectTextTool();
   });
 
-
-
-  // Глобальный обработчик Ctrl+V для вставки из буфера
   setupGlobalPasteHandler();
 
-  // Синхронизация трансформации карточек с canvas
   Hooks.on("canvasPan", syncCardsWithCanvas);
   Hooks.on("canvasReady", () => {
     createCardsLayer();
@@ -83,19 +75,17 @@ Hooks.once("ready", async () => {
     startContinuousSync();
   });
 
-  // Если canvas уже готов - запустить сразу
   if (canvas?.ready) {
     createCardsLayer();
     syncCardsWithCanvas();
     startContinuousSync();
   }
 
-  // Сокеты (GM пишет флаги, клиенты — только UI)
   game.socket.on(`module.${MODID}`, async (data) => {
     if (!data || !data.type) return;
 
     if (data.type === "update") {
-      // Только не-GM обрабатывают update (GM уже обновил локально)
+
       if (!game.user.isGM) {
         await updateCardState(data.id, data.state, false);
       }
@@ -108,7 +98,7 @@ Hooks.once("ready", async () => {
     }
 
     if (data.type === "delete") {
-      // Только не-GM обрабатывают delete (GM уже удалил локально)
+
       if (!game.user.isGM) {
         await deleteCardState(data.id, false);
       }
@@ -116,22 +106,25 @@ Hooks.once("ready", async () => {
     }
 
     if (data.type === "bulk") {
-      // Полная синхронизация: флаги уже записаны GM'ом; клиентам — перерисовать
-      // GM тоже обрабатывает bulk для синхронизации UI
+
+
       FateTableCardApp.closeAll();
       for (const [id, st] of Object.entries(data.states || {})) {
         FateTableCardApp.show(id, st, { fromSocket: true });
       }
     }
 
-    // Сокеты для текстов и картинок
     if (data.type === "textUpdateRequest") {
-      // Игрок просит GM сохранить изменения
+      // [INVESTIGATE] Track GM receiving textUpdateRequest
+      console.log(`[INVESTIGATE] GM received textUpdateRequest: texts=${Object.keys(data.texts || {}).length}, isEmpty=${Object.keys(data.texts || {}).length === 0}`);
+
       if (game.user.isGM) {
-        console.log(`[WB-E] GM received textUpdateRequest from user ${data.userId || 'unknown'}:`, Object.keys(data.texts || {}).slice(0, 5));
+        // [ZINDEX_ANALYSIS] Track GM socket handler
+        const timestamp = Date.now();
         const requestTexts = data.texts || {};
         const requestTextIds = Object.keys(requestTexts);
         const isEmpty = requestTextIds.length === 0;
+        
         
         // Check if this is a deletion
         const currentTexts = await TextTools.getAllTexts();
@@ -140,7 +133,9 @@ Hooks.once("ready", async () => {
         const deletedIds = currentTextIds.filter(id => !requestTextIds.includes(id));
         
         if (isDeletion && deletedIds.length > 0) {
-          console.log(`[WB-E] GM detected deletion in textUpdateRequest: removing ${deletedIds.length} texts:`, deletedIds);
+        }
+        
+        if (isEmpty) {
         }
         
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
@@ -153,18 +148,15 @@ Hooks.once("ready", async () => {
           }
         }
 
-        // Обновляем локально для немедленной реакции UI у GM
         const layer = getOrCreateLayer();
         if (layer) {
-          // Получаем все существующие текстовые элементы
+
           const existingElements = layer.querySelectorAll(".wbe-canvas-text-container");
           const existingIds = new Set();
 
-          // Обновляем существующие и создаем новые тексты локально у GM
           for (const [id, textData] of Object.entries(requestTexts)) {
             existingIds.add(id);
             const existing = document.getElementById(id);
-            console.log(`[WB-E] GM processing textUpdateRequest for ${id}: existing=${!!existing}, left=${textData.left}, top=${textData.top}, rank=${textData.rank}`);
             if (existing) {
               // CRITICAL FIX: Skip locked text elements (GM socket handler)
               // Check both dataset.lockedBy AND lock overlay (more reliable - works even if lock restored after socket update)
@@ -172,16 +164,13 @@ Hooks.once("ready", async () => {
               const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
               if (hasLockOverlay || isLockedByOther) {
                 const lockedBy = existing.dataset.lockedBy || "unknown";
-                console.log(`[WB-E] GM skipping socket update for ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
                 continue; // Don't update! This prevents cursor reset and size changes!
               }
 
-              // Обновляем существующий элемент
               const textElement = existing.querySelector(".wbe-canvas-text");
               if (textElement) {
                 // ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
                 if (textElement.contentEditable === "true") {
-                  console.log(`[WB-E] GM skipping socket update for ${id} - actively being edited`);
                   continue;
                 }
 
@@ -201,11 +190,9 @@ Hooks.once("ready", async () => {
                 textElement.style.transform = `scale(${textData.scale})`;
                 textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR; // Apply color
                 
-                // Apply background to span if it exists, otherwise to textElement (backward compat)
+                // Apply background to span
                 if (textSpan && textData.backgroundColor) {
                   textSpan.style.backgroundColor = textData.backgroundColor;
-                } else if (!textSpan) {
-                  textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
                 }
                 TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
                 TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
@@ -224,7 +211,6 @@ Hooks.once("ready", async () => {
                     textElement.dataset.manualWidth = "false";
                   }
                 } else {
-                  console.log(`[WB-E] GM skipping width update for ${id} - element is locked (lockedSize=true)`);
                 }
 
                 // Update resize handle position after scale/size changes
@@ -268,8 +254,7 @@ Hooks.once("ready", async () => {
                   window.ZIndexManager.assignText(id);
                 }
               }
-              
-              // Создаем новый элемент
+
               const createdContainer = TextTools.createTextElement(
                 id,
                 textData.text,
@@ -289,13 +274,17 @@ Hooks.once("ready", async () => {
                 textData.zIndex ?? null // Use null instead of undefined so default parameter works
               );
 
-              // Apply color and background to newly created element
+              // Apply color to newly created element (background already set in createTextElement via span)
               const created = createdContainer || document.getElementById(id);
               if (created) {
                 const textElement = created.querySelector(".wbe-canvas-text");
                 if (textElement) {
                   textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR;
-                  textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+                  // Apply background to span (createTextElement already created span with background)
+                  const textSpan = textElement.querySelector(".wbe-text-background-span");
+                  if (textSpan && textData.backgroundColor) {
+                    textSpan.style.backgroundColor = textData.backgroundColor;
+                  }
                   TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
                   TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
                   TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
@@ -307,7 +296,6 @@ Hooks.once("ready", async () => {
             }
           }
 
-          // Удаляем элементы, которых больше нет в texts
           existingElements.forEach(element => {
             if (!existingIds.has(element.id)) {
               // FIX: Clean up color panel before removing element
@@ -327,20 +315,37 @@ Hooks.once("ready", async () => {
           });
         }
 
-        // Эмитим всем (включая отправителя) - как для картинок
+        // [ZINDEX_ANALYSIS] Track GM socket broadcast
+        const broadcastTextIds = Object.keys(requestTexts);
+        
+        // [ZINDEX_ANALYSIS] Track if GM will call setAllTexts
+        
+        // [INVESTIGATE] Track GM broadcasting textUpdate
+        console.log(`[INVESTIGATE] GM broadcasting textUpdate: texts=${broadcastTextIds.length}`);
         game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts: requestTexts });
       }
     }
 
     if (data.type === "textUpdate") {
-      // Обновляем UI у всех (включая отправителя) - как для картинок
+      // [INVESTIGATE] Track non-GM receiving textUpdate
+      console.log(`[INVESTIGATE] Non-GM received textUpdate: texts=${Object.keys(data.texts || {}).length}, isEmpty=${Object.keys(data.texts || {}).length === 0}`);
+      
+      // [ZINDEX_ANALYSIS] Track textUpdate socket handler (non-GM receives broadcast)
+      const timestamp = Date.now();
+      const updateTextIds = Object.keys(data.texts || {});
+      const isEmpty = updateTextIds.length === 0;
+      
+      // [ZINDEX_ANALYSIS] Track if this will trigger setAllTexts
+      if (isEmpty) {
+      } else {
+      }
+
       const layer = getOrCreateLayer();
       if (layer) {
-        // Получаем все существующие текстовые элементы
+
         const existingElements = layer.querySelectorAll(".wbe-canvas-text-container");
         const existingIds = new Set();
 
-        // Обновляем существующие и создаем новые тексты
         for (const [id, textData] of Object.entries(data.texts || {})) {
           existingIds.add(id);
           const existing = document.getElementById(id);
@@ -351,16 +356,13 @@ Hooks.once("ready", async () => {
             const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
             if (hasLockOverlay || isLockedByOther) {
               const lockedBy = existing.dataset.lockedBy || "unknown";
-              console.log(`[WB-E] Skipping socket update for ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
               continue; // Don't update! This prevents cursor reset and size changes!
             }
 
-            // Обновляем существующий элемент
             const textElement = existing.querySelector(".wbe-canvas-text");
             if (textElement) {
               // ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
               if (textElement.contentEditable === "true") {
-                console.log(`[WB-E] Skipping socket update for ${id} - actively being edited`);
                 continue;
               }
 
@@ -380,13 +382,11 @@ Hooks.once("ready", async () => {
               textElement.style.transform = `scale(${textData.scale})`;
               textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR; // Apply color
               
-              // Apply background to span if it exists, otherwise to textElement (backward compat)
+              // Apply background to span
               if (textSpan && textData.backgroundColor) {
                 textSpan.style.backgroundColor = textData.backgroundColor;
-              } else if (!textSpan) {
-                textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
               }
-              TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle); // Apply background color
+              TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
               TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
               TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
               TextTools.applyFontSizeToElement?.(textElement, textData.fontSize || TextTools.DEFAULT_FONT_SIZE);
@@ -401,7 +401,6 @@ Hooks.once("ready", async () => {
                   textElement.style.width = "";
                 }
               } else {
-                console.log(`[WB-E] Skipping width update for ${id} - element is locked (lockedSize=true)`);
               }
 
               // EXPERIMENT PHASE 1: Don't update Manager z-index directly - use rank instead
@@ -445,7 +444,7 @@ Hooks.once("ready", async () => {
               }
             }
           } else {
-            // Создаем новый элемент
+
             const createdContainer = TextTools.createTextElement(
               id,
               textData.text,
@@ -465,13 +464,17 @@ Hooks.once("ready", async () => {
               textData.zIndex ?? null // Use null instead of undefined so default parameter works
             );
 
-            // Apply color and background to newly created element
+            // Apply color to newly created element (background already set in createTextElement via span)
             const created = createdContainer || document.getElementById(id);
             if (created) {
               const textElement = created.querySelector(".wbe-canvas-text");
               if (textElement) {
                 textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR;
-                textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+                // Apply background to span (createTextElement already created span with background)
+                const textSpan = textElement.querySelector(".wbe-text-background-span");
+                if (textSpan && textData.backgroundColor) {
+                  textSpan.style.backgroundColor = textData.backgroundColor;
+                }
                 TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
                 TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
                 TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
@@ -509,13 +512,11 @@ Hooks.once("ready", async () => {
           if (!existingIds.has(element.id)) {
             // Don't remove if element is locked/being edited
             if (element.dataset.lockedBy) {
-              console.log(`[WB-E] Preserving ${element.id} - locked by user ${element.dataset.lockedBy}`);
               return;
             }
             
             const textElement = element.querySelector(".wbe-canvas-text");
             if (textElement && textElement.contentEditable === "true") {
-              console.log(`[WB-E] Preserving ${element.id} - actively being edited`);
               return;
             }
             
@@ -538,11 +539,15 @@ Hooks.once("ready", async () => {
     }
 
     if (data.type === "imageUpdateRequest") {
-      // Игрок просит GM сохранить изменения
+
       if (game.user.isGM) {
+        const socketTime = Date.now();
         const requestImages = data.images || {};
         const requestImageIds = Object.keys(requestImages);
         const isEmpty = requestImageIds.length === 0;
+        
+        // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track socket handler entry
+        console.log(`[INVESTIGATE] GM received imageUpdateRequest: [${socketTime}] images=${requestImageIds.length}, isEmpty=${isEmpty}`);
         
         // Check if this is a deletion
         const currentImages = await ImageTools.getAllImages();
@@ -551,21 +556,30 @@ Hooks.once("ready", async () => {
         const deletedIds = currentImageIds.filter(id => !requestImageIds.includes(id));
         
         if (isDeletion && deletedIds.length > 0) {
-          console.log(`[WB-E] GM detected deletion in imageUpdateRequest: removing ${deletedIds.length} images:`, deletedIds);
+          console.log(`[INVESTIGATE] GM imageUpdateRequest: Detected deletion of ${deletedIds.length} images:`, deletedIds.map(id => id.slice(-6)));
         }
+        
+        // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track before save
+        console.log(`[INVESTIGATE] GM imageUpdateRequest: Before save - current=${currentImageIds.length}, request=${requestImageIds.length}`);
         
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
         await new Promise(resolve => setTimeout(resolve, 50));
         await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, requestImages);
+        
+        // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Verify save to database
+        const verifyImages = await ImageTools.getAllImages();
+        const verifyIds = Object.keys(verifyImages);
+        console.log(`[INVESTIGATE] GM imageUpdateRequest: After save to DB, getAllImages returned ${verifyIds.length} images:`, verifyIds.slice(0, 5));
+        if (verifyIds.length !== requestImageIds.length) {
+          console.error(`[INVESTIGATE] GM imageUpdateRequest: MISMATCH! Saved ${requestImageIds.length} but getAllImages returned ${verifyIds.length}`);
+        }
 
-        // Обновляем локально для немедленной реакции UI у GM
         const layer = getOrCreateLayer();
         if (layer) {
-          // Получаем все существующие картинки
+
           const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
           const existingIds = new Set();
 
-          // Обновляем существующие и создаем новые картинки локально у GM
           for (const [id, imageData] of Object.entries(data.images)) {
             existingIds.add(id);
             const existing = document.getElementById(id);
@@ -576,12 +590,10 @@ Hooks.once("ready", async () => {
             const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
             if (hasLockOverlay || isLockedByOther) {
               const lockedBy = existing.dataset.lockedBy || "unknown";
-              console.log(`[WB-E] GM skipping socket update for image ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
               continue; // Don't update! This prevents crop changes!
             }
             const isSelected = ImageTools.selectedImageId === id;
-            
-            // Обновляем существующий элемент
+
             ImageTools.updateImageElement(existing, imageData);
             
             // FIX: Always update panel position if image is selected (like local drag does)
@@ -622,15 +634,27 @@ Hooks.once("ready", async () => {
               }
             }
           } else {
-            // Создаем новый элемент
-            const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-            const maskTypeData = imageData.maskType || 'rect';
-            const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
-            const circleRadiusData = imageData.circleRadius || null;
-            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
+
+            // Socket update - recreate image from other client's data
+            ImageTools.createImageElement({
+              id,
+              src: imageData.src,
+              left: imageData.left,
+              top: imageData.top,
+              scale: imageData.scale,
+              crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+              maskType: imageData.maskType || 'rect',
+              circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+              circleRadius: imageData.circleRadius || null,
+              isFrozen: imageData.isFrozen || false,
+              borderHex: imageData.borderHex,
+              borderOpacity: imageData.borderOpacity,
+              borderWidth: imageData.borderWidth,
+              borderRadius: imageData.borderRadius
+              // displayWidth/displayHeight not passed for socket updates
+            });
           }
 
-          // Обновляем глобальные переменные для каждой картинки
           ImageTools.updateImageLocalVars(id, {
             maskType: imageData.maskType || 'rect',
             circleOffset: imageData.circleOffset || { x: 0, y: 0 },
@@ -652,7 +676,6 @@ Hooks.once("ready", async () => {
             if (!existingIds.has(element.id)) {
               // Don't remove if element is locked/being manipulated
               if (element.dataset.lockedBy) {
-                console.log(`[WB-E] Preserving ${element.id} - locked by user ${element.dataset.lockedBy}`);
                 return;
               }
               
@@ -673,21 +696,24 @@ Hooks.once("ready", async () => {
           });
         }
 
-        // Эмитим всем (включая отправителя)
-        console.log(`[WB-E] GM emitting imageUpdate with ${requestImageIds.length} images (authoritative state from player)`);
         game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: requestImages });
       }
     }
 
     if (data.type === "imageUpdate") {
-      // Обновляем UI у всех (включая отправителя)
+
+      // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track imageUpdate reception
+      const updateTime = Date.now();
+      const updateImages = data.images || {};
+      const updateImageIds = Object.keys(updateImages);
+      console.log(`[INVESTIGATE] Received imageUpdate: [${updateTime}] images=${updateImageIds.length}, isGM=${game.user.isGM}`);
+
       const layer = getOrCreateLayer();
       if (layer) {
-        // Получаем все существующие картинки
+
         const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
         const existingIds = new Set();
 
-        // Обновляем существующие и создаем новые картинки
         for (const [id, imageData] of Object.entries(data.images || {})) {
           existingIds.add(id);
           const existing = document.getElementById(id);
@@ -698,12 +724,10 @@ Hooks.once("ready", async () => {
             const isLockedByOther = existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id;
             if (hasLockOverlay || isLockedByOther) {
               const lockedBy = existing.dataset.lockedBy || "unknown";
-              console.log(`[WB-E] Skipping socket update for image ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
               continue; // Don't update! This prevents crop changes!
             }
             const isSelected = ImageTools.selectedImageId === id;
-            
-            // Обновляем существующий элемент
+
             ImageTools.updateImageElement(existing, imageData);
             
             // FIX: Always update panel position if image is selected (like local drag does)
@@ -744,15 +768,27 @@ Hooks.once("ready", async () => {
               }
             }
           } else {
-            // Создаем новый элемент
-            const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-            const maskTypeData = imageData.maskType || 'rect';
-            const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
-            const circleRadiusData = imageData.circleRadius || null;
-            ImageTools.createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
+
+            // Socket update - recreate image from other client's data
+            ImageTools.createImageElement({
+              id,
+              src: imageData.src,
+              left: imageData.left,
+              top: imageData.top,
+              scale: imageData.scale,
+              crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+              maskType: imageData.maskType || 'rect',
+              circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+              circleRadius: imageData.circleRadius || null,
+              isFrozen: imageData.isFrozen || false,
+              borderHex: imageData.borderHex,
+              borderOpacity: imageData.borderOpacity,
+              borderWidth: imageData.borderWidth,
+              borderRadius: imageData.borderRadius
+              // displayWidth/displayHeight not passed for socket updates
+            });
           }
 
-          // Обновляем глобальные переменные для каждой картинки
           ImageTools.updateImageLocalVars(id, {
             maskType: imageData.maskType || 'rect',
             circleOffset: imageData.circleOffset || { x: 0, y: 0 },
@@ -774,7 +810,6 @@ Hooks.once("ready", async () => {
           if (!existingIds.has(element.id)) {
             // Don't remove if element is locked/being manipulated
             if (element.dataset.lockedBy) {
-              console.log(`[WB-E] Preserving ${element.id} - locked by user ${element.dataset.lockedBy}`);
               return;
             }
             
@@ -796,29 +831,23 @@ Hooks.once("ready", async () => {
       }
     }
 
-
-    // Запрос на обновление карточки от игрока
     if (data.type === "cardUpdateRequest") {
-      console.log("[WB-E] GM received cardUpdateRequest:", data);
-      // Игрок просит GM сохранить изменения карточки
+
       if (game.user.isGM) {
         const states = await getAllStates();
         if (states[data.id]) {
-          console.log("[WB-E] GM updating card state:", data.patch);
           states[data.id] = foundry.utils.mergeObject(states[data.id], data.patch, { inplace: false });
           await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY);
           await new Promise(resolve => setTimeout(resolve, 50));
           await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY, states);
 
-          // Обновляем локальное состояние приложения у GM
           const app = FateTableCardApp.instances.get(data.id);
           if (app) {
             app.cardData = foundry.utils.mergeObject(app.cardData, data.patch, { inplace: false });
-            // Принудительно обновляем UI у GM
+
             app.render(true);
           }
 
-          // Эмитим всем (включая отправителя) только изменения
           game.socket.emit(`module.${MODID}`, { type: "cardUpdate", id: data.id, state: data.patch });
         }
       }
@@ -828,7 +857,6 @@ Hooks.once("ready", async () => {
     if (data.type === "gm-request") {
       if (game.user.isGM && data.action === 'freeze-image') {
         try {
-          console.log("[WB-E] GM received freeze request:", data.data);
           // Process freeze request authoritatively
           ImageTools.setImageFrozen(data.data.imageId, data.data.frozen, true);
         } catch (error) {
@@ -851,7 +879,6 @@ Hooks.once("ready", async () => {
     if (data.type === "rankUpdate") {
       if (game.user.isGM) {
         try {
-          console.log(`[WB-E] GM received rank update for ${data.objectType} ${data.id}: ${data.rank}`);
           
           if (data.objectType === "image") {
             const images = await ImageTools.getAllImages();
@@ -884,7 +911,6 @@ Hooks.once("ready", async () => {
               serverSeq: serverSeq
             });
             
-            console.log(`[WB-E] GM confirmed rank update for ${data.id}, serverSeq: ${serverSeq}`);
           } else if (data.objectType === "text") {
             const texts = await TextTools.getAllTexts();
             if (!texts[data.id]) {
@@ -916,7 +942,6 @@ Hooks.once("ready", async () => {
               serverSeq: serverSeq
             });
             
-            console.log(`[WB-E] GM confirmed rank update for ${data.id}, serverSeq: ${serverSeq}`);
           }
         } catch (error) {
           console.error('[WB-E] GM failed to process rank update:', error);
@@ -927,7 +952,6 @@ Hooks.once("ready", async () => {
     // Rank confirmation handler (all clients)
     if (data.type === "rankConfirm") {
       try {
-        console.log(`[WB-E] Received rank confirmation for ${data.objectType} ${data.id}: ${data.rank}, serverSeq: ${data.serverSeq}`);
         
         if (data.objectType === "image") {
           // Update local rank in manager
@@ -940,9 +964,7 @@ Hooks.once("ready", async () => {
               // Refresh DOM z-index order
               await window.ZIndexManager.syncAllDOMZIndexes();
               
-              console.log(`[WB-E] Applied rank ${data.rank} to ${data.id} (was ${currentRank})`);
             } else {
-              console.log(`[WB-E] Rank ${data.rank} already applied to ${data.id}, skipping`);
             }
           }
         } else if (data.objectType === "text") {
@@ -956,9 +978,7 @@ Hooks.once("ready", async () => {
               // Refresh DOM z-index order
               await window.ZIndexManager.syncAllDOMZIndexes();
               
-              console.log(`[WB-E] Applied rank ${data.rank} to ${data.id} (was ${currentRank})`);
             } else {
-              console.log(`[WB-E] Rank ${data.rank} already applied to ${data.id}, skipping`);
             }
           }
         }
@@ -967,9 +987,7 @@ Hooks.once("ready", async () => {
       }
     }
 
-    // Сохранение base64 изображения от игрока как файл
     if (data.type === "saveBase64Image") {
-      console.log("[WB-E] GM received base64 image from player:", data.fileName);
       if (game.user.isGM) {
         try {
           // Convert base64 to File object
@@ -983,13 +1001,11 @@ Hooks.once("ready", async () => {
           const file = new File([bytes], data.fileName, { type: 'image/jpeg' });
           const uploadPath = `worlds/${game.world.id}`;
 
-          console.log("[WB-E] GM saving base64 image as file:", data.fileName);
           const response = await foundry.applications.apps.FilePicker.implementation.upload("data", uploadPath, file, {}, {
             notify: false
           });
 
           if (response?.path) {
-            console.log("[WB-E] GM successfully saved base64 image:", response.path);
 
             // Update the card with the proper file path
             const states = await getAllStates();
@@ -1012,7 +1028,6 @@ Hooks.once("ready", async () => {
                 state: { portrait: response.path }
               });
 
-              console.log("[WB-E] GM broadcasted proper file path to all clients");
             }
           }
         } catch (error) {
@@ -1021,9 +1036,7 @@ Hooks.once("ready", async () => {
       }
     }
 
-    // Сохранение base64 изображения от игрока для canvas как файл
     if (data.type === "saveCanvasBase64Image") {
-      console.log("[WB-E] GM received canvas base64 image from player:", data.fileName);
       if (game.user.isGM) {
         try {
           // Convert base64 to File object
@@ -1037,13 +1050,11 @@ Hooks.once("ready", async () => {
           const file = new File([bytes], data.fileName, { type: 'image/jpeg' });
           const uploadPath = `worlds/${game.world.id}`;
 
-          console.log("[WB-E] GM saving canvas base64 image as file:", data.fileName);
           const response = await foundry.applications.apps.FilePicker.implementation.upload("data", uploadPath, file, {}, {
             notify: false
           });
 
           if (response?.path) {
-            console.log("[WB-E] GM successfully saved canvas base64 image:", response.path);
 
             // Broadcast the proper file path to all clients for canvas image replacement
             game.socket.emit(`module.${MODID}`, {
@@ -1054,7 +1065,6 @@ Hooks.once("ready", async () => {
               fileName: data.fileName
             });
 
-            console.log("[WB-E] GM broadcasted canvas file path to all clients");
           }
         } catch (error) {
           console.error("[WB-E] GM failed to save canvas base64 image:", error);
@@ -1062,23 +1072,18 @@ Hooks.once("ready", async () => {
       }
     }
 
-    // Замена base64 изображения на canvas на правильный файл
     if (data.type === "replaceCanvasBase64WithFile") {
-      console.log("[WB-E] Replacing canvas base64 image with file:", data.filePath);
-      // Найти все canvas изображения с base64 путем и заменить на файл
+
       const layer = getOrCreateLayer();
       if (layer) {
         const imageElements = layer.querySelectorAll(".wbe-canvas-image");
         imageElements.forEach(img => {
           if (img.src === data.base64Path || img.src.includes(data.fileName)) {
-            console.log("[WB-E] Replacing canvas image source:", img.src, "->", data.filePath);
             img.src = data.filePath;
 
-            // Обновить данные в хранилище через ImageTools
             const container = img.closest(".wbe-canvas-image-container");
             if (container) {
               const imageId = container.id;
-              console.log("[WB-E] Updating image data for:", imageId);
               // Use ImageTools to update the image data properly
               ImageTools.updateImageLocalVars(imageId, { src: data.filePath });
             }
@@ -1087,14 +1092,12 @@ Hooks.once("ready", async () => {
       }
     }
 
-    // Обновление карточки от GM
     if (data.type === "cardUpdate") {
-      // Обновляем UI у всех (включая отправителя)
+
       const app = FateTableCardApp.instances.get(data.id);
       if (app && data.state) {
         app.cardData = foundry.utils.mergeObject(app.cardData, data.state, { inplace: false });
 
-        // Обновляем позицию и масштаб если они изменились
         if (data.state.pos) {
           app.setPosition(data.state.pos);
         }
@@ -1102,7 +1105,6 @@ Hooks.once("ready", async () => {
           app.applyScale();
         }
 
-        // Если изменились другие поля - перерендерим
         const hasOtherChanges = Object.keys(data.state).some(key => key !== 'pos' && key !== 'scale');
         if (hasOtherChanges) {
           app.render(true);
@@ -1110,27 +1112,24 @@ Hooks.once("ready", async () => {
       }
     }
 
-    // Блокировка изображения (вход в crop mode)
     if (data.type === "imageLock") {
       const container = document.getElementById(data.imageId);
       if (container && data.userId !== game.user.id) {
-        // Показываем визуальную блокировку для других пользователей
+
         ImageTools.applyImageLockVisual(container, data.userId, data.userName);
       }
     }
 
-    // Разблокировка изображения (выход из crop mode)
     if (data.type === "imageUnlock") {
       const container = document.getElementById(data.imageId);
       if (container) {
-        // Убираем визуальную блокировку
+
         ImageTools.removeImageLockVisual(container);
       }
     }
 
     // NEW: Handle text lock
     if (data.type === "textLock") {
-      console.log(`[WB-E] Received textLock for ${data.textId} from ${data.userName}`);
       const container = document.getElementById(data.textId);
       if (container && data.userId !== game.user.id) {
         TextTools.applyTextLockVisual(container, data.userId, data.userName, data.width, data.height);
@@ -1139,7 +1138,6 @@ Hooks.once("ready", async () => {
 
     // NEW: Handle text unlock
     if (data.type === "textUnlock") {
-      console.log(`[WB-E] Received textUnlock for ${data.textId}`);
       const container = document.getElementById(data.textId);
       if (container) {
         TextTools.removeTextLockVisual(container);
@@ -1238,20 +1236,16 @@ function syncCardsWithCanvas() {
   const board = document.getElementById("board");
   if (!layer || !board || !canvas?.ready || !canvas.stage) return;
 
-  // Получить позицию board для синхронизации
   const boardRect = board.getBoundingClientRect();
 
-  // Применить трансформацию canvas
   const transform = canvas.stage.worldTransform;
   const { a: scale, tx, ty } = transform;
 
-  // DEBUG: Логировать каждый 60й кадр
   if (window._debugFateSync && _syncLogCounter++ % 60 === 0) {
     const card = document.querySelector("#whiteboard-experience-layer > *");
     const cardRect = card?.getBoundingClientRect();
   }
 
-  // Синхронизировать позицию и трансформацию с board
   layer.style.left = boardRect.left + 'px';
   layer.style.top = boardRect.top + 'px';
   layer.style.width = boardRect.width + 'px';
@@ -1259,10 +1253,9 @@ function syncCardsWithCanvas() {
   layer.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
 }
 
-// Непрерывная синхронизация через requestAnimationFrame для плавности
 let syncAnimationId = null;
 function startContinuousSync() {
-  if (syncAnimationId) return; // Уже запущена
+  if (syncAnimationId) return;
 
   function tick() {
     syncCardsWithCanvas();
@@ -1279,7 +1272,6 @@ function stopContinuousSync() {
   }
 }
 
-// Конвертация экранных координат в world coordinates (координаты на canvas)
 function screenToWorld(screenX, screenY) {
   if (!canvas?.ready || !canvas?.stage?.worldTransform) {
     console.warn("[WB-E] Canvas not ready, using screen coordinates");
@@ -1296,7 +1288,6 @@ function screenToWorld(screenX, screenY) {
   }
 }
 
-// Конвертация world coordinates в экранные координаты
 function worldToScreen(worldX, worldY) {
   if (!canvas?.ready) return { x: worldX, y: worldY };
   const transform = canvas.stage.worldTransform;
@@ -1309,7 +1300,7 @@ async function injectFateCardTool() {
   const sc = ui.controls;
   if (!sc || !sc.controls) return;
 
-  const groupsObj = sc.controls; // объект групп в некоторых системах
+  const groupsObj = sc.controls;
   const group =
     groupsObj.tokens || groupsObj.token || groupsObj.notes ||
     Object.values(groupsObj)[0];
@@ -1319,11 +1310,11 @@ async function injectFateCardTool() {
   const toolName = "wbe-table-card";
   const tool = {
     name: toolName,
-    title: "Добавить FATE Card",
+    title: "FATE Card",
     icon: "fas fa-id-card",
     button: true,
     onChange: async () => {
-      if (!game.user.isGM) return ui.notifications.warn("Добавлять карточки может только GM.");
+      if (!game.user.isGM) return ui.notifications.warn("Only GM can create cards.");
       const { id, state } = await createCardState();
       FateTableCardApp.show(id, state);
     }
@@ -1352,8 +1343,7 @@ async function injectMassSelectionTool() {
 
   const isV11 = Array.isArray(sc.controls);
   const controlsData = sc.controls;
-  
-  // Найти группу инструментов
+
   const group = isV11 
     ? controlsData.find(g => g.name === "token" || g.name === "tokens")
     : (controlsData.token || controlsData.tokens);
@@ -1361,15 +1351,13 @@ async function injectMassSelectionTool() {
   if (!group) return;
 
   const toolName = "wbe-mass-selection";
-  
-  // Проверить существование
+
   const exists = isV11
     ? group.tools.find(t => t.name === toolName)
     : group.tools[toolName];
     
   if (exists) return;
 
-  // Общий обработчик для обеих версий
   const handler = async () => {
     massSelectionToggleState = !massSelectionToggleState;
     localStorage.setItem('wbe-mass-selection-toggle', massSelectionToggleState.toString());
@@ -1386,7 +1374,6 @@ async function injectMassSelectionTool() {
     setTimeout(() => sc.render(true), 10);
   };
 
-  // Создать инструмент с правильным полем для версии
   const tool = {
     name: toolName,
     title: massSelectionToggleState 
@@ -1398,7 +1385,6 @@ async function injectMassSelectionTool() {
     [isV11 ? 'onClick' : 'onChange']: handler // Computed property name!
   };
 
-  // Добавить инструмент
   if (isV11) {
     group.tools.unshift(tool);
   } else {
@@ -1594,7 +1580,6 @@ window.ZIndexConstants = ZIndexConstants;
  * Call this to restore proper functionality after major z-index operations
  */
 async function fixInteractionIssues() {
-  console.log('[WB-E] Fixing interaction issues after z-index changes...');
   
   // Fix 1: Sync all DOM z-index values with manager
   await ZIndexManager.syncAllDOMZIndexes();
@@ -1656,7 +1641,6 @@ async function fixInteractionIssues() {
     pointerFixCount++;
   });
   
-  console.log(`[WB-E] Fixed interactions: ${syncCount} z-indexes synced, ${unfreezeCount} unfreeze icons, ${pointerFixCount} pointer-events fixed`);
 }
 
 // Make fix function globally accessible
@@ -1678,10 +1662,6 @@ export function setLastClickY(value) {
   lastClickY = value;
 }
 
-
-
-
-// Функция для снятия выделения со ВСЕХ элементов (кроме exceptId)
 function deselectAllElements(exceptId = null) {
 
   // CLEAR MASS SELECTION when deselecting all elements
@@ -1704,14 +1684,13 @@ function deselectAllElements(exceptId = null) {
     } catch { }
   }
 
-  // Снимаем выделение со всех текстов
   document.querySelectorAll(".wbe-canvas-text-container").forEach(container => {
-    if (exceptId && container.id === exceptId) return; // Пропускаем текущий
+    if (exceptId && container.id === exceptId) return;
 
     const textElement = container.querySelector(".wbe-canvas-text");
     const resizeHandle = container.querySelector(".wbe-text-resize-handle");
     if (textElement && resizeHandle) {
-      delete container.dataset.selected; // Убираем метку
+      delete container.dataset.selected;
       container.style.removeProperty("pointer-events");
       textElement.style.removeProperty("outline");
       textElement.style.removeProperty("outline-offset");
@@ -1721,17 +1700,16 @@ function deselectAllElements(exceptId = null) {
     }
   });
 
-  // Снимаем выделение со всех картинок
   document.querySelectorAll(".wbe-canvas-image-container").forEach(container => {
     if (exceptId && container.id === exceptId) {
-      return; // Пропускаем текущий
+      return;
     }
 
     const imageElement = container.querySelector(".wbe-canvas-image");
     const resizeHandle = container.querySelector(".wbe-image-resize-handle");
     const selectionBorder = container.querySelector(".wbe-image-selection-border");
     if (imageElement && resizeHandle) {
-      delete container.dataset.selected; // Убираем метку
+      delete container.dataset.selected;
       container.style.removeProperty("pointer-events");
       container.style.removeProperty("cursor");
       resizeHandle.style.display = "none";
@@ -1740,35 +1718,27 @@ function deselectAllElements(exceptId = null) {
     }
   });
 
-  // Очищаем selection
   window.getSelection().removeAllRanges();
 }
 
-// Отслеживаем позицию мыши для вставки
 document.addEventListener("mousemove", (e) => {
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
 });
 
-// Глобальная функция вставки картинки
 
-
-
-
-// Глобальный обработчик COPY для сброса наших буферов при копировании внешнего контента
 document.addEventListener("copy", (e) => {
-  // Если копирование происходит НЕ от наших элементов → сбрасываем буферы
+
   if (!TextTools.selectedTextId && !ImageTools.selectedImageId) {
     TextTools.copiedTextData = null;
     ImageTools.copiedImageData = null;
   }
-}, true); // capture phase - раньше всех
+}, true); // capture phase
 
 // Paste multi-selection functionality
 async function pasteMultiSelection() {
   if (!window.wbeCopiedMultiSelection) return;
 
-  console.log("[WB-E] Pasting multi-selection");
 
   const { texts, images } = window.wbeCopiedMultiSelection;
   const offset = 20; // Offset for pasted elements
@@ -1811,50 +1781,51 @@ async function pasteMultiSelection() {
     const newLeft = worldPos.x + (imageData.left || 0) + offset;
     const newTop = worldPos.y + (imageData.top || 0) + offset;
 
-    const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-    const maskTypeData = imageData.maskType || 'rect';
-    const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
-    const circleRadiusData = imageData.circleRadius || null;
-
-    ImageTools.createImageElement(newId, imageData.src, newLeft, newTop, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
+    ImageTools.createImageElement({
+      id: newId,
+      src: imageData.src,
+      left: newLeft,
+      top: newTop,
+      scale: imageData.scale,
+      crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+      maskType: imageData.maskType || 'rect',
+      circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+      circleRadius: imageData.circleRadius || null,
+      isFrozen: imageData.isFrozen || false,
+      borderHex: imageData.borderHex,
+      borderOpacity: imageData.borderOpacity,
+      borderWidth: imageData.borderWidth,
+      borderRadius: imageData.borderRadius
+      // displayWidth/displayHeight not passed - will be calculated after paste
+    });
 
     // Save the new image
     await ImageTools.persistImageState(newId, document.getElementById(newId)?.querySelector(".wbe-canvas-image"), document.getElementById(newId));
   }
 
-  console.log("[WB-E] Multi-selection pasted successfully");
 }
 
-// Глобальный обработчик Ctrl+V для вставки из системного буфера
 function setupGlobalPasteHandler() {
   document.addEventListener("paste", async (e) => {
-    console.log("[WB-E] Global paste handler triggered, activeElement:", document.activeElement);
-
-    // Игнорируем если фокус на input/textarea (чтобы не мешать обычной вставке)
     if (document.activeElement &&
       (document.activeElement.tagName === "INPUT" ||
         document.activeElement.tagName === "TEXTAREA" ||
         document.activeElement.isContentEditable)) {
-      console.log("[WB-E] Global paste handler: ignoring paste for input/textarea");
       return;
     }
 
-    // Игнорируем если фокус на fate card portrait (чтобы не мешать вставке в аватар)
     if (document.activeElement &&
       document.activeElement.classList &&
       document.activeElement.classList.contains("ftc-portrait")) {
-      console.log("[WB-E] Global paste handler: ignoring paste for fate card portrait");
       return;
     }
 
-    // Сначала проверяем системный буфер - что РЕАЛЬНО там сейчас
     const clipboardData = e.clipboardData || window.clipboardData;
     if (!clipboardData) return;
 
     const items = clipboardData.items;
     if (!items) return;
 
-    // Проверяем что в буфере
     let hasImage = false;
     let hasText = false;
 
@@ -1868,9 +1839,7 @@ function setupGlobalPasteHandler() {
       }
     }
 
-    // ПРИОРИТЕТ 1: Картинка из системного буфера
     if (hasImage) {
-      console.log("[WB-E] Global paste handler: processing image paste");
       e.preventDefault();
       e.stopPropagation();
 
@@ -1879,7 +1848,6 @@ function setupGlobalPasteHandler() {
         if (item.type.startsWith("image/")) {
           const file = item.getAsFile();
           if (file) {
-            console.log("[WB-E] Global paste handler: calling ImageTools.handleImagePasteFromClipboard");
             await ImageTools.handleImagePasteFromClipboard(file);
             return;
           }
@@ -1887,11 +1855,10 @@ function setupGlobalPasteHandler() {
       }
     }
 
-    // ПРИОРИТЕТ 2: Текст из системного буфера (или маркер картинки/текста)
     if (hasText) {
       const text = clipboardData.getData("text/plain");
       if (text && text.trim()) {
-        // Проверяем - это маркер нашей картинки?
+
         if (text.startsWith("[wbe-IMAGE-COPY:") && ImageTools.copiedImageData) {
           e.preventDefault();
           e.stopPropagation();
@@ -1899,7 +1866,6 @@ function setupGlobalPasteHandler() {
           return;
         }
 
-        // Проверяем - это маркер нашего текста с форматированием?
         if (text.startsWith("[wbe-TEXT-COPY:") && TextTools.copiedTextData) {
           e.preventDefault();
           e.stopPropagation();
@@ -1907,7 +1873,6 @@ function setupGlobalPasteHandler() {
           return;
         }
 
-        // Обычный текст из внешнего источника
         e.preventDefault();
         e.stopPropagation();
         await TextTools.handleTextPasteFromClipboard(text.trim());
@@ -1915,7 +1880,6 @@ function setupGlobalPasteHandler() {
       }
     }
 
-    // FALLBACK: Если системный буфер пуст, используем наши скопированные элементы
     // Check for multi-selection paste first
     if (window.wbeCopiedMultiSelection) {
       e.preventDefault();
@@ -1948,9 +1912,6 @@ function setupGlobalPasteHandler() {
   });
 }
 
-
-
-// Вставка текста из системного буфера
 
 
 
@@ -2038,7 +1999,6 @@ async function loadCanvasElements() {
   const allData = [...textData, ...imageData];
   ZIndexManager.syncWithExisting(allData);
 
-  // Восстановить тексты
   for (const [id, data] of Object.entries(texts)) {
     TextTools.createTextElement(
       id,
@@ -2062,11 +2022,9 @@ async function loadCanvasElements() {
 
   for (const [id, data] of Object.entries(texts)) {
     if (data.width && data.width > 0) {
-      console.log('textData.width', data.width);
     }
   }
 
-  // Восстановить картинки
   for (const [id, data] of Object.entries(images)) {
     // Validate image data before creating element
     if (!data.src || typeof data.src !== 'string') {
@@ -2074,13 +2032,44 @@ async function loadCanvasElements() {
       continue;
     }
 
-    const cropData = data.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-    const maskTypeData = data.maskType || 'rect';
-    const circleOffsetData = data.circleOffset || { x: 0, y: 0 };
-    const circleRadiusData = data.circleRadius || null;
+    console.log('[F5 LOAD] Loading image from DB', {
+      id,
+      scale: data.scale,
+      displayWidth: data.displayWidth,
+      displayHeight: data.displayHeight,
+      displayWidthType: typeof data.displayWidth,
+      displayHeightType: typeof data.displayHeight,
+      hasDisplayDims: !!(data.displayWidth && data.displayHeight)
+    });
 
     try {
-      ImageTools.createImageElement(id, data.src, data.left, data.top, data.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, data.isFrozen || false);
+      console.log('[F5 LOAD] Calling createImageElement with', {
+        id,
+        displayWidth: data.displayWidth,
+        displayHeight: data.displayHeight,
+        displayWidthType: typeof data.displayWidth,
+        displayHeightType: typeof data.displayHeight
+      });
+      
+      // F5 reload - pass saved displayWidth/displayHeight for correct placeholder sizing
+      ImageTools.createImageElement({
+        id,
+        src: data.src,
+        left: data.left,
+        top: data.top,
+        scale: data.scale,
+        crop: data.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+        maskType: data.maskType || 'rect',
+        circleOffset: data.circleOffset || { x: 0, y: 0 },
+        circleRadius: data.circleRadius || null,
+        isFrozen: data.isFrozen || false,
+        displayWidth: data.displayWidth,
+        displayHeight: data.displayHeight,
+        borderHex: data.borderHex,
+        borderOpacity: data.borderOpacity,
+        borderWidth: data.borderWidth,
+        borderRadius: data.borderRadius
+      });
     } catch (error) {
       console.error(`[WB-E] Failed to restore image ${id}:`, error);
     }
@@ -2103,9 +2092,9 @@ async function getAllStates() {
 
 async function setAllStates(states, broadcast = true) {
   try {
-    // ИСПРАВЛЕНИЕ: unsetFlag + setFlag для надёжного сохранения в базу
+
     await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY);
-    await new Promise(resolve => setTimeout(resolve, 50)); // Небольшая пауза
+    await new Promise(resolve => setTimeout(resolve, 50));
     await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY, states);
 
     if (broadcast) game.socket.emit(`module.${MODID}`, { type: "bulk", states });
@@ -2123,14 +2112,13 @@ async function createCardState() {
   const id = newCardId();
   const offset = Object.keys(states).length * 24;
 
-  // Создаём карточку в центре экрана, но храним в world coordinates
   const centerScreen = { x: window.innerWidth / 2 - 280, y: window.innerHeight / 2 - 200 };
   const worldPos = screenToWorld(centerScreen.x + offset, centerScreen.y + offset);
 
   const def = {
     pos: { left: worldPos.x, top: worldPos.y, width: 1060, height: "auto" },
     scale: 1.0,
-    name: "Имя Персонажа",
+    name: "New Card",
     portrait: "",
     approaches: [
       { label: "CAREFUL", value: 0 },
@@ -2155,32 +2143,27 @@ async function createCardState() {
 }
 
 async function updateCardState(id, patch, broadcast = true) {
-  // Если игрок - отправляем запрос GM через сокет
+
   if (!game.user.isGM) {
-    console.log("[WB-E] Player sending cardUpdateRequest:", { id, patch, userId: game.user.id });
     game.socket.emit(`module.${MODID}`, { type: "cardUpdateRequest", id, patch, userId: game.user.id });
-    // Обновляем локально для немедленной реакции UI
+
     const app = FateTableCardApp.instances.get(id);
     if (app) {
       app.cardData = foundry.utils.mergeObject(app.cardData, patch, { inplace: false });
-      console.log("[WB-E] Player updated local app data");
     }
     return;
   }
 
-  // GM сохраняет напрямую
   const states = await getAllStates();
   if (!states[id]) return;
   states[id] = foundry.utils.mergeObject(states[id], patch, { inplace: false });
-  await setAllStates(states, false); // Сохраняем без bulk broadcast
+  await setAllStates(states, false);
 
-  // Обновляем локальное состояние приложения у GM
   const app = FateTableCardApp.instances.get(id);
   if (app) {
     app.cardData = foundry.utils.mergeObject(app.cardData, patch, { inplace: false });
   }
 
-  // Broadcast конкретное обновление карточки
   if (broadcast) {
     game.socket.emit(`module.${MODID}`, { type: "cardUpdate", id, state: patch });
   }
@@ -2188,7 +2171,6 @@ async function updateCardState(id, patch, broadcast = true) {
   return states[id];
 }
 
-// Debounced версия для input событий (300ms задержка)
 const debouncedUpdateCardState = debounce((id, patch, broadcast) => {
   return updateCardState(id, patch, broadcast);
 }, 300);
@@ -2321,7 +2303,6 @@ window.WhiteboardExperience = {
   setAllImages: ImageTools.setAllImages,
   cleanupBrokenImages: ImageTools.cleanupBrokenImages,
 
-  // Хелпер для очистки текстов и картинок
   async clearCanvasElements() {
 
     // FIX: Clean up all panels before removing elements
@@ -2337,7 +2318,6 @@ window.WhiteboardExperience = {
       } catch { }
     }
 
-    // Удаляем из DOM
     const layer = getOrCreateLayer();
     if (layer) {
       const texts = layer.querySelectorAll(".wbe-canvas-text-container");
@@ -2356,7 +2336,6 @@ window.WhiteboardExperience = {
     if (window.ZIndexManager && typeof window.ZIndexManager.clear === "function") {
       try {
         window.ZIndexManager.clear();
-        console.log('[clearCanvasElements] ZIndexManager cleared');
       } catch (e) {
         console.error('[clearCanvasElements] Error clearing ZIndexManager:', e);
       }
@@ -2366,19 +2345,18 @@ window.WhiteboardExperience = {
     if (window.MassSelection && typeof window.MassSelection.clear === "function") {
       try {
         window.MassSelection.clear();
-        console.log('[clearCanvasElements] MassSelection cleared');
       } catch (e) {
         console.error('[clearCanvasElements] Error clearing MassSelection:', e);
       }
     }
 
-    // Очищаем флаги - используем setAllTexts/setAllImages для автоматической синхронизации
-    // Это отправляет socket запрос для non-GM, или очищает напрямую для GM
+
     try {
+      // [ZINDEX_ANALYSIS] Track clearCanvasElements call
       await TextTools.setAllTexts({});
       await ImageTools.setAllImages({});
     } catch (e) {
-      console.error("[clearCanvasElements] Ошибка очистки флагов:", e);
+      console.error("[clearCanvasElements] Error clearing elements:", e);
     }
 
   },

@@ -23,7 +23,7 @@ let selectedTextId = null; // ID выделенного текстового э�
 const SCALE_SENSITIVITY = 0.01; // Sensitivity for text scaling
 
 const DEFAULT_TEXT_COLOR = "#000000";
-const DEFAULT_BACKGROUND_COLOR = "#ffffff";
+const DEFAULT_BACKGROUND_COLOR = "none !important";
 const DEFAULT_SPAN_BACKGROUND_COLOR = "#ffffff";
 const DEFAULT_BORDER_HEX = DEFAULT_TEXT_COLOR;
 const DEFAULT_BORDER_OPACITY = 100;
@@ -458,6 +458,11 @@ function extractTextState(id, textElement, container, options = {}) {
   // This eliminates DOM as competing source of truth and prevents flicker
   const zIndex = ZIndexManager.get(id);
   const rank = ZIndexManager.getRank(id);
+  
+  // [ZINDEX_ANALYSIS] Track z-index extraction
+  if (!options.skipZIndex) {
+    console.log(`[ZINDEX_ANALYSIS] extractTextState: ${id.slice(-6)} extracted zIndex=${zIndex}, rank="${rank}" from ZIndexManager`);
+  }
 
   // Get text from span if it exists, otherwise from textElement
   const textSpan = textElement.querySelector(".wbe-text-background-span");
@@ -546,11 +551,14 @@ function logDuplicateZIndexesInTextPayload(prefix, payload) {
 
 // Debounced function to flush all pending text updates
 const debouncedFlushTextUpdates = debounce(async () => {
-  if (pendingTextUpdates.size === 0) return;
-  
+  // [ZINDEX_ANALYSIS] Track debounced flush
   const pendingIds = Array.from(pendingTextUpdates.keys());
-  console.log(`[WB-E] debouncedFlushTextUpdates: Flushing ${pendingTextUpdates.size} pending updates:`, pendingIds.slice(0, 5));
+  console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates ENTRY: pending=${pendingTextUpdates.size}, ids=`, pendingIds.slice(0, 5));
+  if (pendingTextUpdates.size === 0) {
+    console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: Early return - no pending updates`);
+  }
   
+  console.log(`[WB-E] debouncedFlushTextUpdates: Flushing ${pendingTextUpdates.size} pending updates:`, pendingIds.slice(0, 5));
   // CRITICAL FIX: Build complete state from DOM FIRST (source of truth during rapid updates)
   // Then merge with DB state, then apply pending updates
   const texts = {};
@@ -565,7 +573,6 @@ const debouncedFlushTextUpdates = debounce(async () => {
     const existingContainers = layer.querySelectorAll('.wbe-canvas-text-container');
     const domIds = Array.from(existingContainers).map(c => c.id);
     console.log(`[WB-E] debouncedFlushTextUpdates: DOM has ${domIds.length} elements:`, domIds.slice(0, 5));
-    
     existingContainers.forEach(existingContainer => {
       const existingId = existingContainer.id;
       if (existingId) {
@@ -592,6 +599,24 @@ const debouncedFlushTextUpdates = debounce(async () => {
   
   const finalIds = Object.keys(texts);
   console.log(`[WB-E] debouncedFlushTextUpdates: Final state has ${finalIds.length} texts (${domExtractedCount} from DOM):`, finalIds.slice(0, 5));
+  // [ZINDEX_ANALYSIS] Track final state before sending
+  console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: Final state before setAllTexts: texts=${finalIds.length}, fromDOM=${domExtractedCount}, pending=${pendingTextUpdates.size}`);
+  if (finalIds.length === 0) {
+    console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: WARNING - Final state is empty! DOM had ${domExtractedCount} elements`);
+  }
+  
+  // [ZINDEX_ANALYSIS] Track z-index values in final state
+  const zIndexMap = new Map();
+  finalIds.forEach(id => {
+    const textData = texts[id];
+    const zIndex = textData?.zIndex || window.ZIndexManager?.get(id) || 0;
+    if (!zIndexMap.has(zIndex)) zIndexMap.set(zIndex, []);
+    zIndexMap.get(zIndex).push(id);
+  });
+  const duplicates = Array.from(zIndexMap.entries()).filter(([z, ids]) => ids.length > 1 && z > 0);
+  if (duplicates.length > 0) {
+    console.error(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: DUPLICATES in final state before setAllTexts:`, duplicates.map(([z, ids]) => `z=${z}: ${ids.length} objects (${ids.map(id => id.slice(-6)).join(', ')})`));
+  }
   
   logDuplicateZIndexesInTextPayload('debouncedFlushTextUpdates', texts);
 
@@ -604,8 +629,20 @@ const debouncedFlushTextUpdates = debounce(async () => {
 
 async function persistTextState(id, textElement, container, options = {}) {
   if (!id || !textElement || !container) return;
+  
+  // [ZINDEX_ANALYSIS] Track persistTextState calls
+  const currentZIndex = window.ZIndexManager?.get(id) || 0;
+  const currentRank = window.ZIndexManager?.getRank(id) || '';
+  console.log(`[ZINDEX_ANALYSIS] persistTextState ENTRY: ${id.slice(-6)}, zIndex=${currentZIndex}, rank="${currentRank}", skipZIndex=${options.skipZIndex || false}`);
   const state = extractTextState(id, textElement, container, options);
   if (!state) return;
+  
+  // [ZINDEX_ANALYSIS] Track z-index in extracted state
+  if (state.zIndex) {
+    console.log(`[ZINDEX_ANALYSIS] persistTextState: Extracted state has zIndex=${state.zIndex} for ${id.slice(-6)}`);
+  } else {
+    console.log(`[ZINDEX_ANALYSIS] persistTextState: Extracted state has NO zIndex for ${id.slice(-6)}, will use Manager value`);
+  }
   
   // Queue the update for debounced batching
   pendingTextUpdates.set(id, state);
@@ -863,9 +900,9 @@ async function showColorPicker() {
 
   const positionSubpanel = () => {
     if (!activeSubpanel || !activeButton) return;
-    const left = activeButton.offsetLeft + activeButton.offsetWidth / 2;
+    const left = activeButton.offsetLeft + activeButton.offsetWidth + 10;
     activeSubpanel.style.left = `${left}px`;
-    activeSubpanel.style.top = `-${activeSubpanel.offsetHeight + 10}px`;
+    activeSubpanel.style.top = `${activeButton.offsetTop}px`;
   };
 
   const buildTextSubpanel = () => {
@@ -1247,7 +1284,7 @@ async function showColorPicker() {
     if (!subpanel) return;
 
     subpanel.style.opacity = "0";
-    subpanel.style.transform = "translateY(-8px)";
+    subpanel.style.transform = "translateX(-8px)";
     panel.appendChild(subpanel);
 
     activeSubpanel = subpanel;
@@ -1259,7 +1296,7 @@ async function showColorPicker() {
       if (!activeSubpanel) return;
       activeSubpanel.style.transition = "opacity 0.16s ease, transform 0.16s ease";
       activeSubpanel.style.opacity = "1";
-      activeSubpanel.style.transform = "translateY(0)";
+      activeSubpanel.style.transform = "translateX(0)";
     });
   };
 
@@ -1605,7 +1642,6 @@ async function globalPasteText() {
     // LOG: Track global text paste with z-index
     const zIndex = ZIndexManager.get(newTextId);
     console.log(`[Text Paste] ID: ${newTextId} | z-index: ${zIndex} (global paste)`);
-    
 }
 
 async function handleTextPasteFromClipboard(text) {
@@ -1630,7 +1666,6 @@ async function handleTextPasteFromClipboard(text) {
     // LOG: Track clipboard text paste with z-index
     const zIndex = ZIndexManager.get(textId);
     console.log(`[Text Paste] ID: ${textId} | z-index: ${zIndex} (clipboard paste)`);
-    
     // Update container dimensions after paste
     updateTextUI(container);
     
@@ -1732,7 +1767,6 @@ function createTextElement(
     
     // LOG: Track text creation with z-index
     console.log(`[Text Creation] ID: ${id} | z-index: ${zIndex} ${existingZIndex ? '(existing provided, using manager)' : '(newly assigned)'}`);
-    
     container.style.cssText = `
       position: absolute;
       left: ${left}px;
@@ -2038,7 +2072,9 @@ function createTextElement(
         e.preventDefault();
         
         // Check if text is empty before exiting
-        const textContent = textElement.textContent.trim();
+        // FIX: Check textSpan content, not textElement (text is stored in span)
+        const textSpan = textElement.querySelector(".wbe-text-background-span");
+        const textContent = (textSpan ? textSpan.textContent : textElement.textContent).trim();
         if (textContent === "") {
           // Text is empty - delete it
           isEditing = false;
@@ -2118,6 +2154,7 @@ function createTextElement(
       
       isSelected = true;
       selectedTextId = id; // Устанавливаем глобальный ID
+      console.log(`[INVESTIGATE] Text selected: Setting selectedTextId=${id.slice(-6)}`); // TEMPORARY FOR INVESTIGATION
 
       setSelectedImageId(null); // Сбрасываем выделение картинки
       
@@ -2178,14 +2215,16 @@ function createTextElement(
       selection.removeAllRanges();
       selection.addRange(range);
       console.log("zindex of text element from dom", container.style.zIndex);
-      console.log("zindex of text element from zindex manager",ZIndexManager.get(id));
     }
     
     function deselectText() {
       if (!isEditing) {
         isSelected = false;
         delete container.dataset.selected; // Убираем метку
-        if (selectedTextId === id) selectedTextId = null; // Сбрасываем глобальный ID только если это МЫ
+        if (selectedTextId === id) {
+          console.log(`[INVESTIGATE] Text deselected: Clearing selectedTextId for ${id.slice(-6)}`); // TEMPORARY FOR INVESTIGATION
+          selectedTextId = null; // Сбрасываем глобальный ID только если это МЫ
+        }
 
         
         container.style.removeProperty("pointer-events");
@@ -2269,7 +2308,6 @@ function createTextElement(
       // LOG: Track text paste with z-index
       const zIndex = ZIndexManager.get(newTextId);
       console.log(`[Text Paste] ID: ${newTextId} | z-index: ${zIndex} (pasteText closure)`);
-      
       // Update container dimensions after paste
       updateTextUI(container);
     }
@@ -2278,30 +2316,120 @@ function createTextElement(
     
     // ---- Document-level handlers bound to this element ----
     const keydownHandler = async (e) => {
-      if (selectedTextId !== id) return;
+      // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track keydown handler calls
+      console.log(`[INVESTIGATE] Text keydown handler called for ${id.slice(-6)}: key=${e.key}, selectedTextId=${selectedTextId?.slice(-6) || 'null'}, id=${id.slice(-6)}, isEditing=${isEditing}, selectedImageId=${window.ImageTools?.selectedImageId?.slice(-6) || 'null'}, massSelectionSize=${globalThis.selectedObjects?.size || 0}`);
+      
+      if (selectedTextId !== id) {
+        console.log(`[INVESTIGATE] Text keydown handler: selectedTextId (${selectedTextId?.slice(-6) || 'null'}) !== id (${id.slice(-6)}), returning early`);
+        return;
+      }
       
       // CRITICAL FIX: Don't intercept events if an image is selected (let image handler process it)
-      if (window.ImageTools?.selectedImageId) return;
+      // [INVESTIGATE] TEMPORARY: Commented out to test if this blocks handler
+      // if (window.ImageTools?.selectedImageId) {
+      //   console.log(`[INVESTIGATE] Text keydown handler: Image selected (${window.ImageTools.selectedImageId.slice(-6)}), returning early`);
+      //   return;
+      // }
       
       // Z-index controls - raise/lower z-index
       // Skip if mass selection is active (let whiteboard-select handle it)
-      if (!isEditing && globalThis.selectedObjects?.size > 1) return;
+      if (!isEditing && globalThis.selectedObjects?.size > 1) {
+        console.log(`[INVESTIGATE] Text keydown handler: Mass selection active (${globalThis.selectedObjects.size} objects), returning early`);
+        return;
+      }
       
       if (!isEditing && (e.key === '[' || e.key === 'PageDown')) {
+        console.log(`[INVESTIGATE] Text keydown handler: Processing [ or PageDown for ${id.slice(-6)}`);
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
         
+        // Sync DOM before operation to ensure manager has correct state
+        await ZIndexManager.syncAllDOMZIndexes();
+        
         // Z-index operations are queued at ZIndexManager level
         const oldZIndex = ZIndexManager.get(id);
+        // [ZINDEX_ANALYSIS] Track moveDown call
+        console.log(`[ZINDEX_ANALYSIS] moveDown called for ${id.slice(-6)}: oldZIndex=${oldZIndex}`);
+        // [INVESTIGATE] Track DOM state before move - check ALL objects for duplicates
+        const moveStartTime = Date.now();
+        const elBeforeMove = document.getElementById(id);
+        const domStateBeforeMove = elBeforeMove ? parseInt(elBeforeMove.style.zIndex) || 0 : null;
+        
+        // [INVESTIGATE] Check for duplicates in DOM before move
+        const allTextsBeforeMove = Array.from(document.querySelectorAll('.wbe-canvas-text-container')).map(el => ({
+          id: el.id.slice(-6),
+          zIndex: parseInt(el.style.zIndex) || 0
+        }));
+        const duplicatesBeforeMove = new Map();
+        allTextsBeforeMove.forEach(obj => {
+          if (!duplicatesBeforeMove.has(obj.zIndex)) duplicatesBeforeMove.set(obj.zIndex, []);
+          duplicatesBeforeMove.get(obj.zIndex).push(obj.id);
+        });
+        const duplicateZBeforeMove = Array.from(duplicatesBeforeMove.entries()).filter(([z, ids]) => ids.length > 1 && z >= 1000);
+        if (duplicateZBeforeMove.length > 0) {
+          console.warn(`[INVESTIGATE] moveDown: DUPLICATES IN DOM BEFORE move for ${id.slice(-6)}:`, duplicateZBeforeMove.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
+        }
+        
+        console.log(`[INVESTIGATE] moveDown: DOM z-index BEFORE move for ${id.slice(-6)}: ${domStateBeforeMove}, Manager: ${oldZIndex}`);
         const result = await ZIndexManager.moveDown(id);
+        const moveDuration = Date.now() - moveStartTime;
+        const newZIndex = ZIndexManager.get(id);
+        
         if (result.success && result.changes.length > 0) {
           const change = result.changes[0];
           
-          // Sync all DOM z-indexes (ensures consistency across all objects)
-          await ZIndexManager.syncAllDOMZIndexes();
-          const newZIndex = ZIndexManager.get(id);
+          // [INVESTIGATE] Track DOM state after move but before sync
+          const elAfterMoveBeforeSync = document.getElementById(id);
+          const domStateAfterMoveBeforeSync = elAfterMoveBeforeSync ? parseInt(elAfterMoveBeforeSync.style.zIndex) || 0 : null;
+          const managerZAfterMove = ZIndexManager.get(id);
           
+          // [INVESTIGATE] Check for duplicates after move but before sync
+          const allTextsAfterMoveBeforeSync = Array.from(document.querySelectorAll('.wbe-canvas-text-container')).map(el => ({
+            id: el.id.slice(-6),
+            zIndex: parseInt(el.style.zIndex) || 0
+          }));
+          const duplicatesAfterMoveBeforeSync = new Map();
+          allTextsAfterMoveBeforeSync.forEach(obj => {
+            if (!duplicatesAfterMoveBeforeSync.has(obj.zIndex)) duplicatesAfterMoveBeforeSync.set(obj.zIndex, []);
+            duplicatesAfterMoveBeforeSync.get(obj.zIndex).push(obj.id);
+          });
+          const duplicateZAfterMoveBeforeSync = Array.from(duplicatesAfterMoveBeforeSync.entries()).filter(([z, ids]) => ids.length > 1 && z >= 1000);
+          if (duplicateZAfterMoveBeforeSync.length > 0) {
+            console.warn(`[INVESTIGATE] moveDown: DUPLICATES IN DOM AFTER move, BEFORE sync for ${id.slice(-6)}:`, duplicateZAfterMoveBeforeSync.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
+          }
+          
+          console.log(`[INVESTIGATE] moveDown: move operation took ${moveDuration}ms, DOM z-index AFTER move, BEFORE sync for ${id.slice(-6)}: ${domStateAfterMoveBeforeSync}, Manager: ${managerZAfterMove}`);
+          // Sync all DOM z-indexes (ensures consistency across all objects)
+          // [ZINDEX_ANALYSIS] Track sync call after moveDown
+          const syncStartTime = Date.now();
+          console.log(`[ZINDEX_ANALYSIS] Calling syncAllDOMZIndexes after moveDown for ${id.slice(-6)}`);
+          await ZIndexManager.syncAllDOMZIndexes();
+          const syncDuration = Date.now() - syncStartTime;
+          
+          // [INVESTIGATE] Track DOM state after sync
+          const elAfterSync = document.getElementById(id);
+          const domStateAfterSync = elAfterSync ? parseInt(elAfterSync.style.zIndex) || 0 : null;
+          const managerZAfterSync = ZIndexManager.get(id);
+          
+          // [INVESTIGATE] Check for duplicates after sync
+          const allTextsAfterSync = Array.from(document.querySelectorAll('.wbe-canvas-text-container')).map(el => ({
+            id: el.id.slice(-6),
+            zIndex: parseInt(el.style.zIndex) || 0
+          }));
+          const duplicatesAfterSync = new Map();
+          allTextsAfterSync.forEach(obj => {
+            if (!duplicatesAfterSync.has(obj.zIndex)) duplicatesAfterSync.set(obj.zIndex, []);
+            duplicatesAfterSync.get(obj.zIndex).push(obj.id);
+          });
+          const duplicateZAfterSync = Array.from(duplicatesAfterSync.entries()).filter(([z, ids]) => ids.length > 1 && z >= 1000);
+          if (duplicateZAfterSync.length > 0) {
+            console.error(`[INVESTIGATE] moveDown: DUPLICATES IN DOM AFTER sync for ${id.slice(-6)}:`, duplicateZAfterSync.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
+          } else {
+            console.log(`[INVESTIGATE] moveDown: No duplicates in DOM after sync for ${id.slice(-6)}`);
+          }
+          
+          console.log(`[INVESTIGATE] moveDown: sync took ${syncDuration}ms, DOM z-index AFTER sync for ${id.slice(-6)}: ${domStateAfterSync}, Manager: ${managerZAfterSync}, total operation=${moveDuration + syncDuration}ms`);
           // Emit rank update to GM (player sends request, GM broadcasts confirmation)
           const rank = ZIndexManager.getRank(id);
           game.socket.emit('module.whiteboard-experience', {
@@ -2321,32 +2449,107 @@ function createTextElement(
           }
           
           console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
-          
           // Persist text state using debounced batching
           await persistTextState(id, textElement, container);
         } else if (result.atBoundary) {
           // At boundary - provide feedback
           console.log(`[Z-Index] TEXT | ID: ${id} | Cannot move down - ${result.reason}`);
+          return;
         }
-        return;
       }
       
       if (!isEditing && (e.key == ']' || e.key === 'PageUp')) {
+        console.log(`[INVESTIGATE] Text keydown handler: Processing ] or PageUp for ${id.slice(-6)}`);
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
         
+        // Sync DOM before operation to ensure manager has correct state
+        await ZIndexManager.syncAllDOMZIndexes();
+        
         // Z-index operations are queued at ZIndexManager level
         const oldZIndex = ZIndexManager.get(id);
+        // [ZINDEX_ANALYSIS] Track moveUp call
+        console.log(`[ZINDEX_ANALYSIS] moveUp called for ${id.slice(-6)}: oldZIndex=${oldZIndex}`);
+        // [INVESTIGATE] Track DOM state before move - check ALL objects for duplicates
+        const moveStartTime = Date.now();
+        const elBeforeMove = document.getElementById(id);
+        const domStateBeforeMove = elBeforeMove ? parseInt(elBeforeMove.style.zIndex) || 0 : null;
+        
+        // [INVESTIGATE] Check for duplicates in DOM before move
+        const allTextsBeforeMove = Array.from(document.querySelectorAll('.wbe-canvas-text-container')).map(el => ({
+          id: el.id.slice(-6),
+          zIndex: parseInt(el.style.zIndex) || 0
+        }));
+        const duplicatesBeforeMove = new Map();
+        allTextsBeforeMove.forEach(obj => {
+          if (!duplicatesBeforeMove.has(obj.zIndex)) duplicatesBeforeMove.set(obj.zIndex, []);
+          duplicatesBeforeMove.get(obj.zIndex).push(obj.id);
+        });
+        const duplicateZBeforeMove = Array.from(duplicatesBeforeMove.entries()).filter(([z, ids]) => ids.length > 1 && z >= 1000);
+        if (duplicateZBeforeMove.length > 0) {
+          console.warn(`[INVESTIGATE] moveUp: DUPLICATES IN DOM BEFORE move for ${id.slice(-6)}:`, duplicateZBeforeMove.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
+        }
+        
+        console.log(`[INVESTIGATE] moveUp: DOM z-index BEFORE move for ${id.slice(-6)}: ${domStateBeforeMove}, Manager: ${oldZIndex}`);
         const result = await ZIndexManager.moveUp(id);
+        const moveDuration = Date.now() - moveStartTime;
+        const newZIndex = ZIndexManager.get(id);
+        
         if (result.success && result.changes.length > 0) {
           const change = result.changes[0];
           
-          // Sync all DOM z-indexes (ensures consistency across all objects)
-          await ZIndexManager.syncAllDOMZIndexes();
-          const newZIndex = ZIndexManager.get(id);
+          // [INVESTIGATE] Track DOM state after move but before sync
+          const elAfterMoveBeforeSync = document.getElementById(id);
+          const domStateAfterMoveBeforeSync = elAfterMoveBeforeSync ? parseInt(elAfterMoveBeforeSync.style.zIndex) || 0 : null;
+          const managerZAfterMove = ZIndexManager.get(id);
           
-          // Emit rank update to GM (player sends request, GM broadcasts confirmation)
+          // [INVESTIGATE] Check for duplicates after move but before sync
+          const allTextsAfterMoveBeforeSync = Array.from(document.querySelectorAll('.wbe-canvas-text-container')).map(el => ({
+            id: el.id.slice(-6),
+            zIndex: parseInt(el.style.zIndex) || 0
+          }));
+          const duplicatesAfterMoveBeforeSync = new Map();
+          allTextsAfterMoveBeforeSync.forEach(obj => {
+            if (!duplicatesAfterMoveBeforeSync.has(obj.zIndex)) duplicatesAfterMoveBeforeSync.set(obj.zIndex, []);
+            duplicatesAfterMoveBeforeSync.get(obj.zIndex).push(obj.id);
+          });
+          const duplicateZAfterMoveBeforeSync = Array.from(duplicatesAfterMoveBeforeSync.entries()).filter(([z, ids]) => ids.length > 1 && z >= 1000);
+          if (duplicateZAfterMoveBeforeSync.length > 0) {
+            console.warn(`[INVESTIGATE] moveUp: DUPLICATES IN DOM AFTER move, BEFORE sync for ${id.slice(-6)}:`, duplicateZAfterMoveBeforeSync.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
+          }
+          
+          console.log(`[INVESTIGATE] moveUp: move operation took ${moveDuration}ms, DOM z-index AFTER move, BEFORE sync for ${id.slice(-6)}: ${domStateAfterMoveBeforeSync}, Manager: ${managerZAfterMove}`);
+          // Sync all DOM z-indexes (ensures consistency across all objects)
+          // [ZINDEX_ANALYSIS] Track sync call after moveUp
+          const syncStartTime = Date.now();
+          console.log(`[ZINDEX_ANALYSIS] Calling syncAllDOMZIndexes after moveUp for ${id.slice(-6)}`);
+          await ZIndexManager.syncAllDOMZIndexes();
+          const syncDuration = Date.now() - syncStartTime;
+          
+          // [INVESTIGATE] Track DOM state after sync
+          const elAfterSync = document.getElementById(id);
+          const domStateAfterSync = elAfterSync ? parseInt(elAfterSync.style.zIndex) || 0 : null;
+          const managerZAfterSync = ZIndexManager.get(id);
+          
+          // [INVESTIGATE] Check for duplicates after sync
+          const allTextsAfterSync = Array.from(document.querySelectorAll('.wbe-canvas-text-container')).map(el => ({
+            id: el.id.slice(-6),
+            zIndex: parseInt(el.style.zIndex) || 0
+          }));
+          const duplicatesAfterSync = new Map();
+          allTextsAfterSync.forEach(obj => {
+            if (!duplicatesAfterSync.has(obj.zIndex)) duplicatesAfterSync.set(obj.zIndex, []);
+            duplicatesAfterSync.get(obj.zIndex).push(obj.id);
+          });
+          const duplicateZAfterSync = Array.from(duplicatesAfterSync.entries()).filter(([z, ids]) => ids.length > 1 && z >= 1000);
+          if (duplicateZAfterSync.length > 0) {
+            console.error(`[INVESTIGATE] moveUp: DUPLICATES IN DOM AFTER sync for ${id.slice(-6)}:`, duplicateZAfterSync.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
+          } else {
+            console.log(`[INVESTIGATE] moveUp: No duplicates in DOM after sync for ${id.slice(-6)}`);
+          }
+          
+          console.log(`[INVESTIGATE] moveUp: sync took ${syncDuration}ms, DOM z-index AFTER sync for ${id.slice(-6)}: ${domStateAfterSync}, Manager: ${managerZAfterSync}, total operation=${moveDuration + syncDuration}ms`);
           const rank = ZIndexManager.getRank(id);
           game.socket.emit('module.whiteboard-experience', {
             type: 'rankUpdate',
@@ -2360,19 +2563,14 @@ function createTextElement(
           if (result.swappedWith) {
             await persistSwappedZIndexTarget(result.swappedWith.id);
             console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} (moved up, swapped with ${result.swappedWith.id}: ${result.swappedWith.newZIndex})`);
-          } else {
-            console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} (moved up to next object)`);
           }
           
           console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
-          
-          // Persist text state using debounced batching
           await persistTextState(id, textElement, container);
         } else if (result.atBoundary) {
           // At boundary - provide feedback
           console.log(`[Z-Index] TEXT | ID: ${id} | z-index: ${oldZIndex} | Cannot move up - ${result.reason}`);
         }
-        return;
       }
       
       if (!isEditing && (e.key === "Delete" || e.key === "Backspace")) {
@@ -2436,7 +2634,7 @@ function createTextElement(
       // Add marker to clipboard so paste handler knows this is a FATE text copy
       if (e.clipboardData) e.clipboardData.setData("text/plain", `[wbe-TEXT-COPY:${id}]\n${textElement.textContent}`);
 
-    };;
+    };
 
     const onDocMouseDown = (e) => {
       if (window.wbeColorPanel && window.wbeColorPanel.contains(e.target)) {
@@ -2528,6 +2726,7 @@ function createTextElement(
     };
 
     document.addEventListener("keydown", keydownHandler);
+    console.log(`[INVESTIGATE] Text keydown handler registered for ${id.slice(-6)}`); // TEMPORARY FOR INVESTIGATION
     document.addEventListener("copy",    copyHandler);
     document.addEventListener("mousedown", onDocMouseDown, true);
 
@@ -2541,10 +2740,14 @@ function createTextElement(
   
     // Перетаскивание — только левой кнопкой (на container)
     container.addEventListener("mousedown", (e) => {
+      // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track mousedown event
+      console.log(`[INVESTIGATE] Text drag mousedown: Called for text ${id.slice(-6)}, button=${e.button}, isEditing=${isEditing}`);
+      
       if (isEditing) return;
       
       // Только левая кнопка (0) → перетаскивание объекта
       if (e.button === 0) {
+        console.log(`[INVESTIGATE] Text drag mousedown: Starting drag for text ${id.slice(-6)}`);
         e.preventDefault();
         e.stopPropagation();
         
@@ -2628,7 +2831,11 @@ function createTextElement(
     
     // Resize handle
     resizeHandle.addEventListener("mousedown", (e) => {
+      // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track resize handle mousedown
+      console.log(`[INVESTIGATE] Text resize handle mousedown: Called for text ${id.slice(-6)}, button=${e.button}`);
+      
       if (e.button !== 0) return;
+      console.log(`[INVESTIGATE] Text resize handle mousedown: Starting resize for text ${id.slice(-6)}`);
       e.preventDefault();
       e.stopPropagation();
       
@@ -2884,8 +3091,6 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
     // LOG: Track main text creation with z-index
     const zIndex = ZIndexManager.get(textId);
     console.log(`[Text Creation] ID: ${textId} | z-index: ${zIndex} (addTextToCanvas)`);
-    
-    // If in text mode, automatically enter edit mode
     if (autoEdit) {
       // Select the text element first
       const selectEvent = new MouseEvent("mousedown", {
@@ -2922,16 +3127,29 @@ async function getAllTexts() {
 async function setAllTexts(texts) {
     const timestamp = Date.now();
     const stackTrace = new Error().stack?.split('\n').slice(1, 4).join(' | ') || 'unknown';
+    
+    // [ZINDEX_ANALYSIS] Track setAllTexts calls
+    const textIds = Object.keys(texts);
+    const isEmptyPayload = textIds.length === 0;
+    console.log(`[ZINDEX_ANALYSIS] setAllTexts ENTRY: [${timestamp}] texts=${textIds.length}, isEmpty=${isEmptyPayload}, isGM=${game.user.isGM}, caller=${stackTrace.split('|')[0]?.trim() || 'unknown'}`);
+    // [ZINDEX_ANALYSIS] Track z-index values in payload
+    if (!isEmptyPayload) {
+      const zIndexMap = new Map();
+      textIds.forEach(id => {
+        const textData = texts[id];
+        const zIndex = textData?.zIndex || window.ZIndexManager?.get(id) || 0;
+        if (!zIndexMap.has(zIndex)) zIndexMap.set(zIndex, []);
+        zIndexMap.get(zIndex).push(id);
+      });
+      const duplicates = Array.from(zIndexMap.entries()).filter(([z, ids]) => ids.length > 1 && z > 0);
+      if (duplicates.length > 0) {
+        console.error(`[ZINDEX_ANALYSIS] setAllTexts: DUPLICATES in payload:`, duplicates.map(([z, ids]) => `z=${z}: ${ids.length} objects (${ids.map(id => id.slice(-6)).join(', ')})`));
+      }
+    }
+    
     try {
-      const textIds = Object.keys(texts);
-      const isEmptyPayload = textIds.length === 0;
       console.log(`[WB-E] setAllTexts: [${timestamp}] Sending ${textIds.length} texts:`, textIds.slice(0, 5));
-      console.log(`[WB-E] setAllTexts: [${timestamp}] Call stack:`, stackTrace);
-      
-      // EXPERIMENT PHASE 1: Don't sync z-indexes - Manager is already authoritative
-      // syncWithExisting was causing conflicts when non-GM sends updates
       // Manager already has correct values from local operations
-      
       if (game.user.isGM) {
         await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
         await new Promise(resolve => setTimeout(resolve, 50));
@@ -2961,21 +3179,19 @@ async function setAllTexts(texts) {
               if (hasLockOverlay || isLockedByOther) {
                 const lockedBy = existing.dataset.lockedBy || "unknown";
                 console.log(`[WB-E] GM skipping socket update for ${id} - locked by user ${lockedBy} (has overlay: ${hasLockOverlay})`);
-                continue; // Don't update! This prevents cursor reset and size changes!
+                continue;
               }
 
               // Обновляем существующий элемент
               const textElement = existing.querySelector(".wbe-canvas-text");
+              const textSpan = textElement?.querySelector(".wbe-text-background-span");
               if (textElement) {
                 // ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
                 if (textElement.contentEditable === "true") {
                   console.log(`[WB-E] GM skipping socket update for ${id} - actively being edited`);
                   continue;
                 }
-
-                // Safe to update now
                 // Update text content - check for span first
-                const textSpan = textElement.querySelector(".wbe-text-background-span");
                 if (textSpan) {
                   textSpan.textContent = textData.text;
                 } else {
@@ -2987,11 +3203,9 @@ async function setAllTexts(texts) {
                 textElement.style.transform = `scale(${textData.scale})`;
                 textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR; // Apply color
 
-                // Apply background to span if it exists, otherwise to textElement (backward compat)
+                // Apply background to span
                 if (textSpan && textData.backgroundColor) {
                   textSpan.style.backgroundColor = textData.backgroundColor;
-                } else if (!textSpan) {
-                  textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
                 }
                 TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
                 TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
@@ -3010,9 +3224,8 @@ async function setAllTexts(texts) {
                     textElement.dataset.manualWidth = "false";
                   }
                 } else {
-                  console.log(`[WB-E] GM skipping width update for ${id} - element is locked (lockedSize=true)`);
+                  // Skip width update - element is locked (lockedSize=true)
                 }
-
                 // Update resize handle position after scale/size changes
                 TextTools.updateTextUI(existing);
               }
@@ -3020,11 +3233,6 @@ async function setAllTexts(texts) {
               // Создаем новый элемент
               const createdContainer = TextTools.createTextElement(
                 id,
-                textData.text,
-                textData.left,
-                textData.top,
-                textData.scale,
-                textData.color,
                 textData.backgroundColor,
                 textData.borderColor,
                 textData.borderWidth,
@@ -3037,13 +3245,17 @@ async function setAllTexts(texts) {
                 textData.zIndex ?? null // Use null instead of undefined so default parameter works
               );
 
-              // Apply color and background to newly created element
+              // Apply color to newly created element (background already set in createTextElement via span)
               const created = createdContainer || document.getElementById(id);
               if (created) {
                 const textElement = created.querySelector(".wbe-canvas-text");
                 if (textElement) {
                   textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR;
-                  textElement.style.backgroundColor = textData.backgroundColor || TextTools.DEFAULT_BACKGROUND_COLOR;
+                  // Apply background to span (createTextElement already created span with background)
+                  const textSpan = textElement.querySelector(".wbe-text-background-span");
+                  if (textSpan && textData.backgroundColor) {
+                    textSpan.style.backgroundColor = textData.backgroundColor;
+                  }
                   TextTools.applyFontVariantToElement?.(textElement, textData.fontWeight, textData.fontStyle);
                   TextTools.applyTextAlignmentToElement?.(textElement, textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN);
                   TextTools.applyFontFamilyToElement?.(textElement, textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY);
@@ -3091,7 +3303,18 @@ async function setAllTexts(texts) {
           }
         }
         
-        game.socket.emit(`module.${MODID}`, { type: "textUpdateRequest", texts: textsWithRank, userId: game.user.id });
+        // [ZINDEX_ANALYSIS] Track socket emit
+        const textIdsForSocket = Object.keys(textsWithRank);
+        console.log(`[ZINDEX_ANALYSIS] setAllTexts: Emitting textUpdateRequest: texts=${textIdsForSocket.length}, isEmpty=${textIdsForSocket.length === 0}`);
+        
+        // [INVESTIGATE] Track socket emit for non-GM
+        console.log(`[INVESTIGATE] setAllTexts (non-GM): About to emit textUpdateRequest with ${textIdsForSocket.length} texts`);
+        
+        // Отправляем запрос GM через socket
+        game.socket.emit(`module.${MODID}`, { type: "textUpdateRequest", texts: textsWithRank });
+        
+        // [INVESTIGATE] Track socket emit completion
+        console.log(`[INVESTIGATE] setAllTexts (non-GM): Emitted textUpdateRequest with texts:`, textIdsForSocket.slice(0, 5));
         
         // Обновляем локально для немедленной реакции UI у игрока
         const layer = getOrCreateLayer();
@@ -3099,17 +3322,11 @@ async function setAllTexts(texts) {
           // Получаем все существующие текстовые элементы
           const existingElements = layer.querySelectorAll(".wbe-canvas-text-container");
           const existingIds = new Set(Array.from(existingElements).map(el => el.id));
-          console.log(`[WB-E] setAllTexts: [${timestamp}] Found ${existingIds.size} existing DOM elements:`, Array.from(existingIds).slice(0, 5));
-          
-          // Обновляем существующие и создаем новые тексты локально
+
           for (const [id, textData] of Object.entries(texts)) {
             existingIds.add(id);
             const existing = document.getElementById(id);
             if (existing) {
-              // CRITICAL FIX: Skip locked text elements
-              if (existing.dataset.lockedBy && existing.dataset.lockedBy !== game.user.id) {
-                continue; // Don't update! This prevents cursor reset!
-              }
               
               // Обновляем существующий элемент
               const textElement = existing.querySelector(".wbe-canvas-text");
@@ -3240,10 +3457,10 @@ async function setAllTexts(texts) {
               if (!existingIds.has(element.id)) {
                 // Don't remove if element is locked/being manipulated
                 if (element.dataset.lockedBy) {
-                  console.log(`[WB-E] Preserving text ${element.id} - locked by user ${element.dataset.lockedBy}`);
-                  return;
+                  // Skip locked elements
+                } else {
+                  toRemove.push(element.id);
                 }
-                toRemove.push(element.id);
               }
             });
 
@@ -3269,10 +3486,10 @@ async function setAllTexts(texts) {
               });
             }
           } else {
-            console.log(`[WB-E] setAllTexts: [${timestamp}] Skipping DOM prune for empty payload on non-GM client; awaiting authoritative sync.`);
+            // Skip DOM prune for empty payload on non-GM client; awaiting authoritative sync
+          }
           }
         }
-      }
     } catch (e) {
       console.error("[WB-E] setAllTexts error:", e);
     }
@@ -3282,13 +3499,11 @@ function getTextScale(textEl) {
   const m = (textEl.style.transform || "").match(/scale\(([\d.]+)\)/);
   return m ? parseFloat(m[1]) : 1;
 }
-
 function updateTextResizeHandlePosition(container) {
   if (!container) return;
   const textEl = container.querySelector(".wbe-canvas-text");
   const handle = container.querySelector(".wbe-text-resize-handle");
   if (!textEl || !handle) return;
-
   const scale = getTextScale(textEl);
   const w = textEl.offsetWidth * scale;
   const h = textEl.offsetHeight * scale;

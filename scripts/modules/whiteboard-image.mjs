@@ -12,10 +12,55 @@ import {
 } from "../main.mjs";
 
 // Scale sensitivity constant
-const SCALE_SENSITIVITY = 0.005; // Sensitivity for image scaling
+const SCALE_SENSITIVITY = 0.0025; // Sensitivity for image scaling (increased for better responsiveness)
 
 // Freeze animation constants
 const FREEZE_FADE_DURATION = 0.5; // Duration in seconds for normal panel fade when freezing
+
+// Border and shadow default constants
+const DEFAULT_BORDER_HEX = "#000000";
+const DEFAULT_BORDER_OPACITY = 50;
+const DEFAULT_BORDER_WIDTH = 10;
+const DEFAULT_BORDER_RADIUS = 0;
+const DEFAULT_SHADOW_HEX = "#000000";
+const DEFAULT_SHADOW_OPACITY = 50;
+
+// Helper functions for border color management
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+function hexToRgba(hex, opacity = 100) {
+  if (!hex || typeof hex !== "string") return null;
+  const normalized = hex.replace("#", "");
+  if (![3, 6].includes(normalized.length)) return null;
+  const full = normalized.length === 3
+    ? normalized.split("").map(ch => ch + ch).join("")
+    : normalized;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  const alpha = clamp(Number(opacity) / 100, 0, 1);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function rgbaToHexOpacity(input, fallbackHex = DEFAULT_BORDER_HEX, fallbackOpacity = DEFAULT_BORDER_OPACITY) {
+  if (!input) {
+    return { hex: fallbackHex, opacity: fallbackOpacity };
+  }
+
+  const match = String(input).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/i);
+  if (!match) {
+    return { hex: fallbackHex, opacity: fallbackOpacity };
+  }
+
+  const r = clamp(parseInt(match[1], 10), 0, 255);
+  const g = clamp(parseInt(match[2], 10), 0, 255);
+  const b = clamp(parseInt(match[3], 10), 0, 255);
+  const a = match[4] !== undefined ? clamp(parseFloat(match[4]), 0, 1) : 1;
+
+  const hex = `#${[r, g, b].map(n => n.toString(16).padStart(2, "0")).join("")}`;
+  const opacity = Math.round(a * 100);
+  return { hex, opacity };
+}
 
 // Inject CSS for frozen selection styling (called after imports resolve)
 function injectFrozenSelectionStyles() {
@@ -67,9 +112,9 @@ const debouncedFlushImageUpdates = debounce(async () => {
   if (pendingImageUpdates.size === 0) return;
   
   const pendingIds = Array.from(pendingImageUpdates.keys());
-  console.log(`[WB-E] debouncedFlushImageUpdates: Flushing ${pendingImageUpdates.size} pending updates:`, pendingIds.slice(0, 5));
-  
   // CRITICAL FIX: Build complete state from DOM FIRST (source of truth during rapid updates)
+  // Read DB state to preserve border properties that might be missing from DOM
+  const dbImages = await getAllImages();
   // Then merge with DB state, then apply pending updates
   const images = {};
   
@@ -82,14 +127,25 @@ const debouncedFlushImageUpdates = debounce(async () => {
   if (layer) {
     const existingContainers = layer.querySelectorAll('.wbe-canvas-image-container');
     const domIds = Array.from(existingContainers).map(c => c.id);
-    console.log(`[WB-E] debouncedFlushImageUpdates: DOM has ${domIds.length} elements:`, domIds.slice(0, 5));
-    
     existingContainers.forEach(existingContainer => {
       const existingId = existingContainer.id;
       if (existingId) {
         const existingImageElement = existingContainer.querySelector('.wbe-canvas-image');
         if (existingImageElement) {
           const existingCropData = getImageCropData(existingImageElement);
+          // Extract border style from permanentBorder
+          const permanentBorder = existingContainer.querySelector('.wbe-image-permanent-border');
+          const borderStyle = getImageBorderStyle(permanentBorder);
+          
+          // Preserve border properties from DB if missing from DOM
+          const dbImageData = dbImages[existingId];
+          const preservedBorder = borderStyle ? null : (dbImageData?.borderHex != null ? {
+            hex: dbImageData.borderHex,
+            opacity: dbImageData.borderOpacity,
+            width: dbImageData.borderWidth,
+            radius: dbImageData.borderRadius
+          } : null);
+          
           const existingImageData = {
             src: existingImageElement.src,
             left: parseFloat(existingContainer.style.left) || 0,
@@ -103,7 +159,22 @@ const debouncedFlushImageUpdates = debounce(async () => {
             // EXPERIMENT PHASE 1: Manager is single source of truth for z-index
             // DOM is just a view that _syncDOMZIndex keeps in sync
             zIndex: ZIndexManager.get(existingId),
-            rank: ZIndexManager.getRank(existingId)
+            rank: ZIndexManager.getRank(existingId),
+            // Extract displayWidth/displayHeight from dataset for F5 reload
+            displayWidth: existingImageElement.dataset.displayWidth ? parseFloat(existingImageElement.dataset.displayWidth) : null,
+            displayHeight: existingImageElement.dataset.displayHeight ? parseFloat(existingImageElement.dataset.displayHeight) : null,
+            // Border style - use DOM if available, otherwise preserve from DB
+            ...(borderStyle ? {
+              borderHex: borderStyle.hex,
+              borderOpacity: borderStyle.opacity,
+              borderWidth: borderStyle.width,
+              borderRadius: borderStyle.radius
+            } : preservedBorder ? {
+              borderHex: preservedBorder.hex,
+              borderOpacity: preservedBorder.opacity,
+              borderWidth: preservedBorder.width,
+              borderRadius: preservedBorder.radius
+            } : {})
           };
           images[existingId] = existingImageData;
           domExtractedCount++;
@@ -117,13 +188,24 @@ const debouncedFlushImageUpdates = debounce(async () => {
   // If an object is missing from DOM, it was deleted - trust that
   
   // Apply all pending updates (these override DOM)
+  // But preserve border properties from DB if missing from pending updates
   pendingImageUpdates.forEach((imageData, id) => {
-    images[id] = imageData;
+    const dbImageData = dbImages[id];
+    // If pending update doesn't have border properties, preserve from DB
+    if (imageData.borderHex == null && dbImageData?.borderHex != null) {
+      images[id] = {
+        ...imageData,
+        borderHex: dbImageData.borderHex,
+        borderOpacity: dbImageData.borderOpacity,
+        borderWidth: dbImageData.borderWidth,
+        borderRadius: dbImageData.borderRadius
+      };
+    } else {
+      images[id] = imageData;
+    }
   });
   
   const finalIds = Object.keys(images);
-  console.log(`[WB-E] debouncedFlushImageUpdates: Final state has ${finalIds.length} images (${domExtractedCount} from DOM):`, finalIds.slice(0, 5));
-  
   
 
   // Clear pending updates
@@ -152,6 +234,38 @@ async function persistImageState(id, imageElement, container, options = {}) {
     zIndex = ZIndexManager.get(id);
   }
   
+  // Calculate display dimensions (visible area after scale and crop) for F5 reload placeholder sizing
+  let displayWidth = null;
+  let displayHeight = null;
+  if (imageElement.complete && imageElement.naturalWidth > 0 && imageElement.naturalHeight > 0) {
+    const dims = calculateCroppedDimensions(imageElement, cropData.maskType || 'rect', cropData.crop || { top: 0, right: 0, bottom: 0, left: 0 }, cropData.circleOffset || { x: 0, y: 0 }, cropData.circleRadius, cropData.scale || 1);
+    displayWidth = dims.width;
+    displayHeight = dims.height;
+    
+    // Update dataset for consistency (so DOM extraction can read them)
+    imageElement.dataset.displayWidth = displayWidth;
+    imageElement.dataset.displayHeight = displayHeight;
+    
+    console.log('[PERSIST SAVE] Calculated displayWidth/Height', {
+      id,
+      displayWidth,
+      displayHeight,
+      scale: cropData.scale,
+      complete: imageElement.complete,
+      naturalWidth: imageElement.naturalWidth
+    });
+  } else {
+    console.log('[PERSIST SAVE] Image not loaded, displayWidth/Height will be null', {
+      id,
+      complete: imageElement.complete,
+      naturalWidth: imageElement.naturalWidth
+    });
+  }
+  
+  // Extract border style from permanentBorder
+  const permanentBorder = container.querySelector('.wbe-image-permanent-border');
+  const borderStyle = getImageBorderStyle(permanentBorder);
+  
   const imageData = {
     src: imageElement.src,
     left: parseFloat(container.style.left) || 0,
@@ -163,7 +277,16 @@ async function persistImageState(id, imageElement, container, options = {}) {
     circleRadius: cropData.circleRadius || null,
     isFrozen: container.dataset.frozen === 'true' || false,
     zIndex: zIndex,
-    rank: ZIndexManager.getRank(id)
+    rank: ZIndexManager.getRank(id),
+    displayWidth, // Size of visible area (for F5 reload placeholder sizing)
+    displayHeight, // Size of visible area (for F5 reload placeholder sizing)
+    // Border style - only include if borderStyle exists
+    ...(borderStyle ? {
+      borderHex: borderStyle.hex,
+      borderOpacity: borderStyle.opacity,
+      borderWidth: borderStyle.width,
+      borderRadius: borderStyle.radius
+    } : {})
   };
   
   // Queue the update for debounced batching
@@ -321,19 +444,21 @@ function setImageFrozen(id, frozen, sync = false) {
   }
 
   // Persist freeze state to scene flags (GM only)
+  // Use persistImageState to avoid race conditions with other saves
   if (game.user.isGM) {
-    // Directly update scene flags with freeze state
-    (async () => {
+    // Use setTimeout to avoid blocking, but ensure proper state is saved
+    setTimeout(async () => {
       try {
-        const images = await getAllImages();
-        if (images[id]) {
-          images[id].isFrozen = frozen;
-          await setAllImages(images);
+        const container = imageData.container;
+        const imageElement = container.querySelector('.wbe-canvas-image');
+        if (imageElement) {
+          // This will batch the save with any other pending updates
+          await persistImageState(id, imageElement, container, { skipZIndex: true });
         }
       } catch (error) {
         console.error('[WB-E] Failed to persist freeze state:', error);
       }
-    })();
+    }, 50); // Small delay to ensure DOM state is updated
   }
 
   // Handle sync logic for GM users
@@ -605,11 +730,13 @@ class ImageDragController {
    * @private
    */
   _onMouseDown(event) {
+    
     if (event.button !== 0) return; // Only left click
 
     try {
       // Validate drag conditions
-      if (!this.validateDragConditions()) {
+      const valid = this.validateDragConditions();
+      if (!valid) {
         return;
       }
 
@@ -848,6 +975,7 @@ class SelectionController {
    */
   select() {
     try {
+      // TEMPORARY FOR INVESTIGATION
       // FIX: Check DOM state to ensure consistency before early return
       const domSelected = this.container.dataset.selected === "true";
 
@@ -961,10 +1089,10 @@ class SelectionController {
    */
   deselect() {
     try {
+      // TEMPORARY FOR INVESTIGATION
       // Prevent deselection if not selected
       if (!this.selectionState.selected) {
         console.log('[DEBUG] SelectionController deselect called but not selected:', this.container.id);
-        return;
       }
 
 
@@ -1172,25 +1300,38 @@ class SelectionController {
         top: 0;
         background: transparent;
         pointer-events: auto;
-        z-index: 998;
       `;
 
       this.container.appendChild(clickTarget);
       this.visualElements.clickTarget = clickTarget;
       
-      // FIX: Size click target immediately using current image dimensions
-      // This ensures drag works even if _updateVisuals() hasn't been called yet
+      // FIX: Only size click target if image is loaded
+      // If image is not loaded yet, updateClickTarget will be called after image loads
+      // (see imageElement.addEventListener("load") in createImageElement)
       if (typeof updateClickTarget === 'function' && this.imageElement) {
-        const cropData = getImageCropData(this.imageElement);
-        updateClickTarget(
-          clickTarget,
-          this.imageElement,
-          cropData.maskType,
-          cropData.crop,
-          cropData.circleOffset,
-          cropData.circleRadius,
-          cropData.scale
-        );
+        // Check if image is actually loaded (not just placeholder)
+        const isImageLoaded = this.imageElement.complete && 
+                             this.imageElement.naturalWidth > 0 && 
+                             this.imageElement.naturalHeight > 0;
+        
+        // Also check if image has valid dimensions (not just placeholder max-width/height)
+        const hasValidDimensions = this.imageElement.offsetWidth > 0 && 
+                                   this.imageElement.offsetHeight > 0 &&
+                                   (this.imageElement.offsetWidth !== 200 || this.imageElement.offsetHeight !== 200); // Not placeholder size
+        
+        if (isImageLoaded && hasValidDimensions) {
+          const cropData = getImageCropData(this.imageElement);
+          updateClickTarget(
+            clickTarget,
+            this.imageElement,
+            cropData.maskType,
+            cropData.crop,
+            cropData.circleOffset,
+            cropData.circleRadius,
+            cropData.scale
+          );
+        }
+        // If image not loaded, updateClickTarget will be called after load event
       }
 
     } catch (error) {
@@ -1322,7 +1463,6 @@ function showFrozenSelection(container) {
     container.dataset.selected = "true";
     
     console.log('[showFrozenSelection] Applied frozen styling to:', container.id, {
-      borderColor: selectionBorder.style.borderColor,
       borderWidth: selectionBorder.style.borderWidth,
       classes: selectionBorder.className,
       display: selectionBorder.style.display
@@ -1385,7 +1525,6 @@ function hideFrozenSelection(container) {
     const selectionBorder = container.querySelector('.wbe-image-selection-border');
     if (selectionBorder) {
       console.log('[hideFrozenSelection] Hiding frozen selection for:', container.id);
-      
       // Remove frozen selection styling
       selectionBorder.classList.remove('wbe-frozen-selected');
       selectionBorder.style.display = 'none';
@@ -1571,19 +1710,27 @@ function showUnfreezeIcon(container) {
     document.addEventListener('mouseup', onMouseUp);
     icon.addEventListener('mouseleave', onMouseLeave);
 
-    // Hover effects
-    icon.addEventListener('mouseenter', () => {
+    // Hover effects with event stopping to prevent image selection
+    icon.addEventListener('mouseenter', (e) => {
+      e.stopPropagation(); // Prevent event from reaching image click handlers
       icon.style.background = 'rgba(255, 255, 255, 1)';
       icon.style.borderColor = '#4a9eff';
       unlockIcon.style.color = '#4a9eff';
     });
     
-    icon.addEventListener('mouseleave', () => {
+    icon.addEventListener('mouseleave', (e) => {
+      e.stopPropagation(); // Prevent event from reaching image click handlers
       if (!isHolding) {
         icon.style.background = 'rgba(255, 255, 255, 0.9)';
         icon.style.borderColor = '#666666';
         unlockIcon.style.color = '#666666';
       }
+    });
+    
+    // Prevent click events from bubbling (onMouseDown/onMouseUp already handle stopPropagation)
+    icon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
     });
 
     // Store cleanup function
@@ -1603,8 +1750,6 @@ function showUnfreezeIcon(container) {
 
     // Update position based on visible cropped area
     updateUnfreezeIconPosition(container);
-
-    console.log('[showUnfreezeIcon] Added unfreeze icon to:', container.id);
 
   } catch (error) {
     console.error('[showUnfreezeIcon] Failed to show unfreeze icon:', error);
@@ -1695,7 +1840,6 @@ function hideUnfreezeIcon(container) {
  */
 function reinitializeUnfreezeIcons() {
   console.log('[reinitializeUnfreezeIcons] Re-initializing unfreeze icons...');
-  
   const frozenImages = document.querySelectorAll('.wbe-canvas-image-container.wbe-image-frozen');
   let reinitCount = 0;
   
@@ -1710,7 +1854,6 @@ function reinitializeUnfreezeIcons() {
   });
   
   console.log(`[reinitializeUnfreezeIcons] Re-initialized ${reinitCount} unfreeze icons`);
-  return reinitCount;
 }
 
 /* ======================== End Frozen Unfreeze Icon Functions ======================== */
@@ -1769,7 +1912,6 @@ function handleUnfreezeAction(container) {
     }
 
     console.log('[handleUnfreezeAction] Unfreezing image:', container.id);
-
     // Hide frozen selection state
     hideFrozenSelection(container);
 
@@ -1790,7 +1932,6 @@ function handleUnfreezeAction(container) {
     }, 50);  // Small delay to allow sync to process
 
     console.log('[handleUnfreezeAction] Successfully unfroze image:', container.id);
-
   } catch (error) {
     console.error('[handleUnfreezeAction] Failed to unfreeze image:', error);
   }
@@ -1811,6 +1952,9 @@ class ResizeController {
     this.isResizing = false;
     this.resizeStartX = 0;
     this.resizeStartScale = 1;
+    
+    // Debounce timer for showing panel after resize
+    this.showPanelTimeout = null;
 
     // Handlers (сохраняем ссылки для cleanup)
     this._mouseDownHandler = null;
@@ -1853,9 +1997,11 @@ class ResizeController {
   attachHandlers() {
     this._mouseDownHandler = (e) => this._onMouseDown(e);
     this.handle.addEventListener('mousedown', this._mouseDownHandler);
+    
   }
 
   _onMouseDown(e) {
+    
     if (e.button !== 0) return;
 
     // Проверки из оригинального кода
@@ -1878,6 +2024,17 @@ class ResizeController {
     e.preventDefault();
     e.stopPropagation();
 
+    // Hide panel immediately when resize starts
+    if (window.wbeImageControlPanel) {
+      killImageControlPanel();
+    }
+    
+    // Cancel any pending show panel timeout
+    if (this.showPanelTimeout) {
+      clearTimeout(this.showPanelTimeout);
+      this.showPanelTimeout = null;
+    }
+
     // Захватываем state
     this.isResizing = true;
     isScalingImage = true; // Глобальный флаг для предотвращения deselect
@@ -1898,9 +2055,16 @@ class ResizeController {
   _onMouseMove(e) {
     if (!this.isResizing) return;
 
+    // Calculate mouse movement delta
     const deltaX = e.clientX - this.resizeStartX;
-    const newScale = this.resizeStartScale + (deltaX * SCALE_SENSITIVITY);
-    const finalScale = Math.max(0.01, newScale); // Только предотвращаем negative/zero
+    
+    // Apply sensitivity to calculate scale change
+    // Higher sensitivity = more responsive scaling
+    const scaleDelta = deltaX * SCALE_SENSITIVITY;
+    const newScale = this.resizeStartScale + scaleDelta;
+    
+    // Clamp scale to reasonable bounds (0.01 to 10)
+    const finalScale = Math.max(0.01, Math.min(10, newScale));
 
     // Обновляем scale
     this.imageElement.style.transform = `scale(${finalScale})`;
@@ -1908,8 +2072,34 @@ class ResizeController {
     // Store scale в CSS/Dataset system
     setImageCropData(this.imageElement, { scale: finalScale });
 
-    // Колбэки для обновления UI
+    // Колбэки для обновления UI (это может переместить гизмочку)
     this.onScaleChange(finalScale);
+    
+    // CRITICAL FIX: Update resizeStartX after scale change to account for gizmo movement
+    // When scale changes, the gizmo position updates, so we need to reset the reference point
+    // This prevents accumulation of errors from gizmo position changes
+    this.resizeStartX = e.clientX;
+    this.resizeStartScale = finalScale;
+    
+    // Cancel previous show panel timeout and schedule new one (debounce)
+    if (this.showPanelTimeout) {
+      clearTimeout(this.showPanelTimeout);
+      this.showPanelTimeout = null;
+    }
+    
+    // Schedule panel to show after resize ends (300ms after last mouse move)
+    this.showPanelTimeout = setTimeout(() => {
+      this.showPanelTimeout = null;
+      // Check if image is still selected and resize is finished
+      if (!this.isResizing && this.container.dataset.selected === "true") {
+        const imageElement = this.container.querySelector('.wbe-canvas-image');
+        if (imageElement) {
+          const cropData = getImageCropData(imageElement);
+          const currentMaskType = cropData.maskType || 'rect';
+          showImageControlPanel(imageElement, this.container, currentMaskType);
+        }
+      }
+    }, 300);
   }
 
   async _onMouseUp() {
@@ -1917,6 +2107,27 @@ class ResizeController {
 
     this.isResizing = false;
     isScalingImage = false; // Разрешаем deselect снова
+
+    // Cancel any pending show panel timeout from mousemove
+    // We'll show panel after a short delay to ensure resize is complete
+    if (this.showPanelTimeout) {
+      clearTimeout(this.showPanelTimeout);
+      this.showPanelTimeout = null;
+    }
+    
+    // Schedule panel to show after resize ends (300ms after mouse up)
+    this.showPanelTimeout = setTimeout(() => {
+      this.showPanelTimeout = null;
+      // Check if image is still selected
+      if (this.container.dataset.selected === "true") {
+        const imageElement = this.container.querySelector('.wbe-canvas-image');
+        if (imageElement) {
+          const cropData = getImageCropData(imageElement);
+          const currentMaskType = cropData.maskType || 'rect';
+          showImageControlPanel(imageElement, this.container, currentMaskType);
+        }
+      }
+    }, 300);
 
     // Отписываемся от событий
     document.removeEventListener('mousemove', this._mouseMoveHandler);
@@ -2041,6 +2252,57 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
   // HELPER FUNCTIONS (from colorpanel)
   // ========================================
 
+  const makeSwatch = (hex, size = 30) => {
+    const swatch = document.createElement("div");
+    swatch.style.cssText = `
+      width: ${size}px;
+      height: ${size}px;
+      border-radius: 8px;
+      border: 1px solid #d0d0d0;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+      cursor: pointer;
+      background: ${hex};
+      position: relative;
+      overflow: hidden;
+    `;
+    return swatch;
+  };
+
+  const createSlider = (value, { min, max, step = 1, format = (v) => `${Math.round(v)}%` }) => {
+    const wrapper = document.createElement("div");
+    wrapper.style.cssText = `
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+    `;
+
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = String(min);
+    slider.max = String(max);
+    slider.step = String(step);
+    slider.value = String(value);
+    slider.style.cssText = `
+      flex: 1;
+      height: 6px;
+    `;
+
+    const label = document.createElement("span");
+    label.textContent = format(Number(value));
+    label.style.cssText = `
+      font-size: 12px;
+      color: #555;
+      width: 48px;
+      text-align: right;
+    `;
+
+    wrapper.appendChild(slider);
+    wrapper.appendChild(label);
+
+    return { wrapper, slider, label, update: (v) => { label.textContent = format(Number(v)); } };
+  };
+
   const setButtonActive = (button, isActive) => {
     if (!button) return;
     if (isActive) {
@@ -2115,9 +2377,209 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
 
   const positionSubpanel = () => {
     if (!activeSubpanel || !activeButton) return;
-    const left = activeButton.offsetLeft + activeButton.offsetWidth / 2;
+    const left = activeButton.offsetLeft + activeButton.offsetWidth + 10;
     activeSubpanel.style.left = `${left}px`;
-    activeSubpanel.style.top = `-${activeSubpanel.offsetHeight + 10}px`;
+    activeSubpanel.style.top = `${activeButton.offsetTop}px`;
+  };
+
+  // ========================================
+  // BUILD BORDER SUBPANEL (color and opacity only)
+  // ========================================
+
+  const buildBorderSubpanel = () => {
+    // Read actual border style from permanentBorder element
+    const permanentBorder = container.querySelector('.wbe-image-permanent-border');
+    const currentBorderStyle = getImageBorderStyle(permanentBorder);
+    
+    const borderColorInfo = {
+      hex: currentBorderStyle?.hex || DEFAULT_BORDER_HEX,
+      opacity: currentBorderStyle?.opacity ?? DEFAULT_BORDER_OPACITY
+    };
+    const currentBorderWidth = currentBorderStyle?.width ?? DEFAULT_BORDER_WIDTH;
+    const currentBorderRadius = currentBorderStyle?.radius ?? DEFAULT_BORDER_RADIUS;
+    const shadowColorInfo = {
+      hex: DEFAULT_SHADOW_HEX,
+      opacity: DEFAULT_SHADOW_OPACITY
+    };
+
+    const sub = document.createElement("div");
+    sub.className = "wbe-image-border-subpanel";
+    sub.style.cssText = `
+      position: absolute;
+      background: white;
+      border: 1px solid #dcdcdc;
+      border-radius: 12px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+      padding: 14px;
+      min-width: 240px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      pointer-events: auto;
+    `;
+
+    // ========================================
+    // BORDER SECTION
+    // ========================================
+    const borderSection = document.createElement("div");
+    borderSection.style.cssText = "display: flex; flex-direction: column; gap: 12px;";
+
+    const borderHeader = document.createElement("div");
+    borderHeader.textContent = "Border";
+    borderHeader.style.cssText = "font-size: 13px; font-weight: 600; color: #1f1f24;";
+    borderSection.appendChild(borderHeader);
+
+    const borderRow = document.createElement("div");
+    borderRow.style.cssText = "display: flex; align-items: center; gap: 12px;";
+    borderSection.appendChild(borderRow);
+
+    const borderSwatch = makeSwatch(borderColorInfo.hex);
+    borderRow.appendChild(borderSwatch);
+
+    const borderColorInput = document.createElement("input");
+    borderColorInput.type = "color";
+    borderColorInput.value = borderColorInfo.hex;
+    borderColorInput.style.cssText = "position:absolute; opacity:0; pointer-events:none;";
+    borderSection.appendChild(borderColorInput);
+
+    const { wrapper: borderOpacityRow, slider: borderOpacitySlider, update: updateBorderOpacityLabel } = createSlider(borderColorInfo.opacity, { min: 0, max: 100 });
+    borderRow.appendChild(borderOpacityRow);
+
+    const { wrapper: borderWidthRow, slider: borderWidthSlider, update: updateBorderWidthLabel } = createSlider(currentBorderWidth, {
+      min: 0,
+      max: 12,
+      step: 1,
+      format: (v) => {
+        const numeric = Number(v) || 0;
+        return `${Math.round(numeric)}px`;
+      }
+    });
+    borderSection.appendChild(borderWidthRow);
+
+    const { wrapper: borderRadiusRow, slider: borderRadiusSlider, update: updateBorderRadiusLabel } = createSlider(currentBorderRadius, {
+      min: 0,
+      max: 20,
+      step: 1,
+      format: (v) => {
+        const numeric = Number(v) || 0;
+        return `${Math.round(numeric)}px`;
+      }
+    });
+    borderSection.appendChild(borderRadiusRow);
+
+    // Apply border style to permanentBorder
+    const applyBorder = async (hex, opacity, width, radius) => {
+      if (!permanentBorder) return;
+      
+      updateImageBorderStyle(permanentBorder, {
+        hexColor: hex,
+        opacity: opacity,
+        width: width,
+        radius: radius
+      });
+      
+      // Persist border style to image state
+      const imageElement = container.querySelector('.wbe-canvas-image');
+      if (imageElement) {
+        await persistImageState(container.id, imageElement, container, { skipZIndex: true });
+      }
+    };
+
+    const syncBorder = async () => {
+      const opacity = Number(borderOpacitySlider.value);
+      const width = Number(borderWidthSlider.value);
+      const radius = Number(borderRadiusSlider.value);
+      updateBorderOpacityLabel(opacity);
+      updateBorderWidthLabel(width);
+      updateBorderRadiusLabel(radius);
+      borderSwatch.style.opacity = width > 0 ? "1" : "0.45";
+      await applyBorder(borderColorInput.value, opacity, width, radius);
+    };
+
+    borderSwatch.addEventListener("click", () => borderColorInput.click());
+    borderColorInput.addEventListener("change", async (e) => {
+      borderSwatch.style.background = e.target.value;
+      await syncBorder();
+    });
+    borderOpacitySlider.addEventListener("input", () => {
+      updateBorderOpacityLabel(Number(borderOpacitySlider.value));
+      updateBorderWidthLabel(Number(borderWidthSlider.value));
+      updateBorderRadiusLabel(Number(borderRadiusSlider.value));
+      borderSwatch.style.opacity = Number(borderWidthSlider.value) > 0 ? "1" : "0.45";
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    borderWidthSlider.addEventListener("input", () => {
+      updateBorderOpacityLabel(Number(borderOpacitySlider.value));
+      updateBorderWidthLabel(Number(borderWidthSlider.value));
+      updateBorderRadiusLabel(Number(borderRadiusSlider.value));
+      borderSwatch.style.opacity = Number(borderWidthSlider.value) > 0 ? "1" : "0.45";
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    borderRadiusSlider.addEventListener("input", () => {
+      updateBorderOpacityLabel(Number(borderOpacitySlider.value));
+      updateBorderWidthLabel(Number(borderWidthSlider.value));
+      updateBorderRadiusLabel(Number(borderRadiusSlider.value));
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    borderOpacitySlider.addEventListener("change", syncBorder);
+    borderWidthSlider.addEventListener("change", syncBorder);
+    borderRadiusSlider.addEventListener("change", syncBorder);
+
+    sub.appendChild(borderSection);
+
+    // ========================================
+    // SHADOW SECTION
+    // ========================================
+    const shadowSection = document.createElement("div");
+    shadowSection.style.cssText = "display: flex; flex-direction: column; gap: 12px;";
+
+    const shadowHeader = document.createElement("div");
+    shadowHeader.textContent = "Shadow";
+    shadowHeader.style.cssText = "font-size: 13px; font-weight: 600; color: #1f1f24;";
+    shadowSection.appendChild(shadowHeader);
+
+    const shadowRow = document.createElement("div");
+    shadowRow.style.cssText = "display: flex; align-items: center; gap: 12px;";
+    shadowSection.appendChild(shadowRow);
+
+    const shadowSwatch = makeSwatch(shadowColorInfo.hex);
+    shadowRow.appendChild(shadowSwatch);
+
+    const shadowColorInput = document.createElement("input");
+    shadowColorInput.type = "color";
+    shadowColorInput.value = shadowColorInfo.hex;
+    shadowColorInput.style.cssText = "position:absolute; opacity:0; pointer-events:none;";
+    shadowSection.appendChild(shadowColorInput);
+
+    const { wrapper: shadowOpacityRow, slider: shadowOpacitySlider, update: updateShadowOpacityLabel } = createSlider(shadowColorInfo.opacity, { min: 0, max: 100 });
+    shadowRow.appendChild(shadowOpacityRow);
+
+    // TODO: Connect to actual shadow update logic
+    const applyShadow = async (hex, opacity) => {
+      // Placeholder - will be connected to shadow update later
+      console.log(`[WB-E] Shadow update: hex=${hex}, opacity=${opacity}`);
+    };
+
+    const syncShadow = async () => {
+      const opacity = Number(shadowOpacitySlider.value);
+      updateShadowOpacityLabel(opacity);
+      await applyShadow(shadowColorInput.value, opacity);
+    };
+
+    shadowSwatch.addEventListener("click", () => shadowColorInput.click());
+    shadowColorInput.addEventListener("change", async (e) => {
+      shadowSwatch.style.background = e.target.value;
+      await syncShadow();
+    });
+    shadowOpacitySlider.addEventListener("input", () => {
+      updateShadowOpacityLabel(Number(shadowOpacitySlider.value));
+      // Only update visual feedback during dragging, don't persist yet
+    });
+    shadowOpacitySlider.addEventListener("change", syncShadow);
+
+    sub.appendChild(shadowSection);
+
+    return sub;
   };
 
   // ========================================
@@ -2279,12 +2741,14 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
         }
       }
       subpanel = buildCropSubpanel();
+    } else if (type === "border") {
+      subpanel = buildBorderSubpanel();
     }
 
     if (!subpanel) return;
 
     subpanel.style.opacity = "0";
-    subpanel.style.transform = "translateY(-8px)";
+    subpanel.style.transform = "translateX(-8px)";
     panel.appendChild(subpanel);
 
     activeSubpanel = subpanel;
@@ -2296,7 +2760,7 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
       if (!activeSubpanel) return;
       activeSubpanel.style.transition = "opacity 0.16s ease, transform 0.16s ease";
       activeSubpanel.style.opacity = "1";
-      activeSubpanel.style.transform = "translateY(0)";
+      activeSubpanel.style.transform = "translateX(0)";
     });
   };
 
@@ -2308,6 +2772,10 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
   setButtonActive(cropBtn, false);
 
   cropBtn.addEventListener("click", () => openSubpanel("crop", cropBtn));
+
+  const borderBtn = makeToolbarButton("Border", "fas fa-border-all");
+  setButtonActive(borderBtn, false);
+  borderBtn.addEventListener("click", () => openSubpanel("border", borderBtn));
 
   const lockBtn = makeToolbarButton("Lock", "fas fa-lock");
   setButtonActive(lockBtn, false);
@@ -2369,6 +2837,7 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
   });
 
   toolbar.appendChild(cropBtn);
+  toolbar.appendChild(borderBtn);
   toolbar.appendChild(lockBtn);
   panel.appendChild(toolbar);
   document.body.appendChild(panel);
@@ -2378,7 +2847,19 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
   // ========================================
 
   const updatePanelPosition = () => {
-    const rect = imageElement.getBoundingClientRect();
+    // Use selection border position (blue border when selected)
+    // This represents the visible cropped area when image is selected
+    // Panel is only shown when image is selected, so selection border is the correct reference
+    const border = container.querySelector('.wbe-image-selection-border');
+    
+    let rect;
+    if (border) {
+      // Use selection border rect - this represents the visible cropped area
+      rect = border.getBoundingClientRect();
+    } else {
+      // Fallback to imageElement if selection border not found
+      rect = imageElement.getBoundingClientRect();
+    }
     
     // Get panel dimensions (use fallback values if panel is not yet rendered)
     const panelRect = panel.getBoundingClientRect();
@@ -2389,7 +2870,7 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
     const topThreshold = 150; // Threshold for switching panel to bottom position
     
     // HORIZONTAL POSITIONING
-    // Center panel relative to object
+    // Center panel relative to visible area (border)
     let panelCenterX = rect.left + rect.width / 2;
     const halfPanelWidth = panelWidth / 2;
     
@@ -2465,6 +2946,12 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
   };
 
   const onKey = (ev) => {
+    // CRITICAL: Don't intercept Ctrl+C - let global handler process it
+    // Use e.code instead of e.key for multi-language keyboard support
+    if ((ev.ctrlKey || ev.metaKey) && (ev.code === "KeyC" || ev.key.toLowerCase() === "c")) {
+      return; // Let event bubble to global handler
+    }
+    
     if (ev.key === "Escape") {
       if (activeSubpanel) {
         // 1st ESC: Закрыть субпанель
@@ -2683,6 +3170,8 @@ function installGlobalMaskPanHooks() {
 
   // Zoom wheel should always work, even over selected images
   // Temporarily disable click target to allow wheel events to reach canvas
+  let wheelShowPanelTimeout = null;
+  
   document.addEventListener("wheel", (e) => {
     if (e.deltaY === 0) return;
     
@@ -2696,18 +3185,35 @@ function installGlobalMaskPanHooks() {
       });
     });
     
-    // Manage panels
+    // Manage panels with debounce to prevent flickering
     if (selectedImageId) {
-      killImageControlPanel();
-      // Restore panel after zoom
-      if (selectedImageId) {
-        // Check if the selected image is frozen to show the right panel
-        if (isImageFrozen(selectedImageId)) {
-          safeReshowFrozenPanel(selectedImageId, 200);
-        } else {
-          safeReshowImagePanel(selectedImageId, 200);
-        }
+      // Hide panel immediately on first wheel event (only if panel exists)
+      if (window.wbeImageControlPanel) {
+        killImageControlPanel();
       }
+      
+      // Cancel previous show panel timeout
+      if (wheelShowPanelTimeout) {
+        clearTimeout(wheelShowPanelTimeout);
+        wheelShowPanelTimeout = null;
+      }
+      
+      // Schedule panel to show after zoom ends (300ms after last wheel event)
+      wheelShowPanelTimeout = setTimeout(() => {
+        wheelShowPanelTimeout = null;
+        // Check if image is still selected before showing panel
+        if (selectedImageId) {
+          const container = document.getElementById(selectedImageId);
+          if (container && container.dataset.selected === "true") {
+            // Check if the selected image is frozen to show the right panel
+            if (isImageFrozen(selectedImageId)) {
+              safeReshowFrozenPanel(selectedImageId, 0);
+            } else {
+              safeReshowImagePanel(selectedImageId, 0);
+            }
+          }
+        }
+      }, 300); // Show panel 300ms after last wheel event
     }
   }, { capture: true, passive: true });
 }
@@ -2869,14 +3375,13 @@ document.addEventListener("keydown", async (e) => {
       });
       
       console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
-      
       // Persist selected image using debounced batching
       await persistImageState(selectedImageId, imageElement, container);
     } else if (result.atBoundary) {
       // At boundary - provide feedback
       console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | Cannot move down - ${result.reason}`);
+      return;
     }
-    return;
   }
   
   if (e.key === ']' || e.key === 'PageUp') {
@@ -2912,18 +3417,22 @@ document.addEventListener("keydown", async (e) => {
       });
       
       console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | z-index: ${oldZIndex} → ${newZIndex} | rank: ${change.rank}`);
-      
       // Persist selected image using debounced batching
       await persistImageState(selectedImageId, imageElement, container);
     } else if (result.atBoundary) {
       // At boundary - provide feedback
       console.log(`[Z-Index] IMAGE | ID: ${selectedImageId} | Cannot move up - ${result.reason}`);
+      return;
     }
-    return;
   }
 
   // Delete / Backspace
   if (e.key === "Delete" || e.key === "Backspace") {
+    // CRITICAL FIX: Don't handle if mass selection is active
+    if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+      return; // Let mass selection handler handle it
+    }
+    
     e.preventDefault();
     e.stopPropagation();
 
@@ -2950,7 +3459,8 @@ document.addEventListener("keydown", async (e) => {
   }
 
   // Ctrl+C - программно вызываем copy
-  if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "c")) {
+  // Use e.code for multi-language keyboard support (KeyC works for all layouts)
+  if ((e.ctrlKey || e.metaKey) && (e.code === "KeyC" || e.key.toLowerCase() === "c")) {
     e.preventDefault();
     document.execCommand("copy");
   }
@@ -2969,6 +3479,17 @@ document.addEventListener("copy", (e) => {
   // CRITICAL: Read fresh data from DOM instead of stale closure variables
   const { crop, maskType, circleOffset, circleRadius, scale } = getImageCropData(imageElement);
 
+  // Calculate visible display dimensions (after scale and crop)
+  // This is the size the user sees, which we'll use for placeholder sizing
+  let displayWidth = 200; // Default fallback
+  let displayHeight = 200; // Default fallback
+  
+  if (imageElement.complete && imageElement.naturalWidth > 0 && imageElement.naturalHeight > 0) {
+    const dims = calculateCroppedDimensions(imageElement, maskType, crop, circleOffset, circleRadius, scale);
+    displayWidth = dims.width;
+    displayHeight = dims.height;
+  }
+
   copiedImageData = {
     src: imageElement.src,
     scale,
@@ -2976,7 +3497,9 @@ document.addEventListener("copy", (e) => {
     maskType,
     circleOffset: { ...circleOffset },
     circleRadius,
-    isFrozen: isImageFrozen(selectedImageId)
+    isFrozen: isImageFrozen(selectedImageId),
+    displayWidth, // Size of visible area (after scale and crop)
+    displayHeight // Size of visible area (after scale and crop)
   };
 
   e.clipboardData?.setData("text/plain", `[wbe-IMAGE-COPY:${selectedImageId}]`);
@@ -2994,6 +3517,7 @@ function clearImageCaches(id) {
       imageData.resizeController.destroy();
     }
     if (imageData.selectionController) {
+      // TEMPORARY FOR INVESTIGATION
       imageData.selectionController.destroy();
     }
   }
@@ -3041,9 +3565,23 @@ function getImageCropData(imageElement) {
 }
 
 function getUnscaledSize(imageElement) {
-  const rect = imageElement.getBoundingClientRect();
+  // Get scale from transform
   const scaleMatch = (imageElement.style.transform || "").match(/scale\(([\d.]+)\)/);
   const s = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
+  
+  // Use naturalWidth/naturalHeight for base dimensions (actual image file dimensions)
+  // This is the source of truth for image size, independent of CSS styling
+  const naturalWidth = imageElement.naturalWidth || 0;
+  const naturalHeight = imageElement.naturalHeight || 0;
+  
+  // If natural dimensions are available (image loaded), use them
+  if (naturalWidth > 0 && naturalHeight > 0) {
+    return { width: naturalWidth, height: naturalHeight, scale: s };
+  }
+  
+  // Fallback: if image not loaded yet, use getBoundingClientRect
+  // This accounts for placeholder sizing (max-width/max-height)
+  const rect = imageElement.getBoundingClientRect();
   // rect.width/height включают transform; делим на scale и получаем "локальные" размеры
   return { width: rect.width / s, height: rect.height / s, scale: s };
 }
@@ -3095,30 +3633,29 @@ function setImageCropData(imageElement, data) {
 function updateClickTarget(clickTarget, imageElement, maskType, crop, circleOffset, circleRadius, scale) {
   if (!clickTarget || !imageElement) return;
 
-  const width = imageElement.offsetWidth;
-  const height = imageElement.offsetHeight;
-
-  if (maskType === 'rect') {
-    const croppedWidth = width - crop.left - crop.right;
-    const croppedHeight = height - crop.top - crop.bottom;
-    clickTarget.style.width = `${croppedWidth * scale}px`;
-    clickTarget.style.height = `${croppedHeight * scale}px`;
-    clickTarget.style.left = `${crop.left * scale}px`;
-    clickTarget.style.top = `${crop.top * scale}px`;
-    clickTarget.style.borderRadius = "0";
-  } else if (maskType === 'circle') {
-    const fallback = Math.min(width, height) / 2;
-    const currentRadius = (circleRadius == null) ? fallback : circleRadius;
-    const diameter = currentRadius * 2;
-    const centerX = width / 2 + circleOffset.x;
-    const centerY = height / 2 + circleOffset.y;
-
-    clickTarget.style.width = `${diameter * scale}px`;
-    clickTarget.style.height = `${diameter * scale}px`;
-    clickTarget.style.left = `${(centerX - currentRadius) * scale}px`;
-    clickTarget.style.top = `${(centerY - currentRadius) * scale}px`;
-    clickTarget.style.borderRadius = "50%";
+  // Get unscaled dimensions first
+  const unscaledSize = getUnscaledSize(imageElement);
+  const baseWidth = unscaledSize.width;
+  const baseHeight = unscaledSize.height;
+  
+  // If dimensions are invalid (0 or placeholder), skip update
+  if (baseWidth === 0 || baseHeight === 0) {
+    return; // Skip update until image loads
   }
+  
+  // Also skip if dimensions are placeholder size (200px max-width/height from loading state)
+  if (baseWidth === 200 && baseHeight === 200 && !imageElement.complete) {
+    return; // Skip update until image loads (will be called again after load event)
+  }
+
+  // Use unified calculation function
+  const dims = calculateCroppedDimensions(imageElement, maskType, crop, circleOffset, circleRadius, scale);
+  
+  clickTarget.style.width = `${dims.width}px`;
+  clickTarget.style.height = `${dims.height}px`;
+  clickTarget.style.left = `${dims.left}px`;
+  clickTarget.style.top = `${dims.top}px`;
+  clickTarget.style.borderRadius = maskType === 'circle' ? "50%" : "0";
 }
 
 /* ----------------------- Image Crop Data Helpers (Single Source of Truth) ------------------ */
@@ -3304,7 +3841,6 @@ function installGlobalImageSelectionHandler() {
 
   document.addEventListener("mousedown", async (e) => {
 
-
     if (e.button !== 0) return; // Only left click
 
     // FIX: Prevent image deselection when clicking ImageControlPanel or FrozenControlPanel
@@ -3314,6 +3850,12 @@ function installGlobalImageSelectionHandler() {
     
     if (window.wbeFrozenControlPanel && window.wbeFrozenControlPanel.contains(e.target)) {
       return; // Don't process image selection when clicking FrozenControlPanel
+    }
+    
+    // FIX: Prevent image selection when clicking on unfreeze icon
+    const unfreezeIcon = e.target.closest('.wbe-unfreeze-icon');
+    if (unfreezeIcon) {
+      return; // Don't process image selection when clicking unfreeze icon
     }
 
     // FIX: Prevent dual selection - check if clicking on other element types first
@@ -3344,7 +3886,6 @@ function installGlobalImageSelectionHandler() {
     // If clicking on text, or color panels, don't process image selection
     if (clickedOnText || colorPanel) {
       console.log("clicked on text or color panel, skipping image selection");
-      // FIX: Synchronously kill image panel immediately to prevent race condition
       // Don't wait for async deselection - text handler will manage deselection
       killImageControlPanel();
       
@@ -3409,6 +3950,7 @@ function installGlobalImageSelectionHandler() {
     let topmostImageIndex = -1;
     let topmostElement = null;
     
+    
     // Find the topmost image element in the stack (lowest index = highest z-index)
     for (let i = 0; i < elementsAtPoint.length; i++) {
       const el = elementsAtPoint[i];
@@ -3418,6 +3960,7 @@ function installGlobalImageSelectionHandler() {
       if (imageContainer) {
         const id = imageContainer.id;
         const imageData = imageRegistry.get(id);
+        
         
         if (imageData && 
             !isImageFrozen(id) &&
@@ -3432,6 +3975,7 @@ function installGlobalImageSelectionHandler() {
         }
       }
     }
+    
     
     // Third pass: If we found a topmost image, check if click is on its interactive elements
     if (topmostImageId) {
@@ -3452,16 +3996,43 @@ function installGlobalImageSelectionHandler() {
         topmostElement === h || h.contains(topmostElement)
       );
       
-      const clickedOnThis = topmostElement === clickTarget ||
+      // Check if click is on clickTarget, resizeHandle, or cropUI (always allow these)
+      const isOnInteractiveElement = topmostElement === clickTarget ||
         (clickTarget && (clickTarget === topmostElement || clickTarget.contains(topmostElement))) ||
         topmostElement === resizeHandle ||
-        topmostElement === container ||
-        container.contains(topmostElement) ||
         isCropUI;
+      
+      // If click is on container or its children, check if it's in the "dead zone"
+      let isInDeadZone = false;
+      if (!isOnInteractiveElement && (topmostElement === container || container.contains(topmostElement))) {
+        // Calculate local coordinates relative to container
+        const containerRect = container.getBoundingClientRect();
+        const localX = e.clientX - containerRect.left;
+        const localY = e.clientY - containerRect.top;
+        
+        // Get crop dimensions to check dead zone
+        const imageElement = container.querySelector('.wbe-canvas-image');
+        if (imageElement) {
+          const cropData = getImageCropData(imageElement);
+          const dims = calculateCroppedDimensions(imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+          
+          // Dead zone is area before dims.left/top (where borders and clickTarget are positioned)
+          isInDeadZone = localX < dims.left || localY < dims.top;
+          
+          console.log(`[CLICK ZONE CHECK] localX=${localX.toFixed(2)}, localY=${localY.toFixed(2)}, dims.left=${dims.left.toFixed(2)}, dims.top=${dims.top.toFixed(2)}, isInDeadZone=${isInDeadZone}`);
+        }
+      }
+      
+      // Only consider it a click on the image if:
+      // 1. It's on an interactive element (clickTarget, resizeHandle, cropUI), OR
+      // 2. It's on container/children AND NOT in the dead zone
+      const clickedOnThis = isOnInteractiveElement || 
+        (!isInDeadZone && (topmostElement === container || container.contains(topmostElement)));
       
       if (clickedOnThis) {
         clickedImageId = topmostImageId;
         clickedImageData = imageData;
+        
         
         // Set proper pointer-events for selected image
         const inCropModeForMe = container.dataset.lockedBy === game.user.id;
@@ -3476,6 +4047,7 @@ function installGlobalImageSelectionHandler() {
             clickTarget.style.setProperty("pointer-events", "auto", "important");
           }
         }
+      } else {
       }
     }
     
@@ -3508,7 +4080,6 @@ function installGlobalImageSelectionHandler() {
 
     // Handle selection/deselection
     if (clickedImageId && clickedImageData) {
-      // Debug logging removed for performance
 
       // Clicked on an image
       const isSelected = clickedImageData.container.dataset.selected === "true";
@@ -3578,9 +4149,50 @@ function installGlobalImageSelectionHandler() {
 
 /* ----------------------- Canvas Text/Image Functions ------------------ */
 
-function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, right: 0, bottom: 0, left: 0 }, maskType = 'rect', circleOffset = { x: 0, y: 0 }, circleRadiusParam = null, existingZIndex = null, isFrozen = false) {
-  console.log('[DEBUG] Creating image element:', { id, src, left, top, scale, crop, maskType });
-  const layer = getOrCreateLayer();
+/**
+ * Create image element with named parameters (refactored to avoid parameter order bugs)
+ * @param {Object} params - Image parameters
+ * @param {string} params.id - Unique identifier for the image
+ * @param {string} params.src - Image source URL
+ * @param {number} params.left - X position
+ * @param {number} params.top - Y position
+ * @param {number} [params.scale=1] - Image scale
+ * @param {Object} [params.crop] - Crop data
+ * @param {string} [params.maskType='rect'] - Mask type ('rect' or 'circle')
+ * @param {Object} [params.circleOffset] - Circle mask offset
+ * @param {number} [params.circleRadius=null] - Circle mask radius
+ * @param {number} [params.existingZIndex=null] - Existing z-index (for migration)
+ * @param {boolean} [params.isFrozen=false] - Whether image is frozen
+ * @param {number} [params.displayWidth=null] - Display width for F5 reload
+ * @param {number} [params.displayHeight=null] - Display height for F5 reload
+ * @param {string} [params.borderHex] - Border color hex
+ * @param {number} [params.borderOpacity] - Border opacity (0-100)
+ * @param {number} [params.borderWidth] - Border width in pixels
+ * @param {number} [params.borderRadius] - Border radius in pixels
+ */
+function createImageElement({
+  id,
+  src,
+  left,
+  top,
+  scale = 1,
+  crop = { top: 0, right: 0, bottom: 0, left: 0 },
+  maskType = 'rect',
+  circleOffset = { x: 0, y: 0 },
+  circleRadius: circleRadiusParam = null,
+  existingZIndex = null,
+  isFrozen = false,
+  displayWidth = null,
+  displayHeight = null,
+  borderHex = null,
+  borderOpacity = null,
+  borderWidth = null,
+  borderRadius = null
+}) {
+  const layer = document.getElementById('whiteboard-experience-layer') ||
+                document.querySelector('.wbe-layer') || 
+                document.getElementById('board')?.parentElement?.querySelector('#whiteboard-experience-layer') ||
+                document.querySelector('[class*="wbe-layer"]');
   if (!layer) return;
 
   // Читаем maskType из глобальных переменных
@@ -3622,12 +4234,204 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
   const imageElement = document.createElement("img");
   imageElement.className = "wbe-canvas-image";
 
+  // Calculate placeholder size based on image type:
+  // 1. Copy-paste: Use displayWidth/displayHeight from copiedImageData (already accounts for scale and crop)
+  // 2. New image (scale = 1): Use maxDisplaySize (350px) if will be auto-scaled, else natural size
+  // 3. F5 reload (scale != 1): Use saved scale * natural size (with crop)
+  // CRITICAL: Use nullish coalescing (??) instead of || to allow 0 values
+  let placeholderWidth = (displayWidth != null && displayWidth !== false) ? displayWidth : 200;
+  let placeholderHeight = (displayHeight != null && displayHeight !== false) ? displayHeight : 200;
+  
+  console.log('[PLACEHOLDER INIT] Raw params', {
+    id,
+    displayWidth,
+    displayHeight,
+    displayWidthType: typeof displayWidth,
+    displayHeightType: typeof displayHeight,
+    placeholderWidth,
+    placeholderHeight
+  });
+  
+  // Preload image to get natural dimensions for placeholder sizing
+  // Always preload to get naturalWidth/naturalHeight, even for copy-paste/F5
+  // This ensures correct aspect ratio and dimensions
+  const preloadImg = new Image();
+  let finalScale = scale; // Will be updated by preload
+  
+  preloadImg.onload = () => {
+    const naturalWidth = preloadImg.naturalWidth;
+    const naturalHeight = preloadImg.naturalHeight;
+    
+    // Determine final scale and display dimensions
+    const maxDisplaySize = 350;
+    
+    // For new images (scale = 1), check if auto-scaling will be applied
+    if (scale === 1 && (naturalWidth > maxDisplaySize || naturalHeight > maxDisplaySize)) {
+      const maxDimension = Math.max(naturalWidth, naturalHeight);
+      finalScale = maxDisplaySize / maxDimension;
+    } else {
+      finalScale = scale;
+    }
+    
+    // Calculate display dimensions based on mask type and crop
+    let calculatedDisplayWidth, calculatedDisplayHeight;
+    if (currentMaskType === 'rect') {
+      const croppedWidth = naturalWidth - crop.left - crop.right;
+      const croppedHeight = naturalHeight - crop.top - crop.bottom;
+      calculatedDisplayWidth = croppedWidth * finalScale;
+      calculatedDisplayHeight = croppedHeight * finalScale;
+    } else {
+      // Circle mask
+      const currentRadius = circleRadiusParam !== null ? circleRadiusParam : Math.min(naturalWidth, naturalHeight) / 2;
+      const diameter = currentRadius * 2;
+      calculatedDisplayWidth = diameter * finalScale;
+      calculatedDisplayHeight = diameter * finalScale;
+    }
+    
+    console.log('[PRELOAD] Preload callback', {
+      id,
+      naturalWidth,
+      naturalHeight,
+      scale,
+      finalScale,
+      displayWidth,
+      displayHeight,
+      calculatedDisplayWidth,
+      calculatedDisplayHeight,
+      imageElementComplete: imageElement.complete,
+      imageElementNaturalWidth: imageElement.naturalWidth
+    });
+    
+    // For copy-paste/F5: verify calculated size matches saved displayWidth/displayHeight
+    // If they match (within tolerance), use natural dimensions directly
+    // If they don't match, use calculated size (may have changed)
+    if (displayWidth && displayHeight) {
+      const tolerance = 1; // Allow 1px difference for rounding
+      const widthMatch = Math.abs(calculatedDisplayWidth - displayWidth) <= tolerance;
+      const heightMatch = Math.abs(calculatedDisplayHeight - displayHeight) <= tolerance;
+      
+      console.log('[PRELOAD] Size comparison', {
+        id,
+        widthMatch,
+        heightMatch,
+        calculatedDisplayWidth,
+        displayWidth,
+        diff: Math.abs(calculatedDisplayWidth - displayWidth)
+      });
+      
+      if (widthMatch && heightMatch) {
+        // Saved size matches calculated size - use natural dimensions
+        placeholderWidth = calculatedDisplayWidth;
+        placeholderHeight = calculatedDisplayHeight;
+      } else {
+        // Size mismatch - use calculated size (image may have changed)
+        placeholderWidth = calculatedDisplayWidth;
+        placeholderHeight = calculatedDisplayHeight;
+      }
+    } else {
+      // New image: use calculated size
+      placeholderWidth = calculatedDisplayWidth;
+      placeholderHeight = calculatedDisplayHeight;
+    }
+    
+    // Update placeholder size if image hasn't loaded yet
+    // CRITICAL: For F5, imageElement may already be loaded from cache, so this block won't execute!
+    // We need to update placeholder size ALWAYS, not just when imageElement is not complete
+    const shouldUpdatePlaceholder = !imageElement.complete || imageElement.naturalWidth === 0;
+    console.log('[PRELOAD] Should update placeholder?', {
+      id,
+      shouldUpdatePlaceholder,
+      imageElementComplete: imageElement.complete,
+      imageElementNaturalWidth: imageElement.naturalWidth,
+      placeholderWidth,
+      placeholderHeight
+    });
+    
+    if (shouldUpdatePlaceholder) {
+      placeholderWidth = Math.max(placeholderWidth, 50); // Minimum 50px
+      placeholderHeight = Math.max(placeholderHeight, 50); // Minimum 50px
+      
+      // Set natural dimensions and apply finalScale transform
+      // This ensures placeholder matches final image size exactly
+      imageElement.style.width = `${naturalWidth}px`;
+      imageElement.style.height = `${naturalHeight}px`;
+      imageElement.style.transform = `scale(${finalScale})`;
+      imageElement.style.maxWidth = `${naturalWidth}px`;
+      imageElement.style.maxHeight = `${naturalHeight}px`;
+      
+      console.log('[PRELOAD] Updated placeholder', {
+        id,
+        width: `${naturalWidth}px`,
+        height: `${naturalHeight}px`,
+        transform: `scale(${finalScale})`
+      });
+    } else {
+      console.log('[PRELOAD] Skipped placeholder update (imageElement already complete)', {
+        id,
+        currentWidth: imageElement.style.width,
+        currentHeight: imageElement.style.height,
+        currentTransform: imageElement.style.transform
+      });
+    }
+  };
+  preloadImg.onerror = () => {
+    // If preload fails, use default size or saved displayWidth/displayHeight
+    if (displayWidth && displayHeight) {
+      placeholderWidth = displayWidth;
+      placeholderHeight = displayHeight;
+    } else {
+      placeholderWidth = 200;
+      placeholderHeight = 200;
+    }
+  };
+  preloadImg.src = src;
+
   // Progressive loading: Show placeholder IMMEDIATELY
+  // Size will be updated by preload callback when image dimensions are known
+  // For now, use displayWidth/displayHeight if available, otherwise use default placeholder size
+  // Calculate base width/height for imageElement (before scale transform)
+  let baseWidth, baseHeight;
+  if (displayWidth && displayHeight) {
+    // Copy-paste/F5/Clipboard paste: displayWidth/displayHeight is the FINAL visible size (after scale and crop)
+    // For NEW paste from clipboard: scale is ALREADY APPLIED in displayWidth calculation
+    // So displayWidth = naturalWidth * finalScale, we need baseWidth = naturalWidth for correct placeholder
+    // CRITICAL: When pasting new image from clipboard, scale is pre-calculated and displayWidth is final size
+    // We need to REVERSE the calculation to get base size before scale transform
+    baseWidth = Math.max(displayWidth / scale, 50);
+    baseHeight = Math.max(displayHeight / scale, 50);
+    
+    console.log('[PLACEHOLDER INIT] Using displayWidth/Height', {
+      id,
+      displayWidth,
+      displayHeight,
+      scale,
+      baseWidth,
+      baseHeight,
+      calculatedVisibleWidth: baseWidth * scale,
+      calculatedVisibleHeight: baseHeight * scale
+    });
+  } else {
+    // New image: use default placeholder size (will be updated by preload)
+    baseWidth = placeholderWidth / scale;
+    baseHeight = placeholderHeight / scale;
+    
+    console.log('[PLACEHOLDER INIT] Using default placeholder', {
+      id,
+      placeholderWidth,
+      placeholderHeight,
+      scale,
+      baseWidth,
+      baseHeight
+    });
+  }
+  
   imageElement.style.cssText = `
       transform: scale(${scale});
       transform-origin: top left;
-      max-width: 200px;
-      max-height: 200px;
+      width: ${baseWidth}px;
+      height: ${baseHeight}px;
+      max-width: ${baseWidth}px;
+      max-height: ${baseHeight}px;
       display: block;
       border: none !important;
       pointer-events: none;
@@ -3688,18 +4492,79 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       imageElement.style.opacity = "1";
       imageElement.style.background = "none";
       loadingIndicator.remove();
-      imageElement.style.width = "auto";
-      imageElement.style.height = "auto";
+      
+      // Set natural dimensions (placeholder already has correct size from preload)
+      const naturalWidth = imageElement.naturalWidth || 0;
+      const naturalHeight = imageElement.naturalHeight || 0;
+      
+      // Ensure dimensions are set to natural size (preload may have already set them)
+      imageElement.style.width = `${naturalWidth}px`;
+      imageElement.style.height = `${naturalHeight}px`;
+      imageElement.style.maxWidth = `${naturalWidth}px`;
+      imageElement.style.maxHeight = `${naturalHeight}px`;
+
+      // Auto-scale large images to a reasonable size (only for new images with scale = 1)
+      // This prevents huge images from being inserted at full size
+      const maxDisplaySize = 350; // Maximum size for the larger dimension
+      
+      if (scale === 1 && (naturalWidth > maxDisplaySize || naturalHeight > maxDisplaySize)) {
+        // Calculate scale to fit within maxDisplaySize while preserving aspect ratio
+        const maxDimension = Math.max(naturalWidth, naturalHeight);
+        const autoScale = maxDisplaySize / maxDimension;
+        
+        // Apply the auto-calculated scale (preload already set transform, but update it)
+        imageElement.style.transform = `scale(${autoScale})`;
+        setImageCropData(imageElement, { scale: autoScale });
+        
+        // Update the scale variable for this image
+        updateImageLocalVars(id, {
+          ...getImageLocalVars(id),
+          scale: autoScale
+        });
+        
+        // Update global data
+        const currentData = getImageData(id);
+        if (currentData) {
+          currentData.scale = autoScale;
+        }
+        
+        // Save the updated scale to database
+        // Use setTimeout to ensure this happens after initial save in handleImagePasteFromClipboard
+        // and after all dimensions are updated
+        setTimeout(async () => {
+          // Use the saveImageState function if available (defined in createImageElement closure)
+          if (typeof saveImageState === 'function') {
+            await saveImageState(true, { skipZIndex: true });
+          } else {
+            // Fallback: direct save if function not available
+            const images = await getAllImages();
+            if (images[id]) {
+              images[id].scale = autoScale;
+              await setAllImages(images);
+            }
+          }
+        }, 200);
+      } else {
+        // For F5/copy-paste: ensure transform matches the passed scale
+        // (preload should have already set it correctly)
+        imageElement.style.transform = `scale(${scale})`;
+        
+        // CRITICAL: Save image state after load to capture displayWidth/displayHeight
+        // This ensures F5 reload will have correct placeholder dimensions
+        setTimeout(async () => {
+          if (typeof saveImageState === 'function') {
+            await saveImageState(true, { skipZIndex: true });
+          }
+        }, 200);
+      }
 
       // Update UI elements that depend on image dimensions
       updateClipPath();
-      updateSelectionBorderSize();
+      
+      // Update all dimensions after image loads
+      updateAllImageDimensions(container);
+      
       updateHandlePosition();
-
-      // Update click target after image loads
-      const cropData = getImageCropData(imageElement);
-      const clickTarget = container.querySelector(".wbe-image-click-target");
-      updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
     }, remainingTime);
   });
 
@@ -3720,17 +4585,15 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     loadingIndicator.style.border = "2px solid #ff4444";
     loadingIndicator.style.backgroundColor = "rgba(255, 255, 255, 0.9)";
 
-    // Update UI elements with fallback dimensions
-    setTimeout(() => {
-      updateClipPath();
-      updateSelectionBorderSize();
-      updateHandlePosition();
-
-      // Update click target with error state dimensions
-      const cropData = getImageCropData(imageElement);
-      const clickTarget = container.querySelector(".wbe-image-click-target");
-      updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
-    }, 100);
+      // Update UI elements with fallback dimensions
+      setTimeout(() => {
+        updateClipPath();
+        
+        // Update all dimensions with error state dimensions
+        updateAllImageDimensions(container);
+        
+        updateHandlePosition();
+      }, 100);
   });
 
   // Start loading the image
@@ -3759,6 +4622,15 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     circleRadius: circleRadius,
     scale
   });
+  
+  // Store displayWidth/displayHeight in dataset for F5 reload
+  // These will be updated after image loads with actual calculated dimensions
+  if (displayWidth != null) {
+    imageElement.dataset.displayWidth = displayWidth;
+  }
+  if (displayHeight != null) {
+    imageElement.dataset.displayHeight = displayHeight;
+  }
 
   // Function to clamp circle offset to bounds (moved inside createImageElement for scope access)
   function clampCircleOffsetToBounds() {
@@ -3947,12 +4819,15 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       updateCircleResizeHandlePosition();
     }
 
-    // 4) Refresh permanent border and click target from current DOM data
-    const dataNow = getImageCropData(imageElement);
-    updateImageBorder(permanentBorder, imageElement, dataNow.maskType, dataNow.crop, dataNow.circleOffset, dataNow.circleRadius, dataNow.scale);
-    const clickTarget = container.querySelector(".wbe-image-click-target");
-    if (clickTarget) {
-      updateClickTarget(clickTarget, imageElement, dataNow.maskType, dataNow.crop, dataNow.circleOffset, dataNow.circleRadius, dataNow.scale);
+    // 4) Update all dimensions to sync everything (borders, clickTarget, imageElement position)
+    // CRITICAL: Call updateAllImageDimensions FIRST to ensure imageElement position is correct
+    // This function will also update borders and clickTarget, so we don't need to call them separately
+    // This prevents desynchronization between imageElement position and border positions
+    updateAllImageDimensions(container);
+    
+    // Update panel position if panel is open and in crop mode
+    if (isCropping && window.wbeImageControlPanelUpdate) {
+      window.wbeImageControlPanelUpdate();
     }
   }
 
@@ -3967,11 +4842,18 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       position: absolute;
       left: 0;
       top: 0;
-      border: 2px solid rgba(255, 255, 255, 0.6);
+      box-sizing: border-box;
       pointer-events: none;
       display: block;
       z-index: ${ZIndexConstants.SELECTION_BORDER};
     `;
+  // Initialize border style from parameters or defaults
+  const borderParams = {};
+  if (borderHex != null) borderParams.hexColor = borderHex;
+  if (borderOpacity != null) borderParams.opacity = borderOpacity;
+  if (borderWidth != null) borderParams.width = borderWidth;
+  if (borderRadius != null) borderParams.radius = borderRadius;
+  updateImageBorderStyle(permanentBorder, borderParams);
   container.appendChild(permanentBorder);
 
   // Selection border overlay (синяя рамка при выделении)
@@ -4003,29 +4885,6 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     `;
   container.appendChild(clickTarget);
 
-  // DISABLED: Двойной клик → toggle crop mode (on clickTarget since it's on top)
-  // clickTarget.addEventListener("dblclick", async (e) => {
-  //   if (!isSelected) return; // Работает только на выделенной картинке
-  //   e.preventDefault();
-  //   e.stopPropagation();
-  //   
-  //   // Проверяем блокировку перед переключением
-  //   if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
-  //     ui.notifications.warn("This image is being cropped by another user");
-  //     return;
-  //   }
-  //   
-  //   isCropping = !isCropping;
-  //   
-  //   if (isCropping) {
-  //     enterCropMode();
-  //   } else {
-  //     await exitCropMode(); // Await to ensure save completes
-  //   }
-  // });
-
-  // Инициализируем размеры рамок (но только ПОСЛЕ загрузки картинки)
-  // НЕ вызываем здесь, т.к. imageElement.offsetWidth/Height = 0
 
   layer.appendChild(container);
 
@@ -4045,18 +4904,15 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
         window.wbeImageControlPanelUpdate();
       }
 
-      const clickTarget = container.querySelector(".wbe-image-click-target");
-      if (clickTarget) {
-        const cropData = getImageCropData(imageElement);
-        updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, newScale);
-      }
-
+      // Update all dimensions after scale change
+      updateAllImageDimensions(container);
+      
       resizeController.updatePosition();
-      updateSelectionBorderSize();
     }
   });
 
   // Initialize SelectionController to replace closure-based selection
+  // TEMPORARY FOR INVESTIGATION
   const selectionController = new SelectionController(container, imageElement, {
     onSelect: (controller) => {
       // Clear mass selection when selecting individual image
@@ -4160,6 +5016,9 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     const width = imageElement.offsetWidth;
     const height = imageElement.offsetHeight;
 
+    // Preserve user-set border-radius for permanentBorder
+    const userBorderRadius = permanentBorder.dataset.borderRadius;
+
     if (currentMaskTypeValue === 'rect') {
       // Прямоугольная маска: вычитаем crop из размеров
       const croppedWidth = width - currentCrop.left - currentCrop.right;
@@ -4171,15 +5030,27 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       const offsetLeft = currentCrop.left * currentScale;
       const offsetTop = currentCrop.top * currentScale;
 
-      // Обновляем ОБЕ рамки (серую и синюю)
-      [permanentBorder, selectionBorder].forEach(border => {
-        border.style.width = `${scaledWidth}px`;
-        border.style.height = `${scaledHeight}px`;
-        border.style.left = `${offsetLeft}px`;
-        border.style.top = `${offsetTop}px`;
-        border.style.borderRadius = "0"; // Прямоугольная
-        border.style.clipPath = "none"; // Убираем clip-path для rect
-      });
+      // Update permanent border - preserve user-set borderRadius
+      permanentBorder.style.width = `${scaledWidth}px`;
+      permanentBorder.style.height = `${scaledHeight}px`;
+      permanentBorder.style.left = `${offsetLeft}px`;
+      permanentBorder.style.top = `${offsetTop}px`;
+      if (userBorderRadius) {
+        permanentBorder.style.borderRadius = `${userBorderRadius}px`;
+      } else {
+        permanentBorder.style.borderRadius = "0";
+      }
+      permanentBorder.style.clipPath = "none";
+
+      // Update selection border - always use mask-based borderRadius
+      if (selectionBorder) {
+        selectionBorder.style.width = `${scaledWidth}px`;
+        selectionBorder.style.height = `${scaledHeight}px`;
+        selectionBorder.style.left = `${offsetLeft}px`;
+        selectionBorder.style.top = `${offsetTop}px`;
+        selectionBorder.style.borderRadius = "0";
+        selectionBorder.style.clipPath = "none";
+      }
     } else if (currentMaskTypeValue === 'circle') {
       // Круговая маска: используем диаметр круга
       const currentRadius = cropData.circleRadius !== null ? cropData.circleRadius : Math.min(width, height) / 2;
@@ -4194,16 +5065,23 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       const offsetLeft = (centerX - currentRadius) * currentScale;
       const offsetTop = (centerY - currentRadius) * currentScale;
 
-      // Обновляем ОБЕ рамки (серую и синюю)
-      [permanentBorder, selectionBorder].forEach(border => {
-        border.style.width = `${scaledDiameter}px`;
-        border.style.height = `${scaledDiameter}px`;
-        border.style.left = `${offsetLeft}px`;
-        border.style.top = `${offsetTop}px`;
-        border.style.borderRadius = "50%"; // Круговая
-        border.style.clipPath = "none"; // Убираем clip-path для circle
-      });
+      // Update permanent border - for circle mask, always use 50% (overrides user radius)
+      permanentBorder.style.width = `${scaledDiameter}px`;
+      permanentBorder.style.height = `${scaledDiameter}px`;
+      permanentBorder.style.left = `${offsetLeft}px`;
+      permanentBorder.style.top = `${offsetTop}px`;
+      permanentBorder.style.borderRadius = "50%";
+      permanentBorder.style.clipPath = "none";
 
+      // Update selection border - always use 50% for circle mask
+      if (selectionBorder) {
+        selectionBorder.style.width = `${scaledDiameter}px`;
+        selectionBorder.style.height = `${scaledDiameter}px`;
+        selectionBorder.style.left = `${offsetLeft}px`;
+        selectionBorder.style.top = `${offsetTop}px`;
+        selectionBorder.style.borderRadius = "50%";
+        selectionBorder.style.clipPath = "none";
+      }
     }
   }
 
@@ -4276,6 +5154,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
 
     // NEW ARCHITECTURE: Update border using synced data
     updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+    
+    // Update panel position after border update in crop mode
+    if (window.wbeImageControlPanelUpdate) {
+      window.wbeImageControlPanelUpdate();
+    }
 
 
 
@@ -4427,13 +5310,9 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       updateSelectionBorderSize();
     }
 
-    // NEW ARCHITECTURE: Update permanent border to reflect NEW crop state
-    const cropData = getImageCropData(imageElement);
-    updateImageBorder(permanentBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
-
-    // Update click target to match NEW visible area and re-enable it
-    const clickTarget = container.querySelector(".wbe-image-click-target");
-    updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+    // NEW ARCHITECTURE: Update all dimensions to reflect NEW crop state
+    // This ensures container, imageElement, borders, and clickTarget are all in sync
+    updateAllImageDimensions(container);
 
     // Re-enable click target after crop mode
     if (clickTarget) {
@@ -4565,6 +5444,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
           const cropData = getImageCropData(imageElement);
           // Use ALL current live values, not mixed old/new data
           updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, { x: circleOffsetX, y: circleOffsetY }, circleRadius, cropData.scale);
+          
+          // Update panel position after border update in crop mode
+          if (window.wbeImageControlPanelUpdate) {
+            window.wbeImageControlPanelUpdate();
+          }
         } else {
           // Only update selection border size if not in crop mode
           updateSelectionBorderSize();
@@ -4613,6 +5497,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
         updateCropHandlesPosition();
         // Update border using same data source as gizmos for synchronization
         updateImageBorder(selectionBorder, imageElement, currentMaskType, crop, { x: circleOffsetX, y: circleOffsetY }, circleRadius, currentScale);
+        
+        // Update panel position after border update in crop mode
+        if (window.wbeImageControlPanelUpdate) {
+          window.wbeImageControlPanelUpdate();
+        }
 
         if (firstMove) {
           firstMove = false;
@@ -4654,6 +5543,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
         updateCropHandlesPosition();
         // Update border using same data source as gizmos for synchronization
         updateImageBorder(selectionBorder, imageElement, currentMaskType, crop, { x: circleOffsetX, y: circleOffsetY }, circleRadius, currentScale);
+        
+        // Update panel position after border update in crop mode
+        if (window.wbeImageControlPanelUpdate) {
+          window.wbeImageControlPanelUpdate();
+        }
       }
 
       function onMouseUp() {
@@ -4691,6 +5585,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
         updateCropHandlesPosition();
         // Update border using same data source as gizmos for synchronization
         updateImageBorder(selectionBorder, imageElement, currentMaskType, crop, { x: circleOffsetX, y: circleOffsetY }, circleRadius, currentScale);
+        
+        // Update panel position after border update in crop mode
+        if (window.wbeImageControlPanelUpdate) {
+          window.wbeImageControlPanelUpdate();
+        }
       }
 
       function onMouseUp() {
@@ -4728,6 +5627,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
         updateCropHandlesPosition();
         // Update border using same data source as gizmos for synchronization
         updateImageBorder(selectionBorder, imageElement, currentMaskType, crop, { x: circleOffsetX, y: circleOffsetY }, circleRadius, currentScale);
+        
+        // Update panel position after border update in crop mode
+        if (window.wbeImageControlPanelUpdate) {
+          window.wbeImageControlPanelUpdate();
+        }
       }
 
       function onMouseUp() {
@@ -4800,6 +5704,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
           const cropData = getImageCropData(imageElement);
           // Use ALL current live values, not mixed old/new data
           updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, { x: circleOffsetX, y: circleOffsetY }, circleRadius, cropData.scale);
+          
+          // Update panel position after border update in crop mode
+          if (window.wbeImageControlPanelUpdate) {
+            window.wbeImageControlPanelUpdate();
+          }
         } else {
           // Only update selection border size if not in crop mode
           updateSelectionBorderSize(); // Update borders when circle is moved!
@@ -4842,7 +5751,6 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     if (isImageFrozen(id)) {
       // Frozen images cannot be selected - only unfreeze icon is interactive
       console.log('[selectImage] Attempted to select frozen image - blocked:', id);
-      return; // Exit early - frozen images remain deselected
     }
 
     // Normal selection behavior for non-frozen images
@@ -4870,6 +5778,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
         resizeHandle.style.display = "none";
       }
     });
+
+    // Clear text selection state (mirrors setSelectedImageId(null) in text selection)
+    if (window.TextTools) {
+      window.TextTools.selectedTextId = null;
+    }
 
     // Use SelectionController for selection logic
     selectionController.select();
@@ -4960,6 +5873,11 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
 
     resizeController.hide();
 
+    // CRITICAL FIX: Update all dimensions to sync imageElement position with container
+    // This ensures imageElement position (left/top) is correct after deselection
+    // especially after crop operations that may have changed the offset
+    updateAllImageDimensions(container);
+
   }
 
   // Delete by Delete key
@@ -5020,19 +5938,33 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
     const worldX = (layerX - translateX) / scale;
     const worldY = (layerY - translateY) / scale;
 
+    // Center image under cursor using displayWidth/displayHeight if available
+    const displayWidth = copiedImageData.displayWidth || null;
+    const displayHeight = copiedImageData.displayHeight || null;
+    const centeredX = displayWidth ? worldX - displayWidth / 2 : worldX;
+    const centeredY = displayHeight ? worldY - displayHeight / 2 : worldY;
 
     const newImageId = `wbe-image-${Date.now()}`;
-    const cropData = copiedImageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-    const maskTypeData = copiedImageData.maskType || 'rect';
-    const circleOffsetData = copiedImageData.circleOffset || { x: 0, y: 0 };
-    const circleRadiusData = copiedImageData.circleRadius || null;
-    createImageElement(newImageId, copiedImageData.src, worldX, worldY, copiedImageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, copiedImageData.isFrozen || false);
+    createImageElement({
+      id: newImageId,
+      src: copiedImageData.src,
+      left: centeredX,
+      top: centeredY,
+      scale: copiedImageData.scale,
+      crop: copiedImageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+      maskType: copiedImageData.maskType || 'rect',
+      circleOffset: copiedImageData.circleOffset || { x: 0, y: 0 },
+      circleRadius: copiedImageData.circleRadius || null,
+      isFrozen: copiedImageData.isFrozen || false,
+      displayWidth,
+      displayHeight
+    });
 
     const images = await getAllImages();
     images[newImageId] = {
       src: copiedImageData.src,
-      left: worldX,
-      top: worldY,
+      left: centeredX,
+      top: centeredY,
       scale: copiedImageData.scale,
       crop: cropData,
       maskType: maskTypeData,
@@ -5143,6 +6075,29 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       // Read z-index from manager (normal case)
       zIndex = ZIndexManager.get(id);
     }
+    
+    // Calculate display dimensions (visible area after scale and crop) for F5 reload placeholder sizing
+    let displayWidth = null;
+    let displayHeight = null;
+    if (imageElement.complete && imageElement.naturalWidth > 0 && imageElement.naturalHeight > 0) {
+      const dims = calculateCroppedDimensions(imageElement, useMaskType, useCrop, useCircleOffset, useCircleRadius, currentScale);
+      displayWidth = dims.width;
+      displayHeight = dims.height;
+      console.log('[SAVE STATE] Calculated displayWidth/Height', {
+        id,
+        displayWidth,
+        displayHeight,
+        scale: currentScale,
+        complete: imageElement.complete,
+        naturalWidth: imageElement.naturalWidth
+      });
+    } else {
+      console.log('[SAVE STATE] Image not loaded, displayWidth/Height will be null', {
+        id,
+        complete: imageElement.complete,
+        naturalWidth: imageElement.naturalWidth
+      });
+    }
 
     const imageData = {
       src: imageElement.src,
@@ -5155,7 +6110,9 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
       circleRadius: useCircleRadius,
       isCropping: isCropping,
       isFrozen: isFrozen,
-      zIndex: zIndex
+      zIndex: zIndex,
+      displayWidth,
+      displayHeight
     };
 
     // Keep caches in sync with what we're persisting
@@ -5216,7 +6173,8 @@ function createImageElement(id, src, left, top, scale = 1, crop = { top: 0, righ
 
 async function getAllImages() {
   try {
-    return await canvas.scene?.getFlag(FLAG_SCOPE, FLAG_KEY_IMAGES) || {};
+    const result = await canvas.scene?.getFlag(FLAG_SCOPE, FLAG_KEY_IMAGES) || {};
+    return result;
   } catch (e) {
     console.error("[WB-E] getAllImages error:", e);
     return {};
@@ -5225,14 +6183,13 @@ async function getAllImages() {
 
 async function setAllImages(images) {
   const timestamp = Date.now();
-  const stackTrace = new Error().stack?.split('\n').slice(1, 4).join(' | ') || 'unknown';
+  const stackTrace = new Error().stack?.split('\n').slice(1, 10).join(' | ') || 'unknown';
+  
+  const imageIds = Object.keys(images);
+  const isEmptyPayload = imageIds.length === 0;
+  const isGM = game.user.isGM;
   
   try {
-    const imageIds = Object.keys(images);
-    const isEmptyPayload = imageIds.length === 0;
-    console.log(`[WB-E] setAllImages: [${timestamp}] Sending ${imageIds.length} images:`, imageIds.slice(0, 5));
-    console.log(`[WB-E] setAllImages: [${timestamp}] Call stack:`, stackTrace);
-
     if (game.user.isGM) {
       // CRITICAL FIX: Do NOT sync z-indexes when receiving updates from players
       // The z-indexes in the payload are already correct from the ZIndexManager
@@ -5244,14 +6201,11 @@ async function setAllImages(images) {
       // This ensures deletions are properly propagated
       const currentImages = await getAllImages();
       const currentImageIds = Object.keys(currentImages);
-      console.log(`[WB-E] setAllImages: [${timestamp}] getAllImages() returned ${currentImageIds.length} images:`, currentImageIds.slice(0, 5));
-      
       // Check if this is a deletion (fewer images than current)
       const isDeletion = imageIds.length < currentImageIds.length;
       const deletedIds = currentImageIds.filter(id => !imageIds.includes(id));
       
       if (isDeletion && deletedIds.length > 0) {
-        console.log(`[WB-E] setAllImages: [${timestamp}] Detected deletion: removing ${deletedIds.length} images:`, deletedIds);
       }
       
       // CRITICAL FIX: Use images as authoritative state (not merged)
@@ -5260,6 +6214,7 @@ async function setAllImages(images) {
       await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
       await new Promise(resolve => setTimeout(resolve, 50));
       await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, images);
+      
       
       // CRITICAL FIX: Remove elements from DOM that are no longer in images
       const layer = getOrCreateLayer();
@@ -5275,12 +6230,25 @@ async function setAllImages(images) {
             // Update existing element
             updateImageElement(existing, imageData);
           } else {
-            // Create new element
-            const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-            const maskTypeData = imageData.maskType || 'rect';
-            const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
-            const circleRadiusData = imageData.circleRadius || null;
-            createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
+            // Create new element - use saved displayWidth/displayHeight for correct placeholder sizing on F5 reload
+            createImageElement({
+              id,
+              src: imageData.src,
+              left: imageData.left,
+              top: imageData.top,
+              scale: imageData.scale,
+              crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+              maskType: imageData.maskType || 'rect',
+              circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+              circleRadius: imageData.circleRadius || null,
+              isFrozen: imageData.isFrozen || false,
+              displayWidth: imageData.displayWidth || null,
+              displayHeight: imageData.displayHeight || null,
+              borderHex: imageData.borderHex,
+              borderOpacity: imageData.borderOpacity,
+              borderWidth: imageData.borderWidth,
+              borderRadius: imageData.borderRadius
+            });
           }
           
           // Update global variables for each image
@@ -5301,14 +6269,13 @@ async function setAllImages(images) {
             clearImageCaches(element.id);
             // Clean up z-index
             ZIndexManager.remove(element.id);
-            console.log(`[WB-E] setAllImages: [${timestamp}] GM removing element: ${element.id}`);
+            // Actually remove from DOM
             element.remove();
           }
         });
       }
       
       // Emit to all (authoritative state, not merged)
-      console.log(`[WB-E] setAllImages: [${timestamp}] GM emitting socket update with ${imageIds.length} images (authoritative state)`);
       game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images });
     } else {
       const layer = getOrCreateLayer();
@@ -5320,8 +6287,6 @@ async function setAllImages(images) {
         // Get all existing images
         const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
         const existingElementIds = Array.from(existingElements).map(el => el.id);
-        console.log(`[WB-E] setAllImages: [${timestamp}] Found ${existingElementIds.length} existing DOM elements:`, existingElementIds.slice(0, 5));
-        
         const existingIds = new Set();
 
         // Update existing and create new images locally
@@ -5332,12 +6297,25 @@ async function setAllImages(images) {
             // Update existing element
             updateImageElement(existing, imageData);
           } else {
-            // Create new element
-            const cropData = imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-            const maskTypeData = imageData.maskType || 'rect';
-            const circleOffsetData = imageData.circleOffset || { x: 0, y: 0 };
-            const circleRadiusData = imageData.circleRadius || null;
-            createImageElement(id, imageData.src, imageData.left, imageData.top, imageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, imageData.isFrozen || false);
+            // Create new element - use saved displayWidth/displayHeight for correct placeholder sizing on F5 reload
+            createImageElement({
+              id,
+              src: imageData.src,
+              left: imageData.left,
+              top: imageData.top,
+              scale: imageData.scale,
+              crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+              maskType: imageData.maskType || 'rect',
+              circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+              circleRadius: imageData.circleRadius || null,
+              isFrozen: imageData.isFrozen || false,
+              displayWidth: imageData.displayWidth || null,
+              displayHeight: imageData.displayHeight || null,
+              borderHex: imageData.borderHex,
+              borderOpacity: imageData.borderOpacity,
+              borderWidth: imageData.borderWidth,
+              borderRadius: imageData.borderRadius
+            });
           }
 
           // Update global variables for each image
@@ -5353,9 +6331,7 @@ async function setAllImages(images) {
 
         // Only run destructive prune when payload carries authoritative state
         const shouldSkipPrune = isEmptyPayload;
-        if (shouldSkipPrune) {
-          console.log(`[WB-E] setAllImages: [${timestamp}] Skipping DOM prune for empty payload on non-GM client; awaiting authoritative sync.`);
-        } else {
+        if (!shouldSkipPrune) {
           // Remove elements that are no longer in images
           const toRemove = [];
           existingElements.forEach(element => {
@@ -5381,6 +6357,7 @@ async function setAllImages(images) {
               element.remove();
             }
           });
+        } else {
         }
       }
     }
@@ -5394,8 +6371,6 @@ async function setAllImages(images) {
 function updateImageElement(existing, imageData) {
   // CRITICAL: Skip socket updates for images locked by current user (actively being manipulated)
   if (existing.dataset.lockedBy && existing.dataset.lockedBy === game.user.id) {
-    console.log(`[WB-E] Skipping socket update for ${existing.id} - locked by current user (actively being manipulated)`);
-    return; // Don't update during local drag/crop operations!
   }
 
   // Update basic parameters
@@ -5426,6 +6401,28 @@ function updateImageElement(existing, imageData) {
 
     if (imageData.circleRadius !== undefined) {
       imageElement.dataset.circleRadius = (imageData.circleRadius ?? null);
+    }
+    
+    // Update displayWidth/displayHeight in dataset if provided
+    if (imageData.displayWidth !== undefined && imageData.displayWidth !== null) {
+      imageElement.dataset.displayWidth = imageData.displayWidth;
+    }
+    if (imageData.displayHeight !== undefined && imageData.displayHeight !== null) {
+      imageElement.dataset.displayHeight = imageData.displayHeight;
+    }
+
+    // Apply border styles if provided
+    if (imageData.borderHex != null || imageData.borderOpacity != null || 
+        imageData.borderWidth != null || imageData.borderRadius != null) {
+      const permanentBorder = existing.querySelector('.wbe-image-permanent-border');
+      if (permanentBorder) {
+        updateImageBorderStyle(permanentBorder, {
+          hexColor: imageData.borderHex,
+          opacity: imageData.borderOpacity,
+          width: imageData.borderWidth,
+          radius: imageData.borderRadius
+        });
+      }
     }
 
     // Ensure visual styles/UI are applied *after* the image has size
@@ -5517,6 +6514,16 @@ function updateImageUIElements(container, imageData) {
   const permanentBorder = container.querySelector(".wbe-image-permanent-border");
   if (permanentBorder) {
     updateImageBorder(permanentBorder, imageElement, maskType, crop, circleOffset, circleRadius, scale);
+    // Apply border styles if provided (after updateImageBorder to preserve user-set radius)
+    if (imageData.borderHex != null || imageData.borderOpacity != null || 
+        imageData.borderWidth != null || imageData.borderRadius != null) {
+      updateImageBorderStyle(permanentBorder, {
+        hexColor: imageData.borderHex,
+        opacity: imageData.borderOpacity,
+        width: imageData.borderWidth,
+        radius: imageData.borderRadius
+      });
+    }
   }
 
   // Update selection border
@@ -5752,46 +6759,328 @@ function updateImageResizeHandleGlobal(container) {
   }
 }
 
-// Функция для обновления рамок картинки
-function updateImageBorder(border, imageElement, maskType, crop, circleOffset, circleRadius, scale) {
-  const width = imageElement.offsetWidth;
-  const height = imageElement.offsetHeight;
+/**
+ * Update all image-related dimensions (container, borders, clickTarget) after crop/scale changes
+ * This ensures everything stays in sync
+ * @param {HTMLElement} container - The .wbe-canvas-image-container element
+ */
+function updateAllImageDimensions(container) {
+  const imageId = container.id;
+  const imageElement = container.querySelector('.wbe-canvas-image');
+  if (!imageElement) return;
+  
+  const data = getImageData(imageId);
+  if (!data) return;
+  
+  const cropData = getImageCropData(imageElement);
+  const dims = calculateCroppedDimensions(imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+  
+  if (dims.width === 0 || dims.height === 0) return;
+  
+  // Update container size to match cropped area
+  // Container should be exactly the size of the visible (cropped) area
+  // Note: We use overflow: visible to allow gizmos (resize handles) to be visible outside the container
+  // The image itself is clipped via clip-path, so overflow: hidden is not needed
+  container.style.width = `${dims.width}px`;
+  container.style.height = `${dims.height}px`;
+  container.style.overflow = 'visible';
+  
+  
+  // Update imageElement position to match border positioning
+  // Borders are positioned at (dims.left, dims.top) relative to container
+  // ImageElement should be at (0, 0) so the visible cropped area aligns with borders
+  // The clip-path on imageElement handles the actual cropping
+  const currentPosition = imageElement.style.position || getComputedStyle(imageElement).position;
+  if (currentPosition !== 'absolute') {
+    imageElement.style.position = 'absolute';
+  }
+  imageElement.style.left = `0px`;
+  imageElement.style.top = `0px`;
+  
+  // Note: We keep width: auto; height: auto; to preserve image aspect ratio
+  // The image will display at its natural size (or constrained by max-width/max-height)
+  // and the transform: scale() will be applied on top of that
+  
+  // Update borders
+  const permanentBorder = container.querySelector('.wbe-image-permanent-border');
+  if (permanentBorder) {
+    updateImageBorder(permanentBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+  }
+  
+  const selectionBorder = container.querySelector('.wbe-image-selection-border');
+  if (selectionBorder) {
+    updateImageBorder(selectionBorder, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+  }
+  
+  // Update clickTarget
+  const clickTarget = container.querySelector('.wbe-image-click-target');
+  if (clickTarget) {
+    updateClickTarget(clickTarget, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+  }
+  
+  // Update resize handle
+  const resizeHandle = container.querySelector('.wbe-image-resize-handle');
+  if (resizeHandle) {
+    updateImageResizeHandle(resizeHandle, imageElement, cropData.maskType, cropData.crop, cropData.circleOffset, cropData.circleRadius, cropData.scale);
+  }
+  
+  // DIAGNOSTIC: Setup click logging to debug clickable area issue
+  setupClickDiagnostics(container, dims);
+}
 
-  if (width === 0 || height === 0) return;
+/**
+ * Diagnostic function to log what element receives clicks
+ * @param {HTMLElement} container - The container element
+ * @param {Object} dims - Dimensions object with left, top, width, height
+ */
+function setupClickDiagnostics(container, dims) {
+  // Remove old handler if exists
+  if (container._clickDiagnosticHandler) {
+    container.removeEventListener('click', container._clickDiagnosticHandler, true);
+    container._clickDiagnosticHandler = null;
+  }
+  
+  // Add new handler
+  container._clickDiagnosticHandler = (e) => {
+    const rect = container.getBoundingClientRect();
+    const clickX = e.clientX;
+    const clickY = e.clientY;
+    const localX = clickX - rect.left;
+    const localY = clickY - rect.top;
+    
+    // Get all elements at click point
+    const elementsAtPoint = document.elementsFromPoint(clickX, clickY);
+    
+    // Get computed styles for pointer-events
+    const containerPE = getComputedStyle(container).pointerEvents;
+    const clickTarget = container.querySelector('.wbe-image-click-target');
+    const clickTargetPE = clickTarget ? getComputedStyle(clickTarget).pointerEvents : 'N/A';
+    const clickTargetRect = clickTarget ? clickTarget.getBoundingClientRect() : null;
+    
+    // Check if click is in the "dead zone" (area before dims.left/top)
+    const isInDeadZone = localX < dims.left || localY < dims.top;
+    
+    console.group(`[CLICK DIAGNOSTIC] Container: ${container.id}`);
+    console.log('Click coordinates:', { 
+      client: { x: clickX, y: clickY },
+      local: { x: localX, y: localY },
+      inDeadZone: isInDeadZone,
+      deadZoneBounds: { left: dims.left, top: dims.top }
+    });
+    console.log('Container:', {
+      position: { left: container.style.left, top: container.style.top },
+      size: { width: container.style.width, height: container.style.height },
+      pointerEvents: containerPE,
+      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+    });
+    console.log('ClickTarget:', {
+      exists: !!clickTarget,
+      position: clickTarget ? { left: clickTarget.style.left, top: clickTarget.style.top } : null,
+      size: clickTarget ? { width: clickTarget.style.width, height: clickTarget.style.height } : null,
+      pointerEvents: clickTargetPE,
+      rect: clickTargetRect
+    });
+    console.log('All elements at click point:', elementsAtPoint.map(el => ({
+      tag: el.tagName,
+      class: el.className,
+      id: el.id,
+      pointerEvents: getComputedStyle(el).pointerEvents,
+      zIndex: getComputedStyle(el).zIndex,
+      position: getComputedStyle(el).position,
+      rect: el.getBoundingClientRect()
+    })));
+    console.log('Target element:', {
+      tag: e.target.tagName,
+      class: e.target.className,
+      id: e.target.id,
+      pointerEvents: getComputedStyle(e.target).pointerEvents
+    });
+    console.log('Current target:', {
+      tag: e.currentTarget.tagName,
+      class: e.currentTarget.className,
+      id: e.currentTarget.id
+    });
+    console.groupEnd();
+  };
+  
+  // Add capture phase listener to catch all clicks
+  container.addEventListener('click', container._clickDiagnosticHandler, true);
+}
+
+/**
+ * Calculate cropped dimensions for an image
+ * Returns the visible area dimensions and position after applying crop and scale
+ * @param {HTMLElement} imageElement - The .wbe-canvas-image element
+ * @param {string} maskType - 'rect' or 'circle'
+ * @param {Object} crop - Crop values {top, right, bottom, left}
+ * @param {Object} circleOffset - Circle offset {x, y}
+ * @param {number} circleRadius - Circle radius
+ * @param {number} scale - Image scale
+ * @returns {Object} { width, height, left, top, baseWidth, baseHeight } - Dimensions in scaled pixels
+ */
+function calculateCroppedDimensions(imageElement, maskType, crop, circleOffset, circleRadius, scale) {
+  // Get unscaled base dimensions
+  const unscaledSize = getUnscaledSize(imageElement);
+  const baseWidth = unscaledSize.width;
+  const baseHeight = unscaledSize.height;
+  const currentScale = unscaledSize.scale;
+  
+  if (baseWidth === 0 || baseHeight === 0) {
+    return { width: 0, height: 0, left: 0, top: 0, baseWidth: 0, baseHeight: 0 };
+  }
 
   if (maskType === 'rect') {
-    // Прямоугольная маска
-    const croppedWidth = width - crop.left - crop.right;
-    const croppedHeight = height - crop.top - crop.bottom;
-    const scaledWidth = croppedWidth * scale;
-    const scaledHeight = croppedHeight * scale;
-    const offsetLeft = crop.left * scale;
-    const offsetTop = crop.top * scale;
-
-    border.style.width = `${scaledWidth}px`;
-    border.style.height = `${scaledHeight}px`;
-    border.style.left = `${offsetLeft}px`;
-    border.style.top = `${offsetTop}px`;
-    border.style.borderRadius = "0";
-    border.style.clipPath = "none";
+    const croppedWidth = baseWidth - crop.left - crop.right;
+    const croppedHeight = baseHeight - crop.top - crop.bottom;
+    const scaledWidth = croppedWidth * currentScale;
+    const scaledHeight = croppedHeight * currentScale;
+    const offsetLeft = crop.left * currentScale;
+    const offsetTop = crop.top * currentScale;
+    
+    return {
+      width: scaledWidth,
+      height: scaledHeight,
+      left: offsetLeft,
+      top: offsetTop,
+      baseWidth: baseWidth,
+      baseHeight: baseHeight
+    };
   } else if (maskType === 'circle') {
-    // Круговая маска
-    const fallback = Math.min(width, height) / 2;
+    const fallback = Math.min(baseWidth, baseHeight) / 2;
     const currentRadius = (circleRadius == null) ? fallback : circleRadius;
     const diameter = currentRadius * 2;
-    const scaledDiameter = diameter * scale;
-    const centerX = width / 2 + circleOffset.x;
-    const centerY = height / 2 + circleOffset.y;
-    const offsetLeft = (centerX - currentRadius) * scale;
-    const offsetTop = (centerY - currentRadius) * scale;
+    const scaledDiameter = diameter * currentScale;
+    const centerX = baseWidth / 2 + circleOffset.x;
+    const centerY = baseHeight / 2 + circleOffset.y;
+    const offsetLeft = (centerX - currentRadius) * currentScale;
+    const offsetTop = (centerY - currentRadius) * currentScale;
+    
+    return {
+      width: scaledDiameter,
+      height: scaledDiameter,
+      left: offsetLeft,
+      top: offsetTop,
+      baseWidth: baseWidth,
+      baseHeight: baseHeight
+    };
+  }
+  
+  return { width: 0, height: 0, left: 0, top: 0, baseWidth: 0, baseHeight: 0 };
+}
 
-    border.style.width = `${scaledDiameter}px`;
-    border.style.height = `${scaledDiameter}px`;
-    border.style.left = `${offsetLeft}px`;
-    border.style.top = `${offsetTop}px`;
+// Функция для обновления рамок картинки
+function updateImageBorder(border, imageElement, maskType, crop, circleOffset, circleRadius, scale) {
+  const dims = calculateCroppedDimensions(imageElement, maskType, crop, circleOffset, circleRadius, scale);
+  
+  if (dims.width === 0 || dims.height === 0) return;
+  
+  // Preserve user-set border-radius if it exists (for permanentBorder)
+  const userBorderRadius = border.dataset.borderRadius;
+  const isPermanentBorder = border.classList.contains('wbe-image-permanent-border');
+  
+  if (maskType === 'rect') {
+    border.style.width = `${dims.width}px`;
+    border.style.height = `${dims.height}px`;
+    border.style.left = `${dims.left}px`;
+    border.style.top = `${dims.top}px`;
+    // Only override border-radius for selection border, preserve user-set radius for permanentBorder
+    if (!isPermanentBorder || !userBorderRadius) {
+      border.style.borderRadius = "0";
+    } else if (isPermanentBorder && userBorderRadius) {
+      // Restore user-set border-radius for permanentBorder
+      border.style.borderRadius = `${userBorderRadius}px`;
+    }
+    border.style.clipPath = "none";
+  } else if (maskType === 'circle') {
+    border.style.width = `${dims.width}px`;
+    border.style.height = `${dims.height}px`;
+    border.style.left = `${dims.left}px`;
+    border.style.top = `${dims.top}px`;
+    // For circle mask, always use 50% (overrides user radius)
     border.style.borderRadius = "50%";
     border.style.clipPath = "none";
   }
+}
+
+/**
+ * Update permanent border style (color, width, opacity, radius)
+ * Border grows inward using box-sizing: border-box
+ */
+function updateImageBorderStyle(permanentBorder, { hexColor = DEFAULT_BORDER_HEX, opacity = DEFAULT_BORDER_OPACITY, width = DEFAULT_BORDER_WIDTH, radius = DEFAULT_BORDER_RADIUS } = {}) {
+  if (!permanentBorder) return;
+
+  const safeWidth = clamp(Number(width), 0, 12);
+  const safeOpacity = clamp(Number(opacity), 0, 100);
+  const safeHex = hexColor || DEFAULT_BORDER_HEX;
+  const safeRadius = clamp(Number(radius), 0, 20);
+  const rgba = hexToRgba(safeHex, safeOpacity);
+
+  // Determine mask type from image element
+  const container = permanentBorder.closest('.wbe-canvas-image-container');
+  const imageElement = container?.querySelector('.wbe-canvas-image');
+  const maskType = imageElement ? (getImageCropData(imageElement).maskType || 'rect') : 'rect';
+
+  // Store values in dataset for persistence
+  permanentBorder.dataset.borderHex = safeHex;
+  permanentBorder.dataset.borderOpacity = String(safeOpacity);
+  permanentBorder.dataset.borderWidth = String(safeWidth);
+  permanentBorder.dataset.borderRadius = String(safeRadius);
+  permanentBorder.dataset.borderRgba = safeWidth > 0 && rgba ? rgba : "";
+
+  // Apply border style - border grows inward with box-sizing: border-box
+  // For circle mask, always use 50% (overrides user radius)
+  const borderRadius = maskType === 'circle' ? '50%' : `${safeRadius}px`;
+  
+  if (safeWidth > 0 && rgba) {
+    permanentBorder.style.boxSizing = "border-box";
+    permanentBorder.style.border = `${safeWidth}px solid ${rgba}`;
+    permanentBorder.style.borderRadius = borderRadius;
+  } else {
+    permanentBorder.style.border = "none";
+    permanentBorder.style.borderRadius = borderRadius;
+  }
+}
+
+/**
+ * Read current border style from permanentBorder element
+ */
+function getImageBorderStyle(permanentBorder) {
+  if (!permanentBorder) {
+    return null;
+  }
+
+  // Try to read from dataset first (most reliable)
+  const borderHex = permanentBorder.dataset.borderHex;
+  const borderOpacity = permanentBorder.dataset.borderOpacity;
+  const borderWidth = permanentBorder.dataset.borderWidth;
+  const borderRadius = permanentBorder.dataset.borderRadius;
+
+  // If dataset values exist, use them
+  if (borderHex !== undefined) {
+    return {
+      hex: borderHex || DEFAULT_BORDER_HEX,
+      opacity: borderOpacity !== undefined ? Number(borderOpacity) : DEFAULT_BORDER_OPACITY,
+      width: borderWidth !== undefined ? Number(borderWidth) : DEFAULT_BORDER_WIDTH,
+      radius: borderRadius !== undefined ? Number(borderRadius) : DEFAULT_BORDER_RADIUS
+    };
+  }
+
+  // Fallback: read from computed styles
+  const computed = window.getComputedStyle(permanentBorder);
+  const borderColorInfo = rgbaToHexOpacity(
+    computed.borderColor || permanentBorder.style.borderColor || null,
+    DEFAULT_BORDER_HEX,
+    DEFAULT_BORDER_OPACITY
+  );
+  const borderWidthFromStyle = parseFloat(computed.borderWidth || permanentBorder.style.borderWidth || "0") || 0;
+  const borderRadiusFromStyle = parseFloat(computed.borderRadius || permanentBorder.style.borderRadius || "0") || 0;
+
+  return {
+    hex: borderColorInfo.hex,
+    opacity: borderColorInfo.opacity,
+    width: borderWidthFromStyle,
+    radius: borderRadiusFromStyle
+  };
 }
 
 // Функция для обновления resize handle
@@ -5943,18 +7232,34 @@ async function globalPasteImage() {
   const { lastMouseX, lastMouseY } = getSharedVars();
   const worldPos = screenToWorld(lastMouseX, lastMouseY);
 
+  // Center image under cursor using displayWidth/displayHeight if available
+  const displayWidth = copiedImageData.displayWidth || null;
+  const displayHeight = copiedImageData.displayHeight || null;
+  const centeredLeft = displayWidth ? worldPos.x - displayWidth / 2 : worldPos.x;
+  const centeredTop = displayHeight ? worldPos.y - displayHeight / 2 : worldPos.y;
+
   const newImageId = `wbe-image-${Date.now()}`;
-  const cropData = copiedImageData.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-  const maskTypeData = copiedImageData.maskType || 'rect';
-  const circleOffsetData = copiedImageData.circleOffset || { x: 0, y: 0 };
-  const circleRadiusData = copiedImageData.circleRadius || null;
-  createImageElement(newImageId, copiedImageData.src, worldPos.x, worldPos.y, copiedImageData.scale, cropData, maskTypeData, circleOffsetData, circleRadiusData, null, copiedImageData.isFrozen || false);
+  // Pass displayWidth/displayHeight for correct placeholder sizing
+  createImageElement({
+    id: newImageId,
+    src: copiedImageData.src,
+    left: centeredLeft,
+    top: centeredTop,
+    scale: copiedImageData.scale,
+    crop: copiedImageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+    maskType: copiedImageData.maskType || 'rect',
+    circleOffset: copiedImageData.circleOffset || { x: 0, y: 0 },
+    circleRadius: copiedImageData.circleRadius || null,
+    isFrozen: copiedImageData.isFrozen || false,
+    displayWidth,
+    displayHeight
+  });
 
   const images = await getAllImages();
   images[newImageId] = {
     src: copiedImageData.src,
-    left: worldPos.x,
-    top: worldPos.y,
+    left: centeredLeft,
+    top: centeredTop,
     scale: copiedImageData.scale,
     crop: cropData,
     maskType: maskTypeData,
@@ -5973,6 +7278,35 @@ async function handleImagePasteFromClipboard(file) {
   try {
     // Сбрасываем наши скопированные элементы (вставляем из системного буфера)
     copiedImageData = null;
+
+    // 🚀 OPTIMIZATION: Preload image from File object to get dimensions BEFORE upload
+    // This allows us to create placeholder with correct size immediately (no size jumps)
+    const objectURL = URL.createObjectURL(file);
+    const preloadImg = new Image();
+    
+    const dimensions = await new Promise((resolve, reject) => {
+      preloadImg.onload = () => {
+        URL.revokeObjectURL(objectURL); // Cleanup memory
+        resolve({
+          width: preloadImg.naturalWidth,
+          height: preloadImg.naturalHeight
+        });
+      };
+      preloadImg.onerror = (_error) => {
+        URL.revokeObjectURL(objectURL); // Cleanup on error too
+        reject(new Error('Failed to preload image'));
+      };
+      preloadImg.src = objectURL; // Load from local blob (RAM) - instant!
+    });
+    
+    // Calculate auto-scale (same logic as in createImageElement's onload handler)
+    const maxDisplaySize = 350; // Maximum size for the larger dimension
+    let finalScale = 1;
+    if (dimensions.width > maxDisplaySize || dimensions.height > maxDisplaySize) {
+      const maxDimension = Math.max(dimensions.width, dimensions.height);
+      finalScale = maxDisplaySize / maxDimension;
+    }
+    
 
     // Создаем уникальное имя файла
     const timestamp = Date.now();
@@ -6034,24 +7368,59 @@ async function handleImagePasteFromClipboard(file) {
     if (uploadResult && uploadResult.path) {
       // Конвертируем позицию курсора в world coordinates
       const { lastMouseX, lastMouseY } = getSharedVars();
+      console.log(`[TEST] handleImagePasteFromClipboard: Received lastMouseX=${lastMouseX}, lastMouseY=${lastMouseY}`);
       const worldPos = screenToWorld(lastMouseX, lastMouseY);
+      console.log(`[TEST] handleImagePasteFromClipboard: Converted to worldPos.x=${worldPos.x}, worldPos.y=${worldPos.y}`);
 
+      // Calculate scaled dimensions to center image under cursor
+      const scaledWidth = dimensions.width * finalScale;
+      const scaledHeight = dimensions.height * finalScale;
+      console.log(`[TEST] handleImagePasteFromClipboard: Image dimensions: width=${dimensions.width}, height=${dimensions.height}, scale=${finalScale}, scaledWidth=${scaledWidth}, scaledHeight=${scaledHeight}`);
+      
+      // Position image so its center is under cursor (not top-left corner)
+      const centeredLeft = worldPos.x - scaledWidth / 2;
+      const centeredTop = worldPos.y - scaledHeight / 2;
+      console.log(`[TEST] handleImagePasteFromClipboard: Final position: left=${centeredLeft}, top=${centeredTop}`);
 
-      // Создаем новое изображение В ПОЗИЦИИ КУРСОРА
+      // Создаем новое изображение с центром под курсором
       const imageId = `wbe-image-${timestamp}`;
-      const defaultCrop = { top: 0, right: 0, bottom: 0, left: 0 };
-      createImageElement(imageId, uploadResult.path, worldPos.x, worldPos.y, 1, defaultCrop, 'rect', { x: 0, y: 0 }, null);
+      
+      // DON'T pass displayWidth/displayHeight - let preload handle sizing
+      createImageElement({
+        id: imageId,
+        src: uploadResult.path,
+        left: centeredLeft,
+        top: centeredTop,
+        scale: finalScale, // Use calculated scale (not 1!)
+        crop: { top: 0, right: 0, bottom: 0, left: 0 },
+        maskType: 'rect',
+        circleOffset: { x: 0, y: 0 },
+        isFrozen: false
+        // displayWidth/displayHeight will be set by preload callback
+      });
 
-      // Сохраняем в базу
+      // Сохраняем в базу с правильными параметрами
       const images = await getAllImages();
+      const container = document.getElementById(imageId);
+      const permanentBorder = container?.querySelector('.wbe-image-permanent-border');
+      const borderStyle = permanentBorder ? getImageBorderStyle(permanentBorder) : null;
+      
       images[imageId] = {
         src: uploadResult.path,
-        left: worldPos.x,
-        top: worldPos.y,
-        scale: 1,
-        crop: defaultCrop,
+        left: centeredLeft,
+        top: centeredTop,
+        scale: finalScale, // Save calculated scale (not 1!)
+        crop: { top: 0, right: 0, bottom: 0, left: 0 },
         isFrozen: false,
-        zIndex: ZIndexManager.get(imageId)
+        zIndex: ZIndexManager.get(imageId),
+        rank: ZIndexManager.getRank(imageId),
+        ...(borderStyle ? {
+          borderHex: borderStyle.hex,
+          borderOpacity: borderStyle.opacity,
+          borderWidth: borderStyle.width,
+          borderRadius: borderStyle.radius
+        } : {})
+        // displayWidth/displayHeight will be saved by saveImageState after image loads
       };
       await setAllImages(images);
 
@@ -6170,6 +7539,10 @@ export const ImageTools = {
   clearImageCaches,
 
   // utility functions
-  cleanupBrokenImages
+  cleanupBrokenImages,
+
+  // crop/mask data management
+  setImageCropData,
+  getImageCropData
 
 };
