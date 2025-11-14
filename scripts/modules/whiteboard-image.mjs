@@ -137,6 +137,9 @@ const debouncedFlushImageUpdates = debounce(async () => {
           const permanentBorder = existingContainer.querySelector('.wbe-image-permanent-border');
           const borderStyle = getImageBorderStyle(permanentBorder);
           
+          // Extract shadow style from container
+          const shadowStyle = getImageShadowStyle(existingContainer);
+          
           // Preserve border properties from DB if missing from DOM
           const dbImageData = dbImages[existingId];
           const preservedBorder = borderStyle ? null : (dbImageData?.borderHex != null ? {
@@ -144,6 +147,12 @@ const debouncedFlushImageUpdates = debounce(async () => {
             opacity: dbImageData.borderOpacity,
             width: dbImageData.borderWidth,
             radius: dbImageData.borderRadius
+          } : null);
+          
+          // Preserve shadow properties from DB if missing from DOM
+          const preservedShadow = shadowStyle ? null : (dbImageData?.shadowHex != null ? {
+            hex: dbImageData.shadowHex,
+            opacity: dbImageData.shadowOpacity
           } : null);
           
           const existingImageData = {
@@ -174,6 +183,14 @@ const debouncedFlushImageUpdates = debounce(async () => {
               borderOpacity: preservedBorder.opacity,
               borderWidth: preservedBorder.width,
               borderRadius: preservedBorder.radius
+            } : {}),
+            // Shadow style - use DOM if available, otherwise preserve from DB
+            ...(shadowStyle ? {
+              shadowHex: shadowStyle.hex,
+              shadowOpacity: shadowStyle.opacity
+            } : preservedShadow ? {
+              shadowHex: preservedShadow.hex,
+              shadowOpacity: preservedShadow.opacity
             } : {})
           };
           images[existingId] = existingImageData;
@@ -188,21 +205,31 @@ const debouncedFlushImageUpdates = debounce(async () => {
   // If an object is missing from DOM, it was deleted - trust that
   
   // Apply all pending updates (these override DOM)
-  // But preserve border properties from DB if missing from pending updates
+  // But preserve border and shadow properties from DB if missing from pending updates
   pendingImageUpdates.forEach((imageData, id) => {
     const dbImageData = dbImages[id];
-    // If pending update doesn't have border properties, preserve from DB
-    if (imageData.borderHex == null && dbImageData?.borderHex != null) {
-      images[id] = {
+    const hasBorder = imageData.borderHex != null;
+    const hasShadow = imageData.shadowHex != null;
+    
+    if (!hasBorder && dbImageData?.borderHex != null) {
+      imageData = {
         ...imageData,
         borderHex: dbImageData.borderHex,
         borderOpacity: dbImageData.borderOpacity,
         borderWidth: dbImageData.borderWidth,
         borderRadius: dbImageData.borderRadius
       };
-    } else {
-      images[id] = imageData;
     }
+    
+    if (!hasShadow && dbImageData?.shadowHex != null) {
+      imageData = {
+        ...imageData,
+        shadowHex: dbImageData.shadowHex,
+        shadowOpacity: dbImageData.shadowOpacity
+      };
+    }
+    
+    images[id] = imageData;
   });
   
   const finalIds = Object.keys(images);
@@ -266,6 +293,9 @@ async function persistImageState(id, imageElement, container, options = {}) {
   const permanentBorder = container.querySelector('.wbe-image-permanent-border');
   const borderStyle = getImageBorderStyle(permanentBorder);
   
+  // Extract shadow style from container
+  const shadowStyle = getImageShadowStyle(container);
+  
   const imageData = {
     src: imageElement.src,
     left: parseFloat(container.style.left) || 0,
@@ -286,6 +316,11 @@ async function persistImageState(id, imageElement, container, options = {}) {
       borderOpacity: borderStyle.opacity,
       borderWidth: borderStyle.width,
       borderRadius: borderStyle.radius
+    } : {}),
+    // Shadow style - only include if shadowStyle exists
+    ...(shadowStyle ? {
+      shadowHex: shadowStyle.hex,
+      shadowOpacity: shadowStyle.opacity
     } : {})
   };
   
@@ -2397,9 +2432,12 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
     };
     const currentBorderWidth = currentBorderStyle?.width ?? DEFAULT_BORDER_WIDTH;
     const currentBorderRadius = currentBorderStyle?.radius ?? DEFAULT_BORDER_RADIUS;
+    
+    // Read actual shadow style from container element
+    const currentShadowStyle = getImageShadowStyle(container);
     const shadowColorInfo = {
-      hex: DEFAULT_SHADOW_HEX,
-      opacity: DEFAULT_SHADOW_OPACITY
+      hex: currentShadowStyle?.hex || DEFAULT_SHADOW_HEX,
+      opacity: currentShadowStyle?.opacity ?? DEFAULT_SHADOW_OPACITY
     };
 
     const sub = document.createElement("div");
@@ -2554,10 +2592,20 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
     const { wrapper: shadowOpacityRow, slider: shadowOpacitySlider, update: updateShadowOpacityLabel } = createSlider(shadowColorInfo.opacity, { min: 0, max: 100 });
     shadowRow.appendChild(shadowOpacityRow);
 
-    // TODO: Connect to actual shadow update logic
+    // Apply shadow style to container
     const applyShadow = async (hex, opacity) => {
-      // Placeholder - will be connected to shadow update later
-      console.log(`[WB-E] Shadow update: hex=${hex}, opacity=${opacity}`);
+      if (!container) return;
+      
+      updateImageShadowStyle(container, {
+        hexColor: hex,
+        opacity: opacity
+      });
+      
+      // Persist shadow style to image state
+      const imageElement = container.querySelector('.wbe-canvas-image');
+      if (imageElement) {
+        await persistImageState(container.id, imageElement, container, { skipZIndex: true });
+      }
     };
 
     const syncShadow = async () => {
@@ -4169,6 +4217,8 @@ function installGlobalImageSelectionHandler() {
  * @param {number} [params.borderOpacity] - Border opacity (0-100)
  * @param {number} [params.borderWidth] - Border width in pixels
  * @param {number} [params.borderRadius] - Border radius in pixels
+ * @param {string} [params.shadowHex] - Shadow color hex
+ * @param {number} [params.shadowOpacity] - Shadow opacity (0-100)
  */
 function createImageElement({
   id,
@@ -4187,7 +4237,9 @@ function createImageElement({
   borderHex = null,
   borderOpacity = null,
   borderWidth = null,
-  borderRadius = null
+  borderRadius = null,
+  shadowHex = null,
+  shadowOpacity = null
 }) {
   const layer = document.getElementById('whiteboard-experience-layer') ||
                 document.querySelector('.wbe-layer') || 
@@ -4227,8 +4279,13 @@ function createImageElement({
       left: ${left}px;
       top: ${top}px;
       z-index: ${zIndex};
-      filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));
     `;
+  
+  // Initialize shadow style from parameters or defaults
+  const shadowParams = {};
+  if (shadowHex != null) shadowParams.hexColor = shadowHex;
+  if (shadowOpacity != null) shadowParams.opacity = shadowOpacity;
+  updateImageShadowStyle(container, shadowParams);
 
   // Внутренний элемент для контента + масштабирование
   const imageElement = document.createElement("img");
@@ -6247,7 +6304,9 @@ async function setAllImages(images) {
               borderHex: imageData.borderHex,
               borderOpacity: imageData.borderOpacity,
               borderWidth: imageData.borderWidth,
-              borderRadius: imageData.borderRadius
+              borderRadius: imageData.borderRadius,
+              shadowHex: imageData.shadowHex,
+              shadowOpacity: imageData.shadowOpacity
             });
           }
           
@@ -6314,7 +6373,9 @@ async function setAllImages(images) {
               borderHex: imageData.borderHex,
               borderOpacity: imageData.borderOpacity,
               borderWidth: imageData.borderWidth,
-              borderRadius: imageData.borderRadius
+              borderRadius: imageData.borderRadius,
+              shadowHex: imageData.shadowHex,
+              shadowOpacity: imageData.shadowOpacity
             });
           }
 
@@ -6371,6 +6432,7 @@ async function setAllImages(images) {
 function updateImageElement(existing, imageData) {
   // CRITICAL: Skip socket updates for images locked by current user (actively being manipulated)
   if (existing.dataset.lockedBy && existing.dataset.lockedBy === game.user.id) {
+    return; // Don't update position, scale, crop when user is actively manipulating
   }
 
   // Update basic parameters
@@ -6425,6 +6487,14 @@ function updateImageElement(existing, imageData) {
       }
     }
 
+    // Apply shadow style if provided
+    if (imageData.shadowHex != null || imageData.shadowOpacity != null) {
+      updateImageShadowStyle(existing, {
+        hexColor: imageData.shadowHex,
+        opacity: imageData.shadowOpacity
+      });
+    }
+
     // Ensure visual styles/UI are applied *after* the image has size
     const applyAll = () => {
       updateImageVisualStyles(imageElement, imageData);
@@ -6439,14 +6509,17 @@ function updateImageElement(existing, imageData) {
 
   // CRITICAL: Update imageLocalVars so selectImage() reads fresh data
   // This ensures crop data from socket updates is preserved
-  updateImageLocalVars(existing.id, {
-    maskType: imageData.maskType || 'rect',
-    circleOffset: imageData.circleOffset || { x: 0, y: 0 },
-    circleRadius: imageData.circleRadius,
-    crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
-    scale: imageData.scale || 1,
-    isCropping: imageData.isCropping || false
-  });
+  // BUT: Don't update if image is locked by current user (actively being manipulated)
+  if (!existing.dataset.lockedBy || existing.dataset.lockedBy !== game.user.id) {
+    updateImageLocalVars(existing.id, {
+      maskType: imageData.maskType || 'rect',
+      circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+      circleRadius: imageData.circleRadius,
+      crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+      scale: imageData.scale || 1,
+      isCropping: imageData.isCropping || false
+    });
+  }
 
   // Note: Controllers are already enabled when created and remain enabled
   // The real issue was pointer-events being set to none by updateImageUIStates
@@ -6524,6 +6597,14 @@ function updateImageUIElements(container, imageData) {
         radius: imageData.borderRadius
       });
     }
+  }
+
+  // Update shadow style if provided
+  if (imageData.shadowHex != null || imageData.shadowOpacity != null) {
+    updateImageShadowStyle(container, {
+      hexColor: imageData.shadowHex,
+      opacity: imageData.shadowOpacity
+    });
   }
 
   // Update selection border
@@ -7039,6 +7120,76 @@ function updateImageBorderStyle(permanentBorder, { hexColor = DEFAULT_BORDER_HEX
     permanentBorder.style.border = "none";
     permanentBorder.style.borderRadius = borderRadius;
   }
+}
+
+/**
+ * Update shadow style (color, opacity) on image container
+ */
+function updateImageShadowStyle(container, { hexColor = DEFAULT_SHADOW_HEX, opacity = DEFAULT_SHADOW_OPACITY } = {}) {
+  if (!container) return;
+
+  const safeOpacity = clamp(Number(opacity), 0, 100);
+  const safeHex = hexColor || DEFAULT_SHADOW_HEX;
+  const rgba = hexToRgba(safeHex, safeOpacity);
+
+  // Store values in dataset for persistence
+  container.dataset.shadowHex = safeHex;
+  container.dataset.shadowOpacity = String(safeOpacity);
+  container.dataset.shadowRgba = rgba || "";
+
+  // Apply shadow style using filter: drop-shadow
+  if (rgba) {
+    container.style.filter = `drop-shadow(0 4px 8px ${rgba})`;
+  } else {
+    container.style.filter = "none";
+  }
+}
+
+/**
+ * Read current shadow style from container element
+ */
+function getImageShadowStyle(container) {
+  if (!container) {
+    return null;
+  }
+
+  // Try to read from dataset first (most reliable)
+  const shadowHex = container.dataset.shadowHex;
+  const shadowOpacity = container.dataset.shadowOpacity;
+
+  // If dataset values exist, use them
+  if (shadowHex !== undefined) {
+    return {
+      hex: shadowHex || DEFAULT_SHADOW_HEX,
+      opacity: shadowOpacity !== undefined ? Number(shadowOpacity) : DEFAULT_SHADOW_OPACITY
+    };
+  }
+
+  // Fallback: read from computed styles
+  const computed = window.getComputedStyle(container);
+  const filterValue = computed.filter || container.style.filter || "";
+  const dropShadowMatch = filterValue.match(/drop-shadow\([^)]+rgba?\(([^)]+)\)\)/);
+  
+  if (dropShadowMatch) {
+    const rgbaMatch = dropShadowMatch[1].match(/(\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/);
+    if (rgbaMatch) {
+      const r = parseInt(rgbaMatch[1]);
+      const g = parseInt(rgbaMatch[2]);
+      const b = parseInt(rgbaMatch[3]);
+      const a = rgbaMatch[4] ? parseFloat(rgbaMatch[4]) : 1;
+      const hex = `#${[r, g, b].map(x => x.toString(16).padStart(2, '0')).join('')}`;
+      const opacity = Math.round(a * 100);
+      return {
+        hex,
+        opacity
+      };
+    }
+  }
+
+  return {
+    hex: DEFAULT_SHADOW_HEX,
+    opacity: DEFAULT_SHADOW_OPACITY
+  };
 }
 
 /**

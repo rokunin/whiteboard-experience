@@ -650,7 +650,9 @@ Hooks.once("ready", async () => {
               borderHex: imageData.borderHex,
               borderOpacity: imageData.borderOpacity,
               borderWidth: imageData.borderWidth,
-              borderRadius: imageData.borderRadius
+              borderRadius: imageData.borderRadius,
+              shadowHex: imageData.shadowHex,
+              shadowOpacity: imageData.shadowOpacity
               // displayWidth/displayHeight not passed for socket updates
             });
           }
@@ -784,7 +786,9 @@ Hooks.once("ready", async () => {
               borderHex: imageData.borderHex,
               borderOpacity: imageData.borderOpacity,
               borderWidth: imageData.borderWidth,
-              borderRadius: imageData.borderRadius
+              borderRadius: imageData.borderRadius,
+              shadowHex: imageData.shadowHex,
+              shadowOpacity: imageData.shadowOpacity
               // displayWidth/displayHeight not passed for socket updates
             });
           }
@@ -1795,7 +1799,9 @@ async function pasteMultiSelection() {
       borderHex: imageData.borderHex,
       borderOpacity: imageData.borderOpacity,
       borderWidth: imageData.borderWidth,
-      borderRadius: imageData.borderRadius
+      borderRadius: imageData.borderRadius,
+      shadowHex: imageData.shadowHex,
+      shadowOpacity: imageData.shadowOpacity
       // displayWidth/displayHeight not passed - will be calculated after paste
     });
 
@@ -2068,7 +2074,9 @@ async function loadCanvasElements() {
         borderHex: data.borderHex,
         borderOpacity: data.borderOpacity,
         borderWidth: data.borderWidth,
-        borderRadius: data.borderRadius
+        borderRadius: data.borderRadius,
+        shadowHex: data.shadowHex,
+        shadowOpacity: data.shadowOpacity
       });
     } catch (error) {
       console.error(`[WB-E] Failed to restore image ${id}:`, error);
