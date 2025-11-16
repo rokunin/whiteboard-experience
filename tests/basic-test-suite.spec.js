@@ -6443,6 +6443,305 @@ test.describe('Basic Test Suite', () => {
       await context.close();
     }
   });
+
+  test('Partial update: drag/resize should not delete other objects', async ({ browser }) => {
+    console.log('\n=== PARTIAL UPDATE TEST: Drag/Resize Should Not Delete Other Objects ===');
+    
+    // Create two browser contexts: one for GM, one for Player
+    const gmContext = await browser.newContext();
+    const playerContext = await browser.newContext();
+    
+    const gmPage = await gmContext.newPage();
+    const playerPage = await playerContext.newPage();
+    
+    // Setup browser log capture for investigation
+    const playerLogs = [];
+    const gmLogs = [];
+    
+    playerPage.on('console', (msg) => {
+      const text = msg.text();
+      if (text.includes('[PARTIAL') || text.includes('REMOVING') || text.includes('isFullSync')) {
+        playerLogs.push({ time: Date.now(), text, type: msg.type() });
+      }
+    });
+    
+    gmPage.on('console', (msg) => {
+      const text = msg.text();
+      if (text.includes('[PARTIAL') || text.includes('REMOVING') || text.includes('isFullSync')) {
+        gmLogs.push({ time: Date.now(), text, type: msg.type() });
+      }
+    });
+    
+    try {
+      // Setup GM first
+      console.log('\n--- Setting up GM ---');
+      await setupTestForUser(gmPage, 'Usmr9pveCkiz8dgE', 'GM');
+      await cleanupTest(gmPage, 'GM');
+      
+      // Setup Player
+      console.log('\n--- Setting up Player ---');
+      await setupTestForUser(playerPage, 'LoZGkWmu3xRB0sXZ', 'Player');
+      
+      // Wait for both to be ready
+      await Promise.all([
+        gmPage.waitForTimeout(1000),
+        playerPage.waitForTimeout(1000)
+      ]);
+      
+      // Create 3 images on Player side
+      console.log('\n--- Creating 3 test images from Player ---');
+      const imageIds = await createThreeImages(playerPage);
+      expect(imageIds.length).toBeGreaterThanOrEqual(3);
+      const testImageIds = imageIds.slice(0, 3);
+      
+      // Wait for sync to GM
+      await gmPage.waitForTimeout(2000);
+      
+      // Verify all images exist on both sides
+      console.log('\n--- Verifying initial state ---');
+      const playerInitialCount = await playerPage.evaluate(({ ids }) => {
+        return ids.filter(id => document.getElementById(id) !== null).length;
+      }, { ids: testImageIds });
+      
+      const gmInitialCount = await gmPage.evaluate(({ ids }) => {
+        return ids.filter(id => document.getElementById(id) !== null).length;
+      }, { ids: testImageIds });
+      
+      expect(playerInitialCount).toBe(3);
+      expect(gmInitialCount).toBe(3);
+      console.log(`✓ Initial state: Player has ${playerInitialCount} images, GM has ${gmInitialCount} images`);
+      
+      // Test 1: Drag first image on Player side
+      console.log('\n--- Test 1: Drag first image on Player side ---');
+      const dragTargetId = testImageIds[0];
+      const otherImageIds = testImageIds.slice(1);
+      
+      // Get initial position
+      const initialPos = await playerPage.evaluate((id) => {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      }, dragTargetId);
+      
+      expect(initialPos).not.toBeNull();
+      
+      // Clear logs before drag
+      playerLogs.length = 0;
+      gmLogs.length = 0;
+      
+      // Click to select
+      await playerPage.mouse.click(initialPos.x, initialPos.y);
+      await playerPage.waitForTimeout(200);
+      
+      // Drag the image
+      const dragDelta = { x: 100, y: 50 };
+      await playerPage.mouse.move(initialPos.x, initialPos.y);
+      await playerPage.mouse.down();
+      await playerPage.waitForTimeout(100);
+      await playerPage.mouse.move(initialPos.x + dragDelta.x, initialPos.y + dragDelta.y, { steps: 10 });
+      await playerPage.waitForTimeout(200);
+      await playerPage.mouse.up();
+      await playerPage.waitForTimeout(1000); // Wait for debounce and sync
+      
+      // Verify dragged image moved
+      const afterDragPos = await playerPage.evaluate((id) => {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      }, dragTargetId);
+      
+      const moved = Math.abs(afterDragPos.x - initialPos.x) > 50 || Math.abs(afterDragPos.y - initialPos.y) > 50;
+      expect(moved).toBe(true);
+      console.log(`✓ Image was dragged successfully`);
+      
+      // Verify other images still exist on Player side
+      const playerAfterDragCount = await playerPage.evaluate(({ ids }) => {
+        return ids.filter(id => document.getElementById(id) !== null).length;
+      }, { ids: otherImageIds });
+      
+      expect(playerAfterDragCount).toBe(2);
+      console.log(`✓ Other images still exist on Player side: ${playerAfterDragCount}/2`);
+      
+      // Wait for sync to GM
+      await gmPage.waitForTimeout(2000);
+      
+      // Verify all images still exist on GM side
+      const gmAfterDragCount = await gmPage.evaluate(({ ids }) => {
+        return ids.filter(id => document.getElementById(id) !== null).length;
+      }, { ids: testImageIds });
+      
+      expect(gmAfterDragCount).toBe(3);
+      console.log(`✓ All images still exist on GM side: ${gmAfterDragCount}/3`);
+      
+      // Check logs for partial update flags
+      const partialLogs = playerLogs.filter(l => l.text.includes('_partial=true') || l.text.includes('isFullSync=false'));
+      console.log(`\n--- Partial update logs (Player): ${partialLogs.length} entries ---`);
+      partialLogs.forEach(log => console.log(`  ${log.text}`));
+      
+      const removalLogs = playerLogs.filter(l => l.text.includes('REMOVING') || l.text.includes('Removing element'));
+      if (removalLogs.length > 0) {
+        console.error(`\n⚠️ WARNING: Found ${removalLogs.length} removal logs during drag:`);
+        removalLogs.forEach(log => console.error(`  ${log.text}`));
+      }
+      
+      // Test 2: Resize second image on Player side
+      console.log('\n--- Test 2: Resize second image on Player side ---');
+      const resizeTargetId = testImageIds[1];
+      const otherImageIdsForResize = [testImageIds[0], testImageIds[2]];
+      
+      // Get initial size
+      const initialSize = await playerPage.evaluate((id) => {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return { width: rect.width, height: rect.height };
+      }, resizeTargetId);
+      
+      expect(initialSize).not.toBeNull();
+      
+      // Clear logs before resize
+      playerLogs.length = 0;
+      gmLogs.length = 0;
+      
+      // Click to select
+      const resizeTargetPos = await playerPage.evaluate((id) => {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      }, resizeTargetId);
+      
+      await playerPage.mouse.click(resizeTargetPos.x, resizeTargetPos.y);
+      await playerPage.waitForTimeout(200);
+      
+      // Find resize handle
+      const resizeHandlePos = await playerPage.evaluate((id) => {
+        const container = document.getElementById(id);
+        if (!container) return null;
+        const handle = container.querySelector('.wbe-image-resize-handle');
+        if (!handle) return null;
+        const rect = handle.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      }, resizeTargetId);
+      
+      if (resizeHandlePos) {
+        // Drag resize handle
+        await playerPage.mouse.move(resizeHandlePos.x, resizeHandlePos.y);
+        await playerPage.mouse.down();
+        await playerPage.waitForTimeout(100);
+        await playerPage.mouse.move(resizeHandlePos.x + 50, resizeHandlePos.y + 50, { steps: 10 });
+        await playerPage.waitForTimeout(200);
+        await playerPage.mouse.up();
+        await playerPage.waitForTimeout(1000); // Wait for debounce and sync
+        
+        // Verify image was resized
+        const afterResizeSize = await playerPage.evaluate((id) => {
+          const el = document.getElementById(id);
+          if (!el) return null;
+          const rect = el.getBoundingClientRect();
+          return { width: rect.width, height: rect.height };
+        }, resizeTargetId);
+        
+        const resized = Math.abs(afterResizeSize.width - initialSize.width) > 20 || 
+                       Math.abs(afterResizeSize.height - initialSize.height) > 20;
+        expect(resized).toBe(true);
+        console.log(`✓ Image was resized successfully`);
+      } else {
+        console.log(`⚠️ Resize handle not found, skipping resize test`);
+      }
+      
+      // Verify other images still exist on Player side
+      const playerAfterResizeCount = await playerPage.evaluate(({ ids }) => {
+        return ids.filter(id => document.getElementById(id) !== null).length;
+      }, { ids: otherImageIdsForResize });
+      
+      expect(playerAfterResizeCount).toBe(2);
+      console.log(`✓ Other images still exist on Player side after resize: ${playerAfterResizeCount}/2`);
+      
+      // Wait for sync to GM
+      await gmPage.waitForTimeout(2000);
+      
+      // Verify all images still exist on GM side
+      const gmAfterResizeCount = await gmPage.evaluate(({ ids }) => {
+        return ids.filter(id => document.getElementById(id) !== null).length;
+      }, { ids: testImageIds });
+      
+      expect(gmAfterResizeCount).toBe(3);
+      console.log(`✓ All images still exist on GM side after resize: ${gmAfterResizeCount}/3`);
+      
+      // Check logs for partial update flags
+      const resizePartialLogs = playerLogs.filter(l => l.text.includes('_partial=true') || l.text.includes('isFullSync=false'));
+      console.log(`\n--- Partial update logs during resize (Player): ${resizePartialLogs.length} entries ---`);
+      resizePartialLogs.forEach(log => console.log(`  ${log.text}`));
+      
+      const resizeRemovalLogs = playerLogs.filter(l => l.text.includes('REMOVING') || l.text.includes('Removing element'));
+      if (resizeRemovalLogs.length > 0) {
+        console.error(`\n⚠️ WARNING: Found ${resizeRemovalLogs.length} removal logs during resize:`);
+        resizeRemovalLogs.forEach(log => console.error(`  ${log.text}`));
+      }
+      
+      // Test 3: Drag text on Player side (if we have texts)
+      console.log('\n--- Test 3: Drag text on Player side ---');
+      const textIds = await createThreeTexts(playerPage);
+      if (textIds.length > 0) {
+        const dragTextId = textIds[0];
+        const otherTextIds = textIds.slice(1);
+        
+        // Get initial position
+        const textInitialPos = await playerPage.evaluate((id) => {
+          const el = document.getElementById(id);
+          if (!el) return null;
+          const rect = el.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        }, dragTextId);
+        
+        if (textInitialPos) {
+          // Clear logs before drag
+          playerLogs.length = 0;
+          gmLogs.length = 0;
+          
+          // Click to select
+          await playerPage.mouse.click(textInitialPos.x, textInitialPos.y);
+          await playerPage.waitForTimeout(200);
+          
+          // Drag the text
+          await playerPage.mouse.move(textInitialPos.x, textInitialPos.y);
+          await playerPage.mouse.down();
+          await playerPage.waitForTimeout(100);
+          await playerPage.mouse.move(textInitialPos.x + 80, textInitialPos.y + 40, { steps: 10 });
+          await playerPage.waitForTimeout(200);
+          await playerPage.mouse.up();
+          await playerPage.waitForTimeout(1000);
+          
+          // Verify other texts still exist
+          const playerAfterTextDragCount = await playerPage.evaluate(({ ids }) => {
+            return ids.filter(id => document.getElementById(id) !== null).length;
+          }, { ids: otherTextIds });
+          
+          expect(playerAfterTextDragCount).toBe(otherTextIds.length);
+          console.log(`✓ Other texts still exist on Player side: ${playerAfterTextDragCount}/${otherTextIds.length}`);
+          
+          // Verify all images still exist
+          const playerImagesAfterTextDrag = await playerPage.evaluate(({ ids }) => {
+            return ids.filter(id => document.getElementById(id) !== null).length;
+          }, { ids: testImageIds });
+          
+          expect(playerImagesAfterTextDrag).toBe(3);
+          console.log(`✓ All images still exist on Player side after text drag: ${playerImagesAfterTextDrag}/3`);
+        }
+      }
+      
+      console.log('\n✅ All partial update tests passed!');
+      
+    } finally {
+      await cleanupTest(gmPage, 'GM').catch(() => {});
+      await cleanupTest(playerPage, 'Player').catch(() => {});
+      await gmContext.close();
+      await playerContext.close();
+    }
+  });
 });
 
 

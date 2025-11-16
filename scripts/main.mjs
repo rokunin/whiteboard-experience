@@ -301,23 +301,27 @@ Hooks.once("ready", async () => {
             }
           }
 
-          existingElements.forEach(element => {
-            if (!existingIds.has(element.id)) {
-              // FIX: Clean up color panel before removing element
-              if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
-                try {
-                  window.wbeColorPanel.cleanup();
-                } catch { }
+          // Only remove elements if this is a full sync (not partial update)
+          const isPartial = data.isPartial === true;
+          if (!isPartial) {
+            existingElements.forEach(element => {
+              if (!existingIds.has(element.id)) {
+                // FIX: Clean up color panel before removing element
+                if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
+                  try {
+                    window.wbeColorPanel.cleanup();
+                  } catch { }
+                }
+                // Clean up color pickers before removing element
+                document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
+                // Clean up ZIndexManager
+                if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                  window.ZIndexManager.remove(element.id);
+                }
+                element.remove();
               }
-              // Clean up color pickers before removing element
-              document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
-              // Clean up ZIndexManager
-              if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
-                window.ZIndexManager.remove(element.id);
-              }
-              element.remove();
-            }
-          });
+            });
+          }
         }
 
         // [ZINDEX_ANALYSIS] Track GM socket broadcast
@@ -327,8 +331,9 @@ Hooks.once("ready", async () => {
         
         // [INVESTIGATE] Track GM broadcasting textUpdate
         console.log(`[INVESTIGATE] GM broadcasting textUpdate: texts=${broadcastTextIds.length}`);
-        // CRITICAL FIX: Always send full sync to prevent "ghost" texts in Player cache
-        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts: requestTexts, isFullSync: true });
+        // Send sync: full sync for full updates, partial sync for partial updates
+        const isPartialForBroadcast = data.isPartial === true;
+        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts: requestTexts, isFullSync: !isPartialForBroadcast });
       }
     }
 
@@ -520,41 +525,42 @@ Hooks.once("ready", async () => {
         }
 
         // CRITICAL FIX: Remove elements missing from socket data
-        // If isFullSync: true, remove ALL missing elements (except actively edited) to clear "ghosts"
-        // Otherwise, only remove if not actively being edited/manipulated
+        // Only remove elements if this is a full sync (isFullSync: true)
+        // For partial updates (isFullSync: false), do NOT remove any elements - only update existing ones
         const isFullSync = data.isFullSync === true;
-        existingElements.forEach(element => {
-          if (!existingIds.has(element.id)) {
-            // Skip removal if element is actively being edited (contentEditable or dragging)
-            const textElement = element.querySelector(".wbe-canvas-text");
-            if (textElement && textElement.contentEditable === "true") {
-              return;
+        if (isFullSync) {
+          existingElements.forEach(element => {
+            if (!existingIds.has(element.id)) {
+              // Skip removal if element is actively being edited (contentEditable or dragging)
+              const textElement = element.querySelector(".wbe-canvas-text");
+              if (textElement && textElement.contentEditable === "true") {
+                return;
+              }
+              if (element.dataset.dragging === "true") {
+                return;
+              }
+              
+              // For full sync: remove even if locked (clears "ghosts" from stale cache)
+              if (element.dataset.lockedBy) {
+                return;
+              }
+              
+              // FIX: Clean up color panel before removing element
+              if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
+                try {
+                  window.wbeColorPanel.cleanup();
+                } catch { }
+              }
+              // Clean up color pickers before removing element
+              document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
+              // Clean up ZIndexManager
+              if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                window.ZIndexManager.remove(element.id);
+              }
+              element.remove();
             }
-            if (element.dataset.dragging === "true") {
-              return;
-            }
-            
-            // For full sync: remove even if locked (clears "ghosts" from stale cache)
-            // For incremental sync: skip if locked (prevents interrupting user)
-            if (!isFullSync && element.dataset.lockedBy) {
-              return;
-            }
-            
-            // FIX: Clean up color panel before removing element
-            if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
-              try {
-                window.wbeColorPanel.cleanup();
-              } catch { }
-            }
-            // Clean up color pickers before removing element
-            document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
-            // Clean up ZIndexManager
-            if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
-              window.ZIndexManager.remove(element.id);
-            }
-            element.remove();
-          }
-        });
+          });
+        }
       }
     }
 
@@ -641,6 +647,9 @@ Hooks.once("ready", async () => {
           console.error(`[INVESTIGATE] GM imageUpdateRequest: MISMATCH! Saved ${requestImageIds.length} but getAllImages returned ${verifyIds.length}`);
         }
 
+        // Determine if this is a partial update BEFORE processing layer
+        const isPartial = data.isPartial === true;
+        
         const layer = getOrCreateLayer();
         if (layer) {
 
@@ -759,39 +768,40 @@ Hooks.once("ready", async () => {
           });
         }
 
-        // Sync DOM z-indexes after updating all ranks
-        if (window.ZIndexManager && typeof window.ZIndexManager.syncAllDOMZIndexes === 'function') {
-          await window.ZIndexManager.syncAllDOMZIndexes();
+          // Sync DOM z-indexes after updating all ranks
+          if (window.ZIndexManager && typeof window.ZIndexManager.syncAllDOMZIndexes === 'function') {
+            await window.ZIndexManager.syncAllDOMZIndexes();
+          }
+
+          // Only remove elements if this is a full sync (not partial update)
+          if (!isPartial) {
+            existingElements.forEach(element => {
+              if (!existingIds.has(element.id)) {
+                // Don't remove if element is locked/being manipulated
+                if (element.dataset.lockedBy) {
+                  return;
+                }
+                
+                // FIX: Clean up image control panel before removing element
+                if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.cleanup === "function") {
+                  try {
+                    window.wbeImageControlPanel.cleanup();
+                  } catch { }
+                }
+                // Clear runtime caches to prevent resurrection
+                ImageTools.clearImageCaches(element.id);
+                // Clean up ZIndexManager
+                if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                  window.ZIndexManager.remove(element.id);
+                }
+                element.remove();
+              }
+            });
+          }
         }
 
-        // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
-          // AND not actively being edited/manipulated (to prevent race conditions during rapid updates)
-          existingElements.forEach(element => {
-            if (!existingIds.has(element.id)) {
-              // Don't remove if element is locked/being manipulated
-              if (element.dataset.lockedBy) {
-                return;
-              }
-              
-              // FIX: Clean up image control panel before removing element
-              if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.cleanup === "function") {
-                try {
-                  window.wbeImageControlPanel.cleanup();
-                } catch { }
-              }
-              // Clear runtime caches to prevent resurrection
-              ImageTools.clearImageCaches(element.id);
-              // Clean up ZIndexManager
-              if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
-                window.ZIndexManager.remove(element.id);
-              }
-              element.remove();
-            }
-          });
-        }
-
-        // CRITICAL FIX: Always send full sync to prevent "ghost" images in Player cache
-        game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: requestImages, isFullSync: true });
+        // Send sync: full sync for full updates, partial sync for partial updates
+        game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: requestImages, isFullSync: !isPartial });
       }
     }
 
@@ -959,37 +969,42 @@ Hooks.once("ready", async () => {
         }
 
         // CRITICAL FIX: Remove elements missing from socket data
-        // If isFullSync: true, remove ALL missing elements (except actively edited) to clear "ghosts"
-        // Otherwise, only remove if not actively being edited/manipulated
+        // Only remove elements if this is a full sync (isFullSync: true)
+        // For partial updates (isFullSync: false), do NOT remove any elements - only update existing ones
         const isFullSync = data.isFullSync === true;
-        existingElements.forEach(element => {
-          if (!existingIds.has(element.id)) {
-            // Skip removal if element is actively being dragged
-            if (element.dataset.dragging === "true") {
-              return;
+        console.log(`[PARTIAL DEBUG] imageUpdate: isFullSync=${isFullSync}, data.isFullSync=${data.isFullSync}, updateCount=${updateImageIds.length}, existingCount=${existingElements.length}, existingIds.size=${existingIds.size}`);
+        if (isFullSync) {
+          existingElements.forEach(element => {
+            if (!existingIds.has(element.id)) {
+              // Skip removal if element is actively being dragged
+              if (element.dataset.dragging === "true") {
+                return;
+              }
+              
+              // For full sync: remove even if locked (clears "ghosts" from stale cache)
+              if (element.dataset.lockedBy) {
+                return;
+              }
+              
+              console.log(`[PARTIAL DEBUG] imageUpdate: REMOVING image ${element.id.slice(-6)} because it's not in existingIds`);
+              // FIX: Clean up image control panel before removing element
+              if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.cleanup === "function") {
+                try {
+                  window.wbeImageControlPanel.cleanup();
+                } catch { }
+              }
+              // Clear runtime caches to prevent resurrection
+              ImageTools.clearImageCaches(element.id);
+              // Clean up ZIndexManager
+              if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                window.ZIndexManager.remove(element.id);
+              }
+              element.remove();
             }
-            
-            // For full sync: remove even if locked (clears "ghosts" from stale cache)
-            // For incremental sync: skip if locked (prevents interrupting user)
-            if (!isFullSync && element.dataset.lockedBy) {
-              return;
-            }
-            
-            // FIX: Clean up image control panel before removing element
-            if (window.wbeImageControlPanel && typeof window.wbeImageControlPanel.cleanup === "function") {
-              try {
-                window.wbeImageControlPanel.cleanup();
-              } catch { }
-            }
-            // Clear runtime caches to prevent resurrection
-            ImageTools.clearImageCaches(element.id);
-            // Clean up ZIndexManager
-            if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
-              window.ZIndexManager.remove(element.id);
-            }
-            element.remove();
-          }
-        });
+          });
+        } else {
+          console.log(`[PARTIAL DEBUG] imageUpdate: SKIPPING removal because isFullSync=false (partial update)`);
+        }
       }
     }
 

@@ -516,6 +516,9 @@ function debounce(func, wait) {
 // Pending state updates queue (keyed by object ID)
 const pendingTextUpdates = new Map();
 
+// Export to window for debugging
+window.wbePendingTextUpdates = pendingTextUpdates;
+
 function logDuplicateZIndexesInTextPayload(prefix, payload) {
   const debugEnabled = typeof window !== 'undefined' && !!window.WBE_DEBUG_ZINDEX;
   if (!debugEnabled) {
@@ -625,11 +628,35 @@ const debouncedFlushTextUpdates = debounce(async () => {
   
   logDuplicateZIndexesInTextPayload('debouncedFlushTextUpdates', texts);
 
-  // Clear pending updates
+  // [PARTIAL FLAG] Check if we have partial updates
+  const partialTexts = [];
+  pendingTextUpdates.forEach((state, id) => {
+    if (state._partial === true) {
+      partialTexts.push(id);
+    }
+  });
+
+  // Clear pending updates before processing
+  const pendingUpdatesCopy = new Map(pendingTextUpdates);
   pendingTextUpdates.clear();
-  
-  // Send complete state
-  await setAllTexts(texts);
+
+  // If we have partial updates, send only those (they already contain full state)
+  if (partialTexts.length > 0) {
+    console.log(`[PARTIAL FLAG] debouncedFlushTextUpdates: Processing ${partialTexts.length} texts with _partial=true:`, partialTexts.map(id => id.slice(-6)));
+    const partialPayload = {};
+    partialTexts.forEach(id => {
+      const state = pendingUpdatesCopy.get(id);
+      if (state) {
+        // Remove _partial flag before sending
+        const { _partial, ...cleanState } = state;
+        partialPayload[id] = cleanState;
+      }
+    });
+    await setAllTexts(partialPayload, true); // true = isPartial
+  } else {
+    // No partial updates - use full sync (current logic)
+    await setAllTexts(texts, false); // false = isPartial
+  }
 }, 200); // 200ms debounce for rapid z-index changes
 
 async function persistTextState(id, textElement, container, options = {}) {
@@ -647,6 +674,12 @@ async function persistTextState(id, textElement, container, options = {}) {
     //console.log(`[ZINDEX_ANALYSIS] persistTextState: Extracted state has zIndex=${state.zIndex} for ${id.slice(-6)}`);
   } else {
     //console.log(`[ZINDEX_ANALYSIS] persistTextState: Extracted state has NO zIndex for ${id.slice(-6)}, will use Manager value`);
+  }
+  
+  // Mark as partial update if requested (for drag/resize operations)
+  if (options.partial) {
+    state._partial = true;
+    console.log(`[PARTIAL FLAG] Text ${id.slice(-6)}: _partial flag set to true`);
   }
   
   // Queue the update for debounced batching
@@ -2944,7 +2977,7 @@ function createTextElement({
         const currentScale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
         
         // Сохранить позицию КОНТЕЙНЕРА (skip z-index read - it doesn't change during drag)
-        await persistTextState(id, textElement, container, { skipZIndex: true });
+        await persistTextState(id, textElement, container, { skipZIndex: true, partial: true });
         
         // Re-assert selection and restore panel after drag
         // CLEAR MASS SELECTION when re-asserting after drag
@@ -3092,7 +3125,7 @@ function createTextElement({
         const currentScale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
         
         // Сохранить позицию контейнера + scale textElement (skip z-index read - it doesn't change during resize)
-        await persistTextState(id, textElement, container, { skipZIndex: true });
+        await persistTextState(id, textElement, container, { skipZIndex: true, partial: true });
         
         // Re-assert selection and restore panel after resize
         // CLEAR MASS SELECTION when re-asserting after resize
@@ -3211,14 +3244,14 @@ async function getAllTexts() {
   }
 }
 
-async function setAllTexts(texts) {
+async function setAllTexts(texts, isPartial = false) {
     const timestamp = Date.now();
     const stackTrace = new Error().stack?.split('\n').slice(1, 4).join(' | ') || 'unknown';
     
     // [ZINDEX_ANALYSIS] Track setAllTexts calls
     const textIds = Object.keys(texts);
     const isEmptyPayload = textIds.length === 0;
-    console.log(`[ZINDEX_ANALYSIS] setAllTexts ENTRY: [${timestamp}] texts=${textIds.length}, isEmpty=${isEmptyPayload}, isGM=${game.user.isGM}, caller=${stackTrace.split('|')[0]?.trim() || 'unknown'}`);
+    console.log(`[ZINDEX_ANALYSIS] setAllTexts ENTRY: [${timestamp}] texts=${textIds.length}, isEmpty=${isEmptyPayload}, isPartial=${isPartial}, isGM=${game.user.isGM}, caller=${stackTrace.split('|')[0]?.trim() || 'unknown'}`);
     // [ZINDEX_ANALYSIS] Track z-index values in payload
     if (!isEmptyPayload) {
       const zIndexMap = new Map();
@@ -3235,12 +3268,20 @@ async function setAllTexts(texts) {
     }
     
     try {
-      console.log(`[WB-E] setAllTexts: [${timestamp}] Sending ${textIds.length} texts:`, textIds.slice(0, 5));
+      console.log(`[WB-E] setAllTexts: [${timestamp}] Sending ${textIds.length} texts (isPartial=${isPartial}):`, textIds.slice(0, 5));
       // Manager already has correct values from local operations
       if (game.user.isGM) {
-        await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
-        await new Promise(resolve => setTimeout(resolve, 50));
-        await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, texts);
+        if (isPartial) {
+          // Partial update: merge with current DB state
+          const currentTexts = await getAllTexts();
+          const mergedTexts = { ...currentTexts, ...texts };
+          await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, mergedTexts);
+        } else {
+          // Full update: replace entire state
+          await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_TEXTS);
+          await new Promise(resolve => setTimeout(resolve, 50));
+          await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_TEXTS, texts);
+        }
         if (isEmptyPayload) {
           if (window.ZIndexManager && typeof window.ZIndexManager.clear === "function") {
             window.ZIndexManager.clear();
@@ -3359,28 +3400,30 @@ async function setAllTexts(texts) {
             }
           }
 
-          // Удаляем элементы, которых больше нет в texts
-          existingElements.forEach(element => {
-            if (!existingIds.has(element.id)) {
-              // FIX: Clean up color panel before removing element
-              if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
-                try {
-                  window.wbeColorPanel.cleanup();
-                } catch { }
+          // Удаляем элементы только при full sync (not partial)
+          if (!isPartial) {
+            existingElements.forEach(element => {
+              if (!existingIds.has(element.id)) {
+                // FIX: Clean up color panel before removing element
+                if (window.wbeColorPanel && typeof window.wbeColorPanel.cleanup === "function") {
+                  try {
+                    window.wbeColorPanel.cleanup();
+                  } catch { }
+                }
+                // Clean up color pickers before removing element
+                document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
+                // Clean up ZIndexManager
+                if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
+                  window.ZIndexManager.remove(element.id);
+                }
+                element.remove();
               }
-              // Clean up color pickers before removing element
-              document.querySelectorAll(".wbe-color-picker-panel").forEach(d => d.remove());
-              // Clean up ZIndexManager
-              if (window.ZIndexManager && typeof window.ZIndexManager.remove === "function") {
-                window.ZIndexManager.remove(element.id);
-              }
-              element.remove();
-            }
-          });
+            });
+          }
         }
 
-        // CRITICAL FIX: Always send full sync to prevent "ghost" texts in Player cache
-        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts, isFullSync: true });
+        // Send sync: full sync for full updates, partial sync for partial updates
+        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts, isFullSync: !isPartial });
       } else {
         // Игрок отправляет запрос GM через сокет
         // CRITICAL FIX: Добавить rank из Manager для всех текстов без rank
@@ -3404,7 +3447,7 @@ async function setAllTexts(texts) {
         console.log(`[INVESTIGATE] setAllTexts (non-GM): About to emit textUpdateRequest with ${textIdsForSocket.length} texts`);
         
         // Отправляем запрос GM через socket
-        game.socket.emit(`module.${MODID}`, { type: "textUpdateRequest", texts: textsWithRank });
+        game.socket.emit(`module.${MODID}`, { type: "textUpdateRequest", texts: textsWithRank, isPartial });
         
         // [INVESTIGATE] Track socket emit completion
         console.log(`[INVESTIGATE] setAllTexts (non-GM): Emitted textUpdateRequest with texts:`, textIdsForSocket.slice(0, 5));

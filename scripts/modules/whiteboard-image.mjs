@@ -288,11 +288,60 @@ const debouncedFlushImageUpdates = debounce(async () => {
     duplicates: duplicates.length > 0 ? duplicates : null
   });
 
-  // Clear pending updates
+  // [PARTIAL FLAG] Check if we have partial updates
+  const partialImages = [];
+  pendingImageUpdates.forEach((state, id) => {
+    if (state._partial === true) {
+      partialImages.push(id);
+    }
+  });
+
+  // Clear pending updates before processing
+  const pendingUpdatesCopy = new Map(pendingImageUpdates);
   pendingImageUpdates.clear();
-  
-  // Send complete state
-  await setAllImages(images);
+
+  // If we have partial updates, send only those (they already contain full state)
+  if (partialImages.length > 0) {
+    console.log(`[PARTIAL FLAG] debouncedFlushImageUpdates: Processing ${partialImages.length} images with _partial=true:`, partialImages.map(id => id.slice(-6)));
+    const partialPayload = {};
+    partialImages.forEach(id => {
+      const state = pendingUpdatesCopy.get(id);
+      if (state) {
+        // Preserve border/shadow from DB if missing from pending update
+        const dbImageData = dbImages[id];
+        const hasBorder = state.borderHex != null;
+        const hasShadow = state.shadowHex != null;
+        
+        let finalState = { ...state };
+        
+        if (!hasBorder && dbImageData?.borderHex != null) {
+          finalState = {
+            ...finalState,
+            borderHex: dbImageData.borderHex,
+            borderOpacity: dbImageData.borderOpacity,
+            borderWidth: dbImageData.borderWidth,
+            borderRadius: dbImageData.borderRadius
+          };
+        }
+        
+        if (!hasShadow && dbImageData?.shadowHex != null) {
+          finalState = {
+            ...finalState,
+            shadowHex: dbImageData.shadowHex,
+            shadowOpacity: dbImageData.shadowOpacity
+          };
+        }
+        
+        // Remove _partial flag before sending
+        const { _partial, ...cleanState } = finalState;
+        partialPayload[id] = cleanState;
+      }
+    });
+    await setAllImages(partialPayload, true); // true = isPartial
+  } else {
+    // No partial updates - use full sync (current logic)
+    await setAllImages(images, false); // false = isPartial
+  }
 }, 200); // 300ms debounce - reduced to minimize flicker during rapid z-index changes
 
 // Persist image state using debounced batching (similar to persistTextState)
@@ -376,6 +425,12 @@ async function persistImageState(id, imageElement, container, options = {}) {
       shadowOpacity: shadowStyle.opacity
     } : {})
   };
+  
+  // Mark as partial update if requested (for drag/resize operations)
+  if (options.partial) {
+    imageData._partial = true;
+    console.log(`[PARTIAL FLAG] Image ${id.slice(-6)}: _partial flag set to true`);
+  }
   
   // Queue the update for debounced batching
   pendingImageUpdates.set(id, imageData);
@@ -954,10 +1009,8 @@ class ImageDragController {
         await this.options.onDragEnd(this);
       }
 
-      // Trigger save callback
-      if (this.options.onSave) {
-        await this.options.onSave();
-      }
+      // NOTE: onSave is NOT called here because onDragEnd already calls saveImageState
+      // Calling onSave here would overwrite the partial flag set in onDragEnd
 
       // Restore control panel if needed
       if (window.wbeImageControlPanel) {
@@ -2246,6 +2299,9 @@ class ResizeController {
 
   // Обновление позиции handle (вызывается извне)
   updatePosition() {
+    // CRITICAL FIX: Check if element is still in DOM (prevents race condition errors)
+    if (!this.imageElement || !this.imageElement.isConnected || !this.handle || !this.handle.isConnected) return;
+    
     const cropData = getImageCropData(this.imageElement);
     updateImageResizeHandle(
       this.handle,
@@ -4775,6 +4831,9 @@ function createImageElement({
         }, 200);
       }
 
+      // CRITICAL FIX: Check if element is still in DOM before updating UI (prevents race condition errors)
+      if (!imageElement.isConnected || !container.isConnected) return;
+      
       // Update UI elements that depend on image dimensions
       updateClipPath();
       
@@ -4804,6 +4863,9 @@ function createImageElement({
 
       // Update UI elements with fallback dimensions
       setTimeout(() => {
+        // CRITICAL FIX: Check if element is still in DOM before updating UI (prevents race condition errors)
+        if (!imageElement.isConnected || !container.isConnected) return;
+        
         updateClipPath();
         
         // Update all dimensions with error state dimensions
@@ -5129,7 +5191,7 @@ function createImageElement({
         containerInDOM: container?.isConnected
       });
       
-      await saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during resize
+      await saveImageState(true, { skipZIndex: true, partial: true }); // Skip z-index read - it doesn't change during resize
 
       if (window.wbeImageControlPanelUpdate) {
         window.wbeImageControlPanelUpdate();
@@ -5208,6 +5270,9 @@ function createImageElement({
 
   // Функция для обновления позиции handle
   function updateHandlePosition() {
+    // CRITICAL FIX: Check if element is still in DOM (prevents race condition errors)
+    if (!imageElement || !imageElement.isConnected || !resizeController || !resizeController.handle || !resizeController.handle.isConnected) return;
+    
     resizeController.updatePosition();
 
     // Старая логика для fallback
@@ -6236,7 +6301,7 @@ function createImageElement({
       // Position updates are handled internally by the controller
     },
     onDragEnd: async (controller) => {
-      await saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during drag
+      await saveImageState(true, { skipZIndex: true, partial: true }); // Skip z-index read - it doesn't change during drag
 
       // FIX: Show panel again after drag (like text module)
       if (window.wbeImageControlPanel) {
@@ -6395,11 +6460,17 @@ function createImageElement({
       return;
     }
 
+    // Mark as partial update if requested (for drag/resize operations)
+    if (options.partial) {
+      imageData._partial = true;
+      console.log(`[PARTIAL FLAG] Image ${id.slice(-6)} (saveImageState): _partial flag set to true`);
+    }
+    
     // Queue the update for debounced batching (handled by module-level debounce)
     window.wbePendingImageUpdates.set(id, imageData);
     
     // INSTRUMENTATION: Log before flush
-    wbeLog('SaveImageState', `QUEUED: id=${id.slice(-6)}, scale=${imageData.scale}, pendingSize=${window.wbePendingImageUpdates.size}`, {
+    wbeLog('SaveImageState', `QUEUED: id=${id.slice(-6)}, scale=${imageData.scale}, pendingSize=${window.wbePendingImageUpdates.size}, partial=${options.partial || false}`, {
       imageData: {
         scale: imageData.scale,
         zIndex: imageData.zIndex,
@@ -6451,7 +6522,7 @@ async function getAllImages() {
   }
 }
 
-async function setAllImages(images) {
+async function setAllImages(images, isPartial = false) {
   const timestamp = Date.now();
   const stackTrace = new Error().stack?.split('\n').slice(1, 10).join(' | ') || 'unknown';
   
@@ -6470,6 +6541,7 @@ async function setAllImages(images) {
     userId: game.user.id,
     userName: game.user.name,
     isGM,
+    isPartial,
     payloadCount: imageIds.length,
     payloadIds: imageIds.map(id => id.slice(-6)),
     domCount: domIds.length,
@@ -6482,29 +6554,32 @@ async function setAllImages(images) {
   
   try {
     if (game.user.isGM) {
-      // CRITICAL FIX: Do NOT sync z-indexes when receiving updates from players
-      // The z-indexes in the payload are already correct from the ZIndexManager
-      // Syncing would cause conflicts and trigger duplicate prevention → flicker
-      // Only sync on initial load or when absolutely necessary
-      
-      // CRITICAL FIX: For mass deletion, we receive the authoritative state (without deleted items)
-      // Do NOT merge with current state - use the passed images as authoritative
-      // This ensures deletions are properly propagated
-      const currentImages = await getAllImages();
-      const currentImageIds = Object.keys(currentImages);
-      // Check if this is a deletion (fewer images than current)
-      const isDeletion = imageIds.length < currentImageIds.length;
-      const deletedIds = currentImageIds.filter(id => !imageIds.includes(id));
-      
-      if (isDeletion && deletedIds.length > 0) {
+      if (isPartial) {
+        // Partial update: merge with current DB state
+        const currentImages = await getAllImages();
+        const mergedImages = { ...currentImages, ...images };
+        await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, mergedImages);
+      } else {
+        // Full update: replace entire state
+        // CRITICAL FIX: For mass deletion, we receive the authoritative state (without deleted items)
+        // Do NOT merge with current state - use the passed images as authoritative
+        // This ensures deletions are properly propagated
+        const currentImages = await getAllImages();
+        const currentImageIds = Object.keys(currentImages);
+        // Check if this is a deletion (fewer images than current)
+        const isDeletion = imageIds.length < currentImageIds.length;
+        const deletedIds = currentImageIds.filter(id => !imageIds.includes(id));
+        
+        if (isDeletion && deletedIds.length > 0) {
+        }
+        
+        // CRITICAL FIX: Use images as authoritative state (not merged)
+        // This ensures deletions are properly saved and broadcast
+        // GM saves to database
+        await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
+        await new Promise(resolve => setTimeout(resolve, 50));
+        await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, images);
       }
-      
-      // CRITICAL FIX: Use images as authoritative state (not merged)
-      // This ensures deletions are properly saved and broadcast
-      // GM saves to database
-      await canvas.scene?.unsetFlag(FLAG_SCOPE, FLAG_KEY_IMAGES);
-      await new Promise(resolve => setTimeout(resolve, 50));
-      await canvas.scene?.setFlag(FLAG_SCOPE, FLAG_KEY_IMAGES, images);
       
       
       // CRITICAL FIX: Remove elements from DOM that are no longer in images
@@ -6598,19 +6673,21 @@ async function setAllImages(images) {
           });
         }
         
-        // Remove elements that are no longer in images
+        // Remove elements only at full sync (not partial)
         const removedIds = [];
-        existingElements.forEach(element => {
-          if (!existingIds.has(element.id)) {
-            removedIds.push(element.id);
-            // Clear runtime caches to prevent resurrection
-            clearImageCaches(element.id);
-            // Clean up z-index
-            ZIndexManager.remove(element.id);
-            // Actually remove from DOM
-            element.remove();
-          }
-        });
+        if (!isPartial) {
+          existingElements.forEach(element => {
+            if (!existingIds.has(element.id)) {
+              removedIds.push(element.id);
+              // Clear runtime caches to prevent resurrection
+              clearImageCaches(element.id);
+              // Clean up z-index
+              ZIndexManager.remove(element.id);
+              // Actually remove from DOM
+              element.remove();
+            }
+          });
+        }
         
         // INSTRUMENTATION: Log setAllImages end (GM)
         const domIdsAfter = Array.from(layer.querySelectorAll('.wbe-canvas-image-container')).map(el => el.id);
@@ -6638,6 +6715,7 @@ async function setAllImages(images) {
       console.log(`[INVESTIGATE] GM sending imageUpdate:`, {
         userId: game.user.id,
         userName: game.user.name,
+        isPartial,
         payloadCount: gmPayloadIds.length,
         payloadIds: gmPayloadIds.map(id => id.slice(-6)),
         domCount: gmDomIds.length,
@@ -6657,9 +6735,8 @@ async function setAllImages(images) {
         console.warn(`[INVESTIGATE] ⚠️ GM: Payload contains ${inGmPayloadNotInDB.length} images NOT in DB:`, inGmPayloadNotInDB.map(id => id.slice(-6)));
       }
       
-      // Emit to all (authoritative state, not merged)
-      // CRITICAL FIX: Always send full sync to prevent "ghost" images in Player cache
-      game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images, isFullSync: true });
+      // Send sync: full sync for full updates, partial sync for partial updates
+      game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images, isFullSync: !isPartial });
     } else {
       const layer = getOrCreateLayer();
       
@@ -6716,7 +6793,7 @@ async function setAllImages(images) {
       }
       
       // Player sends request GM through socket
-      game.socket.emit(`module.${MODID}`, { type: "imageUpdateRequest", images, userId: game.user.id });
+      game.socket.emit(`module.${MODID}`, { type: "imageUpdateRequest", images, userId: game.user.id, isPartial });
 
       // Update locally for immediate UI reaction of the player
       if (layer) {
@@ -6816,7 +6893,8 @@ async function setAllImages(images) {
         }
 
         // Only run destructive prune when payload carries authoritative state
-        const shouldSkipPrune = isEmptyPayload;
+        // For partial updates (isPartial=true), do NOT remove any elements - only update existing ones
+        const shouldSkipPrune = isEmptyPayload || isPartial;
         if (!shouldSkipPrune) {
           // Remove elements that are no longer in images
           const toRemove = [];
@@ -7673,6 +7751,9 @@ function getImageBorderStyle(permanentBorder) {
 
 // Функция для обновления resize handle
 function updateImageResizeHandle(resizeHandle, imageElement, maskType, crop, circleOffset, circleRadius, scale) {
+  // CRITICAL FIX: Check if element is still in DOM (prevents race condition errors)
+  if (!imageElement || !imageElement.isConnected || !resizeHandle || !resizeHandle.isConnected) return;
+  
   const width = imageElement.offsetWidth;
   const height = imageElement.offsetHeight;
 
