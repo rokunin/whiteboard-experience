@@ -807,11 +807,11 @@ function updateSelectionFromBox(left, top, width, height) {
  */
 async function handleKeyDown(e) {
   // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track keydown in whiteboard-select
-  console.log(`[INVESTIGATE] whiteboard-select handleKeyDown: key=${e.key}, selectedObjects.size=${selectedObjects.size}, selectedTextId=${window.TextTools?.selectedTextId?.slice(-6) || 'null'}, selectedImageId=${window.ImageTools?.selectedImageId?.slice(-6) || 'null'}`);
+  //console.log(`[INVESTIGATE] whiteboard-select handleKeyDown: key=${e.key}, selectedObjects.size=${selectedObjects.size}, selectedTextId=${window.TextTools?.selectedTextId?.slice(-6) || 'null'}, selectedImageId=${window.ImageTools?.selectedImageId?.slice(-6) || 'null'}`);
   
   // Only handle if we have selected objects
   if (selectedObjects.size === 0) {
-    console.log(`[INVESTIGATE] whiteboard-select handleKeyDown: No mass selection, returning early`);
+    //console.log(`[INVESTIGATE] whiteboard-select handleKeyDown: No mass selection, returning early`);
     return;
   }
   
@@ -1590,23 +1590,23 @@ async function pasteCopiedObjects() {
     const newTop = worldPos.y + (textData.top || 0) + offset;
     
     // Create new text element using TextTools
-    const container = TextTools.createTextElement(
-      newId,
-      textData.text,
-      newLeft,
-      newTop,
-      textData.scale,
-      textData.color,
-      textData.backgroundColor,
-      textData.borderColor,
-      textData.borderWidth,
-      textData.fontWeight,
-      textData.fontStyle,
-      textData.textAlign,
-      textData.fontFamily,
-      textData.fontSize,
-      textData.width
-    );
+    const container = TextTools.createTextElement({
+      id: newId,
+      text: textData.text,
+      left: newLeft,
+      top: newTop,
+      scale: textData.scale,
+      color: textData.color,
+      backgroundColor: textData.backgroundColor,
+      borderColor: textData.borderColor,
+      borderWidth: textData.borderWidth,
+      fontWeight: textData.fontWeight,
+      fontStyle: textData.fontStyle,
+      textAlign: textData.textAlign,
+      fontFamily: textData.fontFamily,
+      fontSize: textData.fontSize,
+      width: textData.width
+    });
     
     if (container) {
       // Save to scene flags

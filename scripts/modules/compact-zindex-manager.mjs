@@ -68,15 +68,48 @@ export class CompactZIndexManager {
     
     let rank = initialRank;
     if (!rank) {
-      // Place at top by default
+      // Place at top by default - get the actual last rank from all objects
+      // CRITICAL: Invalidate cache first to ensure we get fresh data
+      this.dirty = true;
       const last = this.#getLastRank();
       rank = rankAfter(last);
+      
+      // DEBUG: Log rank assignment
+      console.log(`[ZIndexDebug] Assigning ${type} ${objectId.slice(-6)}: lastRank="${last}", newRank="${rank}", totalObjects=${this.objectRank.size}`);
     }
     
     this.objectRank.set(objectId, { rank, type });
     this.dirty = true;
     
-    return this.get(objectId);
+    // CRITICAL: Force cache rebuild and verify position AFTER adding object
+    const zIndex = this.get(objectId);
+    const list = this.#sorted();
+    const position = list.findIndex(o => o.id === objectId);
+    const totalObjects = list.length;
+    
+    // DEBUG: Verify the new object is at the end
+    if (position !== totalObjects - 1) {
+      console.warn(`[ZIndexDebug] WARNING: New ${type} ${objectId.slice(-6)} is NOT at top! Position: ${position}/${totalObjects - 1}, rank="${rank}"`);
+      console.log(`[ZIndexDebug] Top 3 objects:`, list.slice(-3).map(o => ({ id: o.id.slice(-6), rank: o.rank, type: o.type })));
+      
+      // CRITICAL FIX: Always fix if object is not at top - get the actual last rank and reassign
+      // This ensures the new object is ALWAYS on top, regardless of what happened
+      const actualLast = this.#getLastRank();
+      console.warn(`[ZIndexDebug] FIXING: Object not at top, actualLast="${actualLast}", reassigning rank`);
+      const fixedRank = rankAfter(actualLast);
+      this.objectRank.set(objectId, { rank: fixedRank, type });
+      this.dirty = true;
+      // Return the corrected z-index
+      const correctedZIndex = this.get(objectId);
+      const correctedList = this.#sorted();
+      const correctedPosition = correctedList.findIndex(o => o.id === objectId);
+      console.log(`[ZIndexDebug] FIXED: New ${type} ${objectId.slice(-6)} now at position ${correctedPosition}/${correctedList.length - 1}, rank="${fixedRank}"`);
+      return correctedZIndex;
+    } else {
+      console.log(`[ZIndexDebug] ✓ New ${type} ${objectId.slice(-6)} correctly placed at top (position ${position}/${totalObjects - 1})`);
+    }
+    
+    return zIndex;
   }
 
   /**
@@ -322,11 +355,11 @@ export class CompactZIndexManager {
   syncWithExisting(existingData) {
     if (!Array.isArray(existingData)) return;
     
-    // Only migrate once per instance
-    if (this._migrationCompleted) {
-      //console.log('[CompactZIndexManager] Migration already completed, skipping');
-      return;
-    }
+    // CRITICAL FIX: Always sync with existing data on load (F5 reload)
+    // Don't skip migration - we need to restore ranks from DB every time
+    // Clear existing data first to avoid conflicts
+    this.objectRank.clear();
+    this.dirty = true;
     
     // Pass full data to migration (including rank if present)
     this.migrateFromLegacy({ 
@@ -339,7 +372,7 @@ export class CompactZIndexManager {
       console.warn('[CompactZIndexManager] Error syncing DOM z-indexes after migration:', err);
     });
     
-    this._migrationCompleted = true;
+    // Don't set _migrationCompleted = true - we need to sync every time on F5 reload
   }
 
   /**
@@ -359,9 +392,14 @@ export class CompactZIndexManager {
     }
     
     // First, preserve existing ranks
+    // CRITICAL FIX: Ignore string "undefined" - it's not a valid rank
     const withRank = all
-      .filter(x => x.rank && typeof x.rank === 'string')
+      .filter(x => x.rank && typeof x.rank === 'string' && x.rank !== 'undefined')
       .sort((a, b) => a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : 0);
+    
+    // DEBUG: Log what ranks are being registered
+    console.log(`[ZIndexDebug] migrateFromLegacy: Registering ${withRank.length} objects with ranks:`, 
+      withRank.map(o => ({ id: o.id.slice(-6), rank: o.rank, type: o.type })));
     
     for (const item of withRank) {
       this.objectRank.set(item.id, { 
@@ -371,14 +409,22 @@ export class CompactZIndexManager {
     }
     
     // Then assign ranks to remaining objects based on their z-index
+    // CRITICAL FIX: Also filter out string "undefined" - it's not a valid rank
     const withoutRank = all
-      .filter(x => !x.rank || typeof x.rank !== 'string')
+      .filter(x => !x.rank || typeof x.rank !== 'string' || x.rank === 'undefined')
       .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0));
+    
+    // DEBUG: Log objects without rank
+    if (withoutRank.length > 0) {
+      console.log(`[ZIndexDebug] migrateFromLegacy: ${withoutRank.length} objects without rank, will assign new ranks:`, 
+        withoutRank.map(o => ({ id: o.id.slice(-6), zIndex: o.zIndex, type: o.type })));
+    }
     
     let lastRank = withRank.length > 0 ? withRank[withRank.length - 1].rank : "";
     
     for (const item of withoutRank) {
       lastRank = rankAfter(lastRank);
+      console.log(`[ZIndexDebug] migrateFromLegacy: Assigning rank "${lastRank}" to ${item.id.slice(-6)} (${item.type})`);
       this.objectRank.set(item.id, { 
         rank: lastRank, 
         type: item.type || "image" 
@@ -511,7 +557,15 @@ export class CompactZIndexManager {
    */
   #getLastRank() {
     const list = this.#sorted();
-    return list.length > 0 ? list[list.length - 1].rank : "";
+    const lastRank = list.length > 0 ? list[list.length - 1].rank : "";
+    // DEBUG: Log what we're getting as last rank
+    if (list.length > 0) {
+      console.log(`[ZIndexDebug] #getLastRank: totalObjects=${list.length}, lastRank="${lastRank}", lastObject=${list[list.length - 1].id.slice(-6)} (${list[list.length - 1].type})`);
+      if (list.length > 1) {
+        console.log(`[ZIndexDebug] #getLastRank: Top 3 ranks:`, list.slice(-3).map(o => ({ id: o.id.slice(-6), rank: o.rank, type: o.type })));
+      }
+    }
+    return lastRank;
   }
 }
 

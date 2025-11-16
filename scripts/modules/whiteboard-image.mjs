@@ -7,8 +7,7 @@ import {
   screenToWorld,
   getSharedVars,          // lastMouseX/lastMouseY etc. — only call inside functions
   setSelectedImageId,
-
-  
+  wbeLog
 } from "../main.mjs";
 
 // Scale sensitivity constant
@@ -112,9 +111,18 @@ const debouncedFlushImageUpdates = debounce(async () => {
   if (pendingImageUpdates.size === 0) return;
   
   const pendingIds = Array.from(pendingImageUpdates.keys());
+  
+  // INSTRUMENTATION: Log flush start
+  wbeLog('FlushImages', `START: pendingCount=${pendingImageUpdates.size}, pendingIds=${pendingIds.map(id => id.slice(-6)).join(',')}`);
+  
   // CRITICAL FIX: Build complete state from DOM FIRST (source of truth during rapid updates)
   // Read DB state to preserve border properties that might be missing from DOM
   const dbImages = await getAllImages();
+  
+  // INSTRUMENTATION: Log DB state
+  const dbIds = Object.keys(dbImages);
+  wbeLog('FlushImages', `DB_STATE: dbCount=${dbIds.length}, dbIds=${dbIds.map(id => id.slice(-6)).slice(0, 10).join(',')}`);
+  
   // Then merge with DB state, then apply pending updates
   const images = {};
   
@@ -234,6 +242,51 @@ const debouncedFlushImageUpdates = debounce(async () => {
   
   const finalIds = Object.keys(images);
   
+  // INSTRUMENTATION: Log before setAllImages
+  const domIds = layer ? Array.from(layer.querySelectorAll('.wbe-canvas-image-container')).map(el => el.id) : [];
+  const duplicates = domIds.filter((id, idx) => domIds.indexOf(id) !== idx);
+  
+  // [INVESTIGATE] Детальное логирование перед setAllImages из debouncedFlushImageUpdates
+  const finalDbIds = Object.keys(dbImages);
+  const inFinalNotInDOM = finalIds.filter(id => !domIds.includes(id));
+  const inFinalNotInDB = finalIds.filter(id => !finalDbIds.includes(id));
+  const inDOMNotInFinal = domIds.filter(id => !finalIds.includes(id));
+  const inDBNotInFinal = finalDbIds.filter(id => !finalIds.includes(id));
+  
+  const stackTrace = new Error().stack?.split('\n').slice(1, 8).join(' | ') || 'unknown';
+  
+  console.log(`[INVESTIGATE] debouncedFlushImageUpdates → setAllImages:`, {
+    userId: game.user.id,
+    userName: game.user.name,
+    finalCount: finalIds.length,
+    finalIds: finalIds.map(id => id.slice(-6)),
+    domCount: domIds.length,
+    domIds: domIds.map(id => id.slice(-6)),
+    dbCount: finalDbIds.length,
+    dbIds: finalDbIds.map(id => id.slice(-6)),
+    pendingCount: pendingIds.length,
+    pendingIds: pendingIds.map(id => id.slice(-6)),
+    inFinalNotInDOM: inFinalNotInDOM.map(id => id.slice(-6)),
+    inFinalNotInDB: inFinalNotInDB.map(id => id.slice(-6)),
+    inDOMNotInFinal: inDOMNotInFinal.map(id => id.slice(-6)),
+    inDBNotInFinal: inDBNotInFinal.map(id => id.slice(-6)),
+    duplicates: duplicates.length > 0 ? duplicates.map(id => id.slice(-6)) : null,
+    caller: stackTrace.split('|')[0]?.trim() || 'unknown'
+  });
+  
+  if (inFinalNotInDOM.length > 0) {
+    console.error(`[INVESTIGATE] ⚠️ debouncedFlushImageUpdates: Final payload contains ${inFinalNotInDOM.length} images NOT in DOM:`, inFinalNotInDOM.map(id => id.slice(-6)));
+  }
+  if (inFinalNotInDB.length > 0) {
+    console.warn(`[INVESTIGATE] ⚠️ debouncedFlushImageUpdates: Final payload contains ${inFinalNotInDB.length} images NOT in DB:`, inFinalNotInDB.map(id => id.slice(-6)));
+  }
+  
+  wbeLog('FlushImages', `BEFORE_SETALL: finalCount=${finalIds.length}, domCount=${domIds.length}, domIds=${domIds.map(id => id.slice(-6)).slice(0, 10).join(',')}, duplicates=${duplicates.length > 0 ? duplicates.map(id => id.slice(-6)).join(',') : 'none'}`, {
+    finalIds: finalIds.slice(0, 10),
+    domIds: domIds.slice(0, 10),
+    pendingIds: pendingIds.slice(0, 10),
+    duplicates: duplicates.length > 0 ? duplicates : null
+  });
 
   // Clear pending updates
   pendingImageUpdates.clear();
@@ -787,6 +840,23 @@ class ImageDragController {
       // Handle selection logic if image not selected
       const isSelected = this.container.dataset.selected === "true";
       if (!isSelected) {
+        // Check if click is on text above this image
+        const elementsAtPoint = document.elementsFromPoint(event.clientX, event.clientY);
+        const textIndex = elementsAtPoint.findIndex(el => 
+          el.classList.contains('wbe-canvas-text-container') ||
+          el.classList.contains('wbe-text-click-target')
+        );
+        const ourIndex = elementsAtPoint.findIndex(el => 
+          el === this.container || 
+          el === this.imageElement ||
+          (el.classList.contains('wbe-image-click-target') && this.container.contains(el))
+        );
+        
+        // If text is above us (lower index = higher z-index), don't select
+        if (textIndex !== -1 && ourIndex !== -1 && textIndex < ourIndex) {
+          return;
+        }
+        
         // Clear mass selection when selecting individual image
         if (window.MassSelection && window.MassSelection.selectedCount > 0) {
           window.MassSelection.clear();
@@ -3067,6 +3137,8 @@ async function showImageControlPanel(imageElement, container, currentMaskType, c
 // Install global pan hooks for ImagePanel (similar to ColorPanel)
 let __wbeMaskPanHooksInstalled = false;
 
+// DEPRECATED: Pan/zoom handling moved to main.mjs (setupIndependentPanZoomHooks)
+// This function can be removed if user requests it
 function installGlobalMaskPanHooks() {
   if (__wbeMaskPanHooksInstalled) return;
   __wbeMaskPanHooksInstalled = true;
@@ -3337,7 +3409,9 @@ function safeReshowFrozenPanel(targetId, delayMs = 0) {
 }
 
 // Install global pan hooks
-installGlobalMaskPanHooks();
+// DISABLED: Pan/zoom handling moved to main.mjs (setupIndependentPanZoomHooks)
+// This function can be removed if user requests it
+// installGlobalMaskPanHooks();
 
 /* ======================== End Mask Control Panel System ======================== */
 
@@ -3888,6 +3962,26 @@ function installGlobalImageSelectionHandler() {
 
 
   document.addEventListener("mousedown", async (e) => {
+    const handlerStartTime = performance.now();
+    const handlerId = `IMAGE-${handlerStartTime.toFixed(3)}`;
+    
+    // EARLY RETURN: Skip if no images exist
+    if (imageRegistry.size === 0) {
+      wbeLog(handlerId, 'IMAGE HANDLER START: SKIPPED (no images in registry)', {
+        target: e.target?.className || 'none',
+        clientX: e.clientX,
+        clientY: e.clientY,
+        imageRegistrySize: imageRegistry.size
+      });
+      return;
+    }
+    
+    wbeLog(handlerId, 'IMAGE HANDLER START', {
+      target: e.target?.className || 'none',
+      clientX: e.clientX,
+      clientY: e.clientY,
+      imageRegistrySize: imageRegistry.size
+    });
 
     if (e.button !== 0) return; // Only left click
 
@@ -3910,17 +4004,53 @@ function installGlobalImageSelectionHandler() {
     const textContainer = e.target.closest(".wbe-canvas-text-container");
     const colorPanel = e.target.closest(".wbe-color-picker-panel");
 
-    // FIX: Text elements have pointer-events: none, so we need to check coordinates
+    // FIX: Text elements have pointer-events: none, so we need to enable them before checking
+    // Same logic as text handler - enable pointer-events on all texts for accurate hit detection
     // ALWAYS check elementsFromPoint to see what's actually on top (not just for canvas clicks)
     let clickedOnText = !!textContainer;
-    if (!clickedOnText) {
-      // Check what elements are at the click point (in z-order from top to bottom)
+    
+    // Always check elementsFromPoint to ensure accurate hit detection (even if textContainer was found)
+    {
+      // Temporarily enable pointer-events on ALL text click-targets for hit detection (same as text handler)
+      const textPointerEventsMap = new Map();
+      const textContainers = document.querySelectorAll('.wbe-canvas-text-container');
+      
+      for (const container of textContainers) {
+        // Skip locked or mass-selected texts
+        if ((container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) ||
+            container.classList.contains("wbe-mass-selected")) {
+          continue;
+        }
+        
+        const clickTarget = container.querySelector('.wbe-text-click-target');
+        if (clickTarget) {
+          const originalPointerEvents = clickTarget.style.pointerEvents;
+          textPointerEventsMap.set(container.id, originalPointerEvents);
+          clickTarget.style.setProperty("pointer-events", "auto", "important");
+        }
+      }
+      
+      // Force a reflow to ensure pointer-events are applied before elementsFromPoint
+      void document.body.offsetHeight;
+      
+      // Now check what elements are at the click point (in z-order from top to bottom)
       const elementsAtPoint = document.elementsFromPoint(e.clientX, e.clientY);
+      
+      // LOG: Log all elements at point for debugging
+      const elementsInfo = elementsAtPoint.map((el, idx) => ({
+        index: idx,
+        tag: el.tagName,
+        id: el.id || 'no-id',
+        className: el.className || 'no-class',
+        pointerEvents: window.getComputedStyle(el).pointerEvents,
+        zIndex: window.getComputedStyle(el).zIndex
+      }));
       
       // Find indices of text and image elements in the stack
       const textIndex = elementsAtPoint.findIndex(el =>
         el.classList.contains('wbe-canvas-text-container') ||
-        el.classList.contains('wbe-canvas-text')
+        el.classList.contains('wbe-canvas-text') ||
+        el.classList.contains('wbe-text-click-target')
       );
       const imageIndex = elementsAtPoint.findIndex(el =>
         el.classList.contains('wbe-image-click-target') ||
@@ -3929,11 +4059,38 @@ function installGlobalImageSelectionHandler() {
       
       // If text appears before image in stack (text is on top), user clicked on text
       clickedOnText = textIndex !== -1 && (imageIndex === -1 || textIndex < imageIndex);
+      
+      // Restore pointer-events on texts
+      textPointerEventsMap.forEach((originalPointerEvents, textId) => {
+        const container = document.getElementById(textId);
+        if (container) {
+          const clickTarget = container.querySelector('.wbe-text-click-target');
+          if (clickTarget) {
+            if (originalPointerEvents) {
+              clickTarget.style.setProperty("pointer-events", originalPointerEvents, "important");
+            } else {
+              clickTarget.style.removeProperty("pointer-events");
+            }
+          }
+        }
+      });
+      
+      wbeLog(handlerId, 'IMAGE HANDLER: clickedOnText check', {
+        initial: !!textContainer,
+        elementsCount: elementsAtPoint.length,
+        elementsInfo: elementsInfo.slice(0, 10), // Log first 10 elements
+        textIndex,
+        imageIndex,
+        final: clickedOnText
+      });
     }
 
     // If clicking on text, or color panels, don't process image selection
     if (clickedOnText || colorPanel) {
-      console.log("clicked on text or color panel, skipping image selection");
+      wbeLog(handlerId, 'IMAGE HANDLER: clicked on text or color panel, skipping image selection (RETURNING)', {
+        clickedOnText,
+        colorPanel: !!colorPanel
+      });
       // Don't wait for async deselection - text handler will manage deselection
       killImageControlPanel();
       
@@ -3942,17 +4099,7 @@ function installGlobalImageSelectionHandler() {
       // Calling async deselectFn() here creates race condition where it completes AFTER text selection,
       // potentially removing text border/gizmo or recreating image panel
       
-      // Just update DOM state synchronously - text handler's deselectAllElements() will handle SelectionController
-      for (const [id, imageData] of imageRegistry) {
-        if (imageData.container.dataset.selected === "true") {
-          // Update DOM state synchronously (don't wait for async)
-          imageData.container.dataset.selected = "false";
-          delete imageData.container.dataset.selected;
-          // SelectionController state will be properly cleaned up by text handler via deselectAllElements()
-        }
-      }
-      
-      return; // Let other handlers deal with text selection
+      return; // Let text handler deal with text selection
     }
 
     let clickedImageId = null;
@@ -4134,11 +4281,18 @@ function installGlobalImageSelectionHandler() {
 
       if (!isSelected) {
         // Selecting image
+        wbeLog(handlerId, 'IMAGE HANDLER: Selecting image', { imageId: clickedImageId.slice(-6) });
 
         // CRITICAL: Prevent event propagation to avoid dual selection
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation(); // Stop other handlers on same element
+        
+        wbeLog(handlerId, 'IMAGE HANDLER: STOPPED event propagation', {
+          preventDefault: true,
+          stopPropagation: true,
+          stopImmediatePropagation: true
+        });
 
         // CLEAR MASS SELECTION when selecting individual image
         if (window.MassSelection && window.MassSelection.selectedCount > 0) {
@@ -4239,7 +4393,8 @@ function createImageElement({
   borderWidth = null,
   borderRadius = null,
   shadowHex = null,
-  shadowOpacity = null
+  shadowOpacity = null,
+  rank = null
 }) {
   const layer = document.getElementById('whiteboard-experience-layer') ||
                 document.querySelector('.wbe-layer') || 
@@ -4269,9 +4424,14 @@ function createImageElement({
   container.className = "wbe-canvas-image-container";
   
   // Register in ZIndexManager if not already registered (migration handles existing objects)
+  // CRITICAL FIX: If object already exists (from syncWithExisting), don't overwrite its rank
+  // syncWithExisting already registered all objects with correct ranks from DB
+  const desiredRank = typeof rank === "string" ? rank : null;
   if (!ZIndexManager.has(id)) {
-    ZIndexManager.assignImage(id);
+    // Object doesn't exist - assign new rank
+    ZIndexManager.assignImage(id, desiredRank);
   }
+  // NOTE: Don't overwrite rank if object already exists - syncWithExisting already set it correctly
   const zIndex = ZIndexManager.get(id);
 
   container.style.cssText = `
@@ -4938,7 +5098,7 @@ function createImageElement({
       top: 0;
       background: transparent;
       pointer-events: none;
-      z-index: 998;
+      /* NEVER ADD Z-INDEX TO CLICK TARGET */
     `;
   container.appendChild(clickTarget);
 
@@ -4950,6 +5110,25 @@ function createImageElement({
   const resizeController = new ResizeController(container, imageElement, {
     onSave: async () => {
       clampCircleOffsetToBounds();
+      
+      // INSTRUMENTATION: Log scale save start
+      const layer = getOrCreateLayer();
+      const domElements = layer ? Array.from(layer.querySelectorAll('.wbe-canvas-image-container')).map(el => ({
+        id: el.id,
+        found: el.id === id,
+        scale: el.querySelector('.wbe-canvas-image')?.style.transform || 'none'
+      })) : [];
+      const managerZIndex = ZIndexManager.get(id);
+      const managerRank = ZIndexManager.getRank(id);
+      const pendingCount = window.wbePendingImageUpdates?.size || 0;
+      
+      wbeLog('ScaleSave', `START: id=${id.slice(-6)}, DOM elements=${domElements.length}, foundInDOM=${domElements.some(e => e.found)}, managerZIndex=${managerZIndex}, managerRank=${managerRank}, pendingUpdates=${pendingCount}`, {
+        domElements: domElements.slice(0, 5),
+        containerExists: !!container,
+        imageElementExists: !!imageElement,
+        containerInDOM: container?.isConnected
+      });
+      
       await saveImageState(true, { skipZIndex: true }); // Skip z-index read - it doesn't change during resize
 
       if (window.wbeImageControlPanelUpdate) {
@@ -6111,6 +6290,30 @@ function createImageElement({
     // Always snapshot the CURRENT truth from the DOM first
     const domSnap = getImageCropData(imageElement);
     const currentScale = domSnap.scale;
+    
+    // INSTRUMENTATION: Log saveImageState entry
+    const layer = getOrCreateLayer();
+    const domCheck = {
+      containerInDOM: container?.isConnected,
+      imageElementInDOM: imageElement?.isConnected,
+      getElementById: !!document.getElementById(id),
+      querySelectorAll: layer ? layer.querySelectorAll(`#${CSS.escape(id)}`).length : 0,
+      allContainers: layer ? Array.from(layer.querySelectorAll('.wbe-canvas-image-container')).map(el => el.id).slice(0, 10) : []
+    };
+    const managerState = {
+      zIndex: ZIndexManager.get(id),
+      rank: ZIndexManager.getRank(id)
+    };
+    const dbState = await getAllImages();
+    const dbImage = dbState[id];
+    
+    wbeLog('SaveImageState', `ENTRY: id=${id.slice(-6)}, scale=${currentScale}, broadcast=${broadcast}, skipZIndex=${options.skipZIndex}`, {
+      domCheck,
+      managerState,
+      dbExists: !!dbImage,
+      dbScale: dbImage?.scale,
+      pendingUpdates: window.wbePendingImageUpdates?.size || 0
+    });
     let useCrop = { ...domSnap.crop };
     let useMaskType = domSnap.maskType;
     let useCircleOffset = { ...domSnap.circleOffset };
@@ -6156,6 +6359,10 @@ function createImageElement({
       });
     }
 
+    // CRITICAL FIX: Always include rank from ZIndexManager (even with skipZIndex)
+    // Rank doesn't change during drag/resize/crop, but we need to preserve it
+    const rank = ZIndexManager.getRank(id);
+    
     const imageData = {
       src: imageElement.src,
       left: parseFloat(container.style.left),
@@ -6168,6 +6375,7 @@ function createImageElement({
       isCropping: isCropping,
       isFrozen: isFrozen,
       zIndex: zIndex,
+      rank: rank,
       displayWidth,
       displayHeight
     };
@@ -6188,15 +6396,20 @@ function createImageElement({
     }
 
     // Queue the update for debounced batching (handled by module-level debounce)
-    if (window.wbePendingImageUpdates) {
-      window.wbePendingImageUpdates.set(id, imageData);
-      window.wbeDebouncedFlushImageUpdates?.();
-    } else {
-      // Fallback: direct save if debounce system not initialized
-      const images = await getAllImages();
-      images[id] = imageData;
-      await setAllImages(images);
-    }
+    window.wbePendingImageUpdates.set(id, imageData);
+    
+    // INSTRUMENTATION: Log before flush
+    wbeLog('SaveImageState', `QUEUED: id=${id.slice(-6)}, scale=${imageData.scale}, pendingSize=${window.wbePendingImageUpdates.size}`, {
+      imageData: {
+        scale: imageData.scale,
+        zIndex: imageData.zIndex,
+        rank: imageData.rank,
+        displayWidth: imageData.displayWidth,
+        displayHeight: imageData.displayHeight
+      }
+    });
+    
+    window.wbeDebouncedFlushImageUpdates?.();
   }
 
   // Register this image in the global registry for selection management
@@ -6246,6 +6459,27 @@ async function setAllImages(images) {
   const isEmptyPayload = imageIds.length === 0;
   const isGM = game.user.isGM;
   
+  // [INVESTIGATE] Логирование входа в setAllImages
+  const layer = getOrCreateLayer();
+  const domElements = layer ? Array.from(layer.querySelectorAll('.wbe-canvas-image-container')) : [];
+  const domIds = domElements.map(el => el.id);
+  const dbImages = await getAllImages();
+  const dbIds = Object.keys(dbImages);
+  
+  console.log(`[INVESTIGATE] setAllImages ENTRY:`, {
+    userId: game.user.id,
+    userName: game.user.name,
+    isGM,
+    payloadCount: imageIds.length,
+    payloadIds: imageIds.map(id => id.slice(-6)),
+    domCount: domIds.length,
+    domIds: domIds.map(id => id.slice(-6)),
+    dbCount: dbIds.length,
+    dbIds: dbIds.map(id => id.slice(-6)),
+    caller: stackTrace.split('|')[0]?.trim() || 'unknown',
+    stackTrace: stackTrace.split('|').slice(0, 3).join(' → ')
+  });
+  
   try {
     if (game.user.isGM) {
       // CRITICAL FIX: Do NOT sync z-indexes when receiving updates from players
@@ -6279,6 +6513,36 @@ async function setAllImages(images) {
         const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
         const existingIds = new Set();
         
+        // INSTRUMENTATION: Log setAllImages start (GM)
+        const payloadIds = Object.keys(images);
+        const domIdsBefore = Array.from(existingElements).map(el => el.id);
+        const duplicatesBefore = domIdsBefore.filter((id, idx) => domIdsBefore.indexOf(id) !== idx);
+        
+        wbeLog('SetAllImages', `GM_START: payloadCount=${payloadIds.length}, domCount=${domIdsBefore.length}, duplicatesBefore=${duplicatesBefore.length > 0 ? duplicatesBefore.map(id => id.slice(-6)).join(',') : 'none'}`, {
+          payloadIds: payloadIds.slice(0, 10),
+          domIdsBefore: domIdsBefore.slice(0, 10),
+          duplicatesBefore: duplicatesBefore.length > 0 ? duplicatesBefore : null
+        });
+        
+        // Remove duplicate elements before processing (keep only first occurrence)
+        const idToElement = new Map();
+        const removedDuplicates = [];
+        existingElements.forEach(element => {
+          if (!idToElement.has(element.id)) {
+            idToElement.set(element.id, element);
+          } else {
+            // Duplicate found - remove it
+            removedDuplicates.push(element.id);
+            clearImageCaches(element.id);
+            ZIndexManager.remove(element.id);
+            element.remove();
+          }
+        });
+        
+        if (removedDuplicates.length > 0) {
+          wbeLog('SetAllImages', `GM_DEDUP: removedDuplicates=${removedDuplicates.map(id => id.slice(-6)).join(',')}`);
+        }
+        
         // Update existing and create new images locally
         for (const [id, imageData] of Object.entries(images)) {
           existingIds.add(id);
@@ -6287,27 +6551,40 @@ async function setAllImages(images) {
             // Update existing element
             updateImageElement(existing, imageData);
           } else {
-            // Create new element - use saved displayWidth/displayHeight for correct placeholder sizing on F5 reload
-            createImageElement({
-              id,
-              src: imageData.src,
-              left: imageData.left,
-              top: imageData.top,
-              scale: imageData.scale,
-              crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
-              maskType: imageData.maskType || 'rect',
-              circleOffset: imageData.circleOffset || { x: 0, y: 0 },
-              circleRadius: imageData.circleRadius || null,
-              isFrozen: imageData.isFrozen || false,
-              displayWidth: imageData.displayWidth || null,
-              displayHeight: imageData.displayHeight || null,
-              borderHex: imageData.borderHex,
-              borderOpacity: imageData.borderOpacity,
-              borderWidth: imageData.borderWidth,
-              borderRadius: imageData.borderRadius,
-              shadowHex: imageData.shadowHex,
-              shadowOpacity: imageData.shadowOpacity
-            });
+            // Check for duplicates using querySelectorAll before creating
+            const duplicates = layer.querySelectorAll(`#${CSS.escape(id)}`);
+            if (duplicates.length > 0) {
+              // Element exists but getElementById didn't find it - update first occurrence
+              updateImageElement(duplicates[0], imageData);
+              // Remove other duplicates
+              for (let i = 1; i < duplicates.length; i++) {
+                clearImageCaches(duplicates[i].id);
+                ZIndexManager.remove(duplicates[i].id);
+                duplicates[i].remove();
+              }
+            } else {
+              // Create new element - use saved displayWidth/displayHeight for correct placeholder sizing on F5 reload
+              createImageElement({
+                id,
+                src: imageData.src,
+                left: imageData.left,
+                top: imageData.top,
+                scale: imageData.scale,
+                crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+                maskType: imageData.maskType || 'rect',
+                circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+                circleRadius: imageData.circleRadius || null,
+                isFrozen: imageData.isFrozen || false,
+                displayWidth: imageData.displayWidth || null,
+                displayHeight: imageData.displayHeight || null,
+                borderHex: imageData.borderHex,
+                borderOpacity: imageData.borderOpacity,
+                borderWidth: imageData.borderWidth,
+                borderRadius: imageData.borderRadius,
+                shadowHex: imageData.shadowHex,
+                shadowOpacity: imageData.shadowOpacity
+              });
+            }
           }
           
           // Update global variables for each image
@@ -6322,8 +6599,10 @@ async function setAllImages(images) {
         }
         
         // Remove elements that are no longer in images
+        const removedIds = [];
         existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
+            removedIds.push(element.id);
             // Clear runtime caches to prevent resurrection
             clearImageCaches(element.id);
             // Clean up z-index
@@ -6332,12 +6611,110 @@ async function setAllImages(images) {
             element.remove();
           }
         });
+        
+        // INSTRUMENTATION: Log setAllImages end (GM)
+        const domIdsAfter = Array.from(layer.querySelectorAll('.wbe-canvas-image-container')).map(el => el.id);
+        const duplicatesAfter = domIdsAfter.filter((id, idx) => domIdsAfter.indexOf(id) !== idx);
+        
+        wbeLog('SetAllImages', `GM_END: domCountAfter=${domIdsAfter.length}, removedCount=${removedIds.length}, duplicatesAfter=${duplicatesAfter.length > 0 ? duplicatesAfter.map(id => id.slice(-6)).join(',') : 'none'}`, {
+          domIdsAfter: domIdsAfter.slice(0, 10),
+          removedIds: removedIds.length > 0 ? removedIds.map(id => id.slice(-6)) : null,
+          duplicatesAfter: duplicatesAfter.length > 0 ? duplicatesAfter : null
+        });
+      }
+      
+      // [INVESTIGATE] Детальное логирование перед отправкой imageUpdate от GM
+      const gmDomElements = layer ? Array.from(layer.querySelectorAll('.wbe-canvas-image-container')) : [];
+      const gmDomIds = gmDomElements.map(el => el.id);
+      const gmDbImages = await getAllImages();
+      const gmDbIds = Object.keys(gmDbImages);
+      const gmPayloadIds = Object.keys(images);
+      
+      const inGmPayloadNotInDOM = gmPayloadIds.filter(id => !gmDomIds.includes(id));
+      const inGmPayloadNotInDB = gmPayloadIds.filter(id => !gmDbIds.includes(id));
+      const inGmDOMNotInPayload = gmDomIds.filter(id => !gmPayloadIds.includes(id));
+      const inGmDBNotInPayload = gmDbIds.filter(id => !gmPayloadIds.includes(id));
+      
+      console.log(`[INVESTIGATE] GM sending imageUpdate:`, {
+        userId: game.user.id,
+        userName: game.user.name,
+        payloadCount: gmPayloadIds.length,
+        payloadIds: gmPayloadIds.map(id => id.slice(-6)),
+        domCount: gmDomIds.length,
+        domIds: gmDomIds.map(id => id.slice(-6)),
+        dbCount: gmDbIds.length,
+        dbIds: gmDbIds.map(id => id.slice(-6)),
+        inPayloadNotInDOM: inGmPayloadNotInDOM.map(id => id.slice(-6)),
+        inPayloadNotInDB: inGmPayloadNotInDB.map(id => id.slice(-6)),
+        inDOMNotInPayload: inGmDOMNotInPayload.map(id => id.slice(-6)),
+        inDBNotInPayload: inGmDBNotInPayload.map(id => id.slice(-6))
+      });
+      
+      if (inGmPayloadNotInDOM.length > 0) {
+        console.error(`[INVESTIGATE] ⚠️ GM: Payload contains ${inGmPayloadNotInDOM.length} images NOT in DOM:`, inGmPayloadNotInDOM.map(id => id.slice(-6)));
+      }
+      if (inGmPayloadNotInDB.length > 0) {
+        console.warn(`[INVESTIGATE] ⚠️ GM: Payload contains ${inGmPayloadNotInDB.length} images NOT in DB:`, inGmPayloadNotInDB.map(id => id.slice(-6)));
       }
       
       // Emit to all (authoritative state, not merged)
-      game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images });
+      // CRITICAL FIX: Always send full sync to prevent "ghost" images in Player cache
+      game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images, isFullSync: true });
     } else {
       const layer = getOrCreateLayer();
+      
+      // [INVESTIGATE] Детальное логирование перед отправкой imageUpdateRequest от Player
+      const domElements = layer ? Array.from(layer.querySelectorAll('.wbe-canvas-image-container')) : [];
+      const domIds = domElements.map(el => el.id);
+      const dbImages = await getAllImages();
+      const dbIds = Object.keys(dbImages);
+      const payloadIds = Object.keys(images);
+      
+      // Проверка на несоответствия
+      const inPayloadNotInDOM = payloadIds.filter(id => !domIds.includes(id));
+      const inPayloadNotInDB = payloadIds.filter(id => !dbIds.includes(id));
+      const inDOMNotInPayload = domIds.filter(id => !payloadIds.includes(id));
+      const inDBNotInPayload = dbIds.filter(id => !payloadIds.includes(id));
+      
+      const stackTrace = new Error().stack?.split('\n').slice(1, 8).join(' | ') || 'unknown';
+      
+      console.log(`[INVESTIGATE] PLAYER sending imageUpdateRequest:`, {
+        userId: game.user.id,
+        userName: game.user.name,
+        payloadCount: payloadIds.length,
+        payloadIds: payloadIds.map(id => id.slice(-6)),
+        domCount: domIds.length,
+        domIds: domIds.map(id => id.slice(-6)),
+        dbCount: dbIds.length,
+        dbIds: dbIds.map(id => id.slice(-6)),
+        inPayloadNotInDOM: inPayloadNotInDOM.map(id => id.slice(-6)),
+        inPayloadNotInDB: inPayloadNotInDB.map(id => id.slice(-6)),
+        inDOMNotInPayload: inDOMNotInPayload.map(id => id.slice(-6)),
+        inDBNotInPayload: inDBNotInPayload.map(id => id.slice(-6)),
+        caller: stackTrace.split('|')[0]?.trim() || 'unknown',
+        fullStackTrace: stackTrace,
+        // Детали каждого изображения в payload
+        payloadDetails: payloadIds.map(id => ({
+          id: id.slice(-6),
+          fullId: id,
+          inDOM: domIds.includes(id),
+          inDB: dbIds.includes(id),
+          imageData: images[id] ? {
+            src: images[id].src?.substring(0, 50) || 'no-src',
+            left: images[id].left,
+            top: images[id].top,
+            scale: images[id].scale
+          } : null
+        }))
+      });
+      
+      if (inPayloadNotInDOM.length > 0) {
+        console.error(`[INVESTIGATE] ⚠️ PLAYER: Payload contains ${inPayloadNotInDOM.length} images NOT in DOM:`, inPayloadNotInDOM.map(id => id.slice(-6)));
+      }
+      if (inPayloadNotInDB.length > 0) {
+        console.warn(`[INVESTIGATE] ⚠️ PLAYER: Payload contains ${inPayloadNotInDB.length} images NOT in DB:`, inPayloadNotInDB.map(id => id.slice(-6)));
+      }
+      
       // Player sends request GM through socket
       game.socket.emit(`module.${MODID}`, { type: "imageUpdateRequest", images, userId: game.user.id });
 
@@ -6345,38 +6722,86 @@ async function setAllImages(images) {
       if (layer) {
         // Get all existing images
         const existingElements = layer.querySelectorAll(".wbe-canvas-image-container");
-        const existingElementIds = Array.from(existingElements).map(el => el.id);
         const existingIds = new Set();
+
+        // INSTRUMENTATION: Log setAllImages start (Player)
+        const payloadIds = Object.keys(images);
+        const domIdsBefore = Array.from(existingElements).map(el => el.id);
+        const duplicatesBefore = domIdsBefore.filter((id, idx) => domIdsBefore.indexOf(id) !== idx);
+        
+        wbeLog('SetAllImages', `PLAYER_START: payloadCount=${payloadIds.length}, domCount=${domIdsBefore.length}, duplicatesBefore=${duplicatesBefore.length > 0 ? duplicatesBefore.map(id => id.slice(-6)).join(',') : 'none'}`, {
+          payloadIds: payloadIds.slice(0, 10),
+          domIdsBefore: domIdsBefore.slice(0, 10),
+          duplicatesBefore: duplicatesBefore.length > 0 ? duplicatesBefore : null
+        });
+
+        // Remove duplicate elements before processing (keep only first occurrence)
+        const idToElement = new Map();
+        const removedDuplicates = [];
+        existingElements.forEach(element => {
+          if (!idToElement.has(element.id)) {
+            idToElement.set(element.id, element);
+          } else {
+            // Duplicate found - remove it
+            removedDuplicates.push(element.id);
+            clearImageCaches(element.id);
+            ZIndexManager.remove(element.id);
+            element.remove();
+          }
+        });
+        
+        if (removedDuplicates.length > 0) {
+          wbeLog('SetAllImages', `PLAYER_DEDUP: removedDuplicates=${removedDuplicates.map(id => id.slice(-6)).join(',')}`);
+        }
 
         // Update existing and create new images locally
         for (const [id, imageData] of Object.entries(images)) {
           existingIds.add(id);
           const existing = document.getElementById(id);
+          const querySelectorResult = layer.querySelectorAll(`#${CSS.escape(id)}`);
+          const querySelectorCount = querySelectorResult.length;
+          
           if (existing) {
             // Update existing element
+            wbeLog('SetAllImages', `PLAYER_UPDATE: id=${id.slice(-6)}, scale=${imageData.scale}, getElementById=found, querySelectorCount=${querySelectorCount}`);
             updateImageElement(existing, imageData);
           } else {
-            // Create new element - use saved displayWidth/displayHeight for correct placeholder sizing on F5 reload
-            createImageElement({
-              id,
-              src: imageData.src,
-              left: imageData.left,
-              top: imageData.top,
-              scale: imageData.scale,
-              crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
-              maskType: imageData.maskType || 'rect',
-              circleOffset: imageData.circleOffset || { x: 0, y: 0 },
-              circleRadius: imageData.circleRadius || null,
-              isFrozen: imageData.isFrozen || false,
-              displayWidth: imageData.displayWidth || null,
-              displayHeight: imageData.displayHeight || null,
-              borderHex: imageData.borderHex,
-              borderOpacity: imageData.borderOpacity,
-              borderWidth: imageData.borderWidth,
-              borderRadius: imageData.borderRadius,
-              shadowHex: imageData.shadowHex,
-              shadowOpacity: imageData.shadowOpacity
-            });
+            // Check for duplicates using querySelectorAll before creating
+            const duplicates = querySelectorResult;
+            if (duplicates.length > 0) {
+              // Element exists but getElementById didn't find it - update first occurrence
+              wbeLog('SetAllImages', `PLAYER_RACE: id=${id.slice(-6)}, scale=${imageData.scale}, getElementById=null BUT querySelectorCount=${duplicates.length}, updating first`);
+              updateImageElement(duplicates[0], imageData);
+              // Remove other duplicates
+              for (let i = 1; i < duplicates.length; i++) {
+                clearImageCaches(duplicates[i].id);
+                ZIndexManager.remove(duplicates[i].id);
+                duplicates[i].remove();
+              }
+            } else {
+              // Create new element - use saved displayWidth/displayHeight for correct placeholder sizing on F5 reload
+              wbeLog('SetAllImages', `PLAYER_CREATE: id=${id.slice(-6)}, scale=${imageData.scale}, getElementById=null, querySelectorCount=0, creating new`);
+              createImageElement({
+                id,
+                src: imageData.src,
+                left: imageData.left,
+                top: imageData.top,
+                scale: imageData.scale,
+                crop: imageData.crop || { top: 0, right: 0, bottom: 0, left: 0 },
+                maskType: imageData.maskType || 'rect',
+                circleOffset: imageData.circleOffset || { x: 0, y: 0 },
+                circleRadius: imageData.circleRadius || null,
+                isFrozen: imageData.isFrozen || false,
+                displayWidth: imageData.displayWidth || null,
+                displayHeight: imageData.displayHeight || null,
+                borderHex: imageData.borderHex,
+                borderOpacity: imageData.borderOpacity,
+                borderWidth: imageData.borderWidth,
+                borderRadius: imageData.borderRadius,
+                shadowHex: imageData.shadowHex,
+                shadowOpacity: imageData.shadowOpacity
+              });
+            }
           }
 
           // Update global variables for each image
@@ -6408,8 +6833,10 @@ async function setAllImages(images) {
             console.error(`[WB-E] setAllImages: [${timestamp}] 🚨 Call stack:`, stackTrace);
           }
           
+          const removedIds = [];
           existingElements.forEach(element => {
             if (!existingIds.has(element.id)) {
+              removedIds.push(element.id);
               // Clear runtime caches to prevent resurrection
               clearImageCaches(element.id);
               // Clean up z-index
@@ -6417,6 +6844,16 @@ async function setAllImages(images) {
               console.error(`[WB-E] setAllImages: [${timestamp}] 🚨 Removing element: ${element.id}`);
               element.remove();
             }
+          });
+          
+          // INSTRUMENTATION: Log setAllImages end (Player)
+          const domIdsAfter = Array.from(layer.querySelectorAll('.wbe-canvas-image-container')).map(el => el.id);
+          const duplicatesAfter = domIdsAfter.filter((id, idx) => domIdsAfter.indexOf(id) !== idx);
+          
+          wbeLog('SetAllImages', `PLAYER_END: domCountAfter=${domIdsAfter.length}, removedCount=${removedIds.length}, duplicatesAfter=${duplicatesAfter.length > 0 ? duplicatesAfter.map(id => id.slice(-6)).join(',') : 'none'}`, {
+            domIdsAfter: domIdsAfter.slice(0, 10),
+            removedIds: removedIds.length > 0 ? removedIds.map(id => id.slice(-6)) : null,
+            duplicatesAfter: duplicatesAfter.length > 0 ? duplicatesAfter : null
           });
         } else {
         }

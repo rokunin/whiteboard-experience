@@ -1,5 +1,5 @@
 ﻿ /*********************************************************
- * FATE Table Card � v13+
+ * Whiteboard Experience - v11-13
  *********************************************************/
 const MODID = "whiteboard-experience";
 const FLAG_SCOPE = MODID;
@@ -24,6 +24,31 @@ function debounce(func, wait) {
     clearTimeout(timeout);
     timeout = setTimeout(later, wait);
   };
+}
+
+// Global handler logs collector for debugging (can be read via page.evaluate())
+if (!window.wbeHandlerLogs) {
+  window.wbeHandlerLogs = [];
+}
+
+export function wbeLog(handlerId, message, data = null) {
+  const logEntry = {
+    timestamp: performance.now(),
+    handlerId,
+    message,
+    data,
+    time: new Date().toISOString()
+  };
+  
+  window.wbeHandlerLogs.push(logEntry);
+  
+  // Limit array size to prevent memory issues
+  if (window.wbeHandlerLogs.length > 1000) {
+    window.wbeHandlerLogs.shift();
+  }
+  
+  // Also output to console for normal debugging
+  console.log(`[${handlerId}] ${message}`, data || '');
 }
 
 /* ----------------------- Bootstrap ----------------------- */
@@ -67,6 +92,7 @@ Hooks.once("ready", async () => {
   });
 
   setupGlobalPasteHandler();
+  setupIndependentPanZoomHooks();
 
   Hooks.on("canvasPan", syncCardsWithCanvas);
   Hooks.on("canvasReady", () => {
@@ -233,46 +259,25 @@ Hooks.once("ready", async () => {
                 }
               }
             } else {
-              // Sync rank BEFORE creating element (like images) - ensures correct rank is used during creation
-              if (textData.rank && typeof textData.rank === 'string') {
-                if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
-                  // Register object with correct rank before creation
-                  if (!window.ZIndexManager.has || !window.ZIndexManager.has(id)) {
-                    // Object doesn't exist yet - register it with the rank from socket data
-                    window.ZIndexManager.setRank(id, textData.rank);
-                  } else {
-                    // Object exists - update rank if different
-                    const currentRank = window.ZIndexManager.getRank(id);
-                    if (currentRank !== textData.rank) {
-                      window.ZIndexManager.setRank(id, textData.rank);
-                    }
-                  }
-                }
-              } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
-                // If no rank and object doesn't exist in manager, assign new rank
-                if (typeof window.ZIndexManager.assignText === 'function') {
-                  window.ZIndexManager.assignText(id);
-                }
-              }
-
-              const createdContainer = TextTools.createTextElement(
-                id,
-                textData.text,
-                textData.left,
-                textData.top,
-                textData.scale,
-                textData.color,
-                textData.backgroundColor,
-                textData.borderColor,
-                textData.borderWidth,
-                textData.fontWeight,
-                textData.fontStyle,
-                textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
-                textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
-                textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
-                textData.width,
-                textData.zIndex ?? null // Use null instead of undefined so default parameter works
-              );
+              // Create new text element - createTextElement will handle rank assignment
+              const createdContainer = TextTools.createTextElement({
+                id: id,
+                text: textData.text,
+                left: textData.left,
+                top: textData.top,
+                scale: textData.scale,
+                color: textData.color,
+                backgroundColor: textData.backgroundColor,
+                borderColor: textData.borderColor,
+                borderWidth: textData.borderWidth,
+                fontWeight: textData.fontWeight,
+                fontStyle: textData.fontStyle,
+                textAlign: textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
+                fontFamily: textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
+                fontSize: textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
+                width: textData.width,
+                rank: textData.rank
+              });
 
               // Apply color to newly created element (background already set in createTextElement via span)
               const created = createdContainer || document.getElementById(id);
@@ -322,7 +327,8 @@ Hooks.once("ready", async () => {
         
         // [INVESTIGATE] Track GM broadcasting textUpdate
         console.log(`[INVESTIGATE] GM broadcasting textUpdate: texts=${broadcastTextIds.length}`);
-        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts: requestTexts });
+        // CRITICAL FIX: Always send full sync to prevent "ghost" texts in Player cache
+        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts: requestTexts, isFullSync: true });
       }
     }
 
@@ -334,6 +340,28 @@ Hooks.once("ready", async () => {
       const timestamp = Date.now();
       const updateTextIds = Object.keys(data.texts || {});
       const isEmpty = updateTextIds.length === 0;
+      
+      // CRITICAL FIX: Sync ZIndexManager with ranks from socket data before creating elements
+      // This ensures correct z-index order when receiving initial state after F5
+      if (data.isFullSync && window.ZIndexManager && typeof window.ZIndexManager.syncWithExisting === 'function') {
+        const textData = Object.entries(data.texts || {}).map(([id, textData]) => ({
+          id,
+          zIndex: textData.zIndex,
+          rank: textData.rank,
+          type: 'text'
+        }));
+        // Also get images from DOM to include them in sync (they may arrive later)
+        const layer = getOrCreateLayer();
+        const imageElements = layer ? Array.from(layer.querySelectorAll('.wbe-canvas-image-container')) : [];
+        const imageData = imageElements.map(el => {
+          const id = el.id;
+          const rank = window.ZIndexManager?.getRank?.(id) || null;
+          const zIndex = window.ZIndexManager?.get?.(id) || 0;
+          return { id, rank, zIndex, type: 'image' };
+        });
+        const allData = [...textData, ...imageData];
+        window.ZIndexManager.syncWithExisting(allData);
+      }
       
       // [ZINDEX_ANALYSIS] Track if this will trigger setAllTexts
       if (isEmpty) {
@@ -361,24 +389,40 @@ Hooks.once("ready", async () => {
 
             const textElement = existing.querySelector(".wbe-canvas-text");
             if (textElement) {
+              // Update text content - check for span first (need to check span for contentEditable too!)
+              const textSpan = textElement.querySelector(".wbe-text-background-span");
+              
               // ADDITIONAL GUARD: Skip if contentEditable (belt and suspenders)
-              if (textElement.contentEditable === "true") {
+              // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track contentEditable check
+              // CRITICAL: Check BOTH textElement AND span for contentEditable!
+              const editableElement = textSpan || textElement;
+              const isContentEditable = editableElement.contentEditable === "true" || textElement.contentEditable === "true";
+              console.log(`[INVESTIGATE] textUpdate socket handler: id=${id.slice(-6)}, textElement.contentEditable=${textElement.contentEditable}, span.contentEditable=${textSpan?.contentEditable || 'N/A'}, isContentEditable=${isContentEditable}, lockedBy=${existing.dataset.lockedBy || 'none'}, incomingText="${textData.text?.substring(0, 20)}..."`);
+              if (isContentEditable) {
+                console.log(`[INVESTIGATE] textUpdate socket handler: SKIPPING update for ${id.slice(-6)} - contentEditable=true`);
                 continue;
               }
 
               // Safe to update now
               const isSelected = TextTools.selectedTextId === id;
               
-              // Update text content - check for span first
-              const textSpan = textElement.querySelector(".wbe-text-background-span");
+              // Skip position update if user is actively dragging this object
+              if (existing.dataset.dragging === "true") {
+                console.log(`[INVESTIGATE] textUpdate socket handler: SKIPPING position update for ${id.slice(-6)} - dragging=true`);
+                // Still update other properties (text, scale, colors, etc.) but skip position
+              } else {
+                existing.style.left = `${textData.left}px`;
+                existing.style.top = `${textData.top}px`;
+              }
+              
+              // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track text content update
+              const currentText = textSpan ? textSpan.textContent : textElement.textContent;
+              console.log(`[INVESTIGATE] textUpdate socket handler: UPDATING ${id.slice(-6)} - currentText="${currentText?.substring(0, 20)}..." -> newText="${textData.text?.substring(0, 20)}..."`);
               if (textSpan) {
                 textSpan.textContent = textData.text;
               } else {
                 textElement.textContent = textData.text;
               }
-              
-              existing.style.left = `${textData.left}px`;
-              existing.style.top = `${textData.top}px`;
               textElement.style.transform = `scale(${textData.scale})`;
               textElement.style.color = textData.color || TextTools.DEFAULT_TEXT_COLOR; // Apply color
               
@@ -403,26 +447,8 @@ Hooks.once("ready", async () => {
               } else {
               }
 
-              // EXPERIMENT PHASE 1: Don't update Manager z-index directly - use rank instead
-              // Z-index is derived from rank order, so we should only update rank
-              // The old z-index value is kept for backward compatibility but rank takes precedence
-              // Rank sync is handled below
-
-              // Sync rank if present in socket data (fractional indexing)
-              // Only update if rank actually changed to avoid unnecessary DOM updates
-              if (textData.rank && typeof textData.rank === 'string') {
-                if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
-                  const currentRank = window.ZIndexManager.getRank(id);
-                  if (currentRank !== textData.rank) {
-                    window.ZIndexManager.setRank(id, textData.rank);
-                  }
-                }
-              } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
-                // If no rank and object doesn't exist in manager, assign new rank
-                if (typeof window.ZIndexManager.assignText === 'function') {
-                  window.ZIndexManager.assignText(id);
-                }
-              }
+              // NOTE: Rank sync is handled by rankUpdate/rankConfirm handlers, not here
+              // This handler only updates object properties, not z-index order
 
               // Update resize handle position after scale/size changes
               TextTools.updateTextUI(existing);
@@ -444,25 +470,24 @@ Hooks.once("ready", async () => {
               }
             }
           } else {
-
-            const createdContainer = TextTools.createTextElement(
-              id,
-              textData.text,
-              textData.left,
-              textData.top,
-              textData.scale,
-              textData.color,
-              textData.backgroundColor,
-              textData.borderColor,
-              textData.borderWidth,
-              textData.fontWeight,
-              textData.fontStyle,
-              textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
-              textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
-              textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
-              textData.width,
-              textData.zIndex ?? null // Use null instead of undefined so default parameter works
-            );
+            const createdContainer = TextTools.createTextElement({
+              id: id,
+              text: textData.text,
+              left: textData.left,
+              top: textData.top,
+              scale: textData.scale,
+              color: textData.color,
+              backgroundColor: textData.backgroundColor,
+              borderColor: textData.borderColor,
+              borderWidth: textData.borderWidth,
+              fontWeight: textData.fontWeight,
+              fontStyle: textData.fontStyle,
+              textAlign: textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
+              fontFamily: textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
+              fontSize: textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
+              width: textData.width,
+              rank: textData.rank
+            });
 
             // Apply color to newly created element (background already set in createTextElement via span)
             const created = createdContainer || document.getElementById(id);
@@ -484,39 +509,34 @@ Hooks.once("ready", async () => {
               TextTools.updateTextUI(created);
             }
           }
-
-          // Sync rank if present in socket data (fractional indexing) for newly created elements
-          if (textData.rank && typeof textData.rank === 'string') {
-            if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
-              const currentRank = window.ZIndexManager.getRank(id);
-              if (currentRank !== textData.rank) {
-                window.ZIndexManager.setRank(id, textData.rank);
-              }
-            }
-          } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
-            // If no rank and object doesn't exist in manager, assign new rank
-            if (typeof window.ZIndexManager.assignText === 'function') {
-              window.ZIndexManager.assignText(id);
-            }
-          }
+          // NOTE: Rank is already handled in createTextElement - no need to duplicate here
+          // This was causing rank to be reassigned incorrectly, overwriting the correct rank
         }
 
-        // Sync DOM z-indexes after updating all ranks
+        // CRITICAL FIX: Sync DOM z-indexes after creating/updating all texts
+        // This ensures correct z-index order after receiving updates (especially after F5)
         if (window.ZIndexManager && typeof window.ZIndexManager.syncAllDOMZIndexes === 'function') {
           await window.ZIndexManager.syncAllDOMZIndexes();
         }
 
-        // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
-        // AND not actively being edited/manipulated (to prevent race conditions during rapid updates)
+        // CRITICAL FIX: Remove elements missing from socket data
+        // If isFullSync: true, remove ALL missing elements (except actively edited) to clear "ghosts"
+        // Otherwise, only remove if not actively being edited/manipulated
+        const isFullSync = data.isFullSync === true;
         existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
-            // Don't remove if element is locked/being edited
-            if (element.dataset.lockedBy) {
+            // Skip removal if element is actively being edited (contentEditable or dragging)
+            const textElement = element.querySelector(".wbe-canvas-text");
+            if (textElement && textElement.contentEditable === "true") {
+              return;
+            }
+            if (element.dataset.dragging === "true") {
               return;
             }
             
-            const textElement = element.querySelector(".wbe-canvas-text");
-            if (textElement && textElement.contentEditable === "true") {
+            // For full sync: remove even if locked (clears "ghosts" from stale cache)
+            // For incremental sync: skip if locked (prevents interrupting user)
+            if (!isFullSync && element.dataset.lockedBy) {
               return;
             }
             
@@ -546,14 +566,61 @@ Hooks.once("ready", async () => {
         const requestImageIds = Object.keys(requestImages);
         const isEmpty = requestImageIds.length === 0;
         
-        // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track socket handler entry
-        console.log(`[INVESTIGATE] GM received imageUpdateRequest: [${socketTime}] images=${requestImageIds.length}, isEmpty=${isEmpty}`);
-        
-        // Check if this is a deletion
+        // [INVESTIGATE] Детальное логирование получения imageUpdateRequest от Player
+        const senderUserId = data.userId || 'unknown';
+        const senderName = game.users?.get(senderUserId)?.name || 'unknown';
+        const requestLayer = getOrCreateLayer();
+        const domElements = requestLayer ? Array.from(requestLayer.querySelectorAll('.wbe-canvas-image-container')) : [];
+        const domIds = domElements.map(el => el.id);
         const currentImages = await ImageTools.getAllImages();
         const currentImageIds = Object.keys(currentImages);
+        
+        const inRequestNotInDOM = requestImageIds.filter(id => !domIds.includes(id));
+        const inRequestNotInDB = requestImageIds.filter(id => !currentImageIds.includes(id));
+        const inDOMNotInRequest = domIds.filter(id => !requestImageIds.includes(id));
+        const inDBNotInRequest = currentImageIds.filter(id => !requestImageIds.includes(id));
+        
         const isDeletion = requestImageIds.length < currentImageIds.length;
         const deletedIds = currentImageIds.filter(id => !requestImageIds.includes(id));
+        
+        console.log(`[INVESTIGATE] GM received imageUpdateRequest:`, {
+          socketTime,
+          senderUserId,
+          senderName,
+          requestCount: requestImageIds.length,
+          requestIds: requestImageIds.map(id => id.slice(-6)),
+          domCount: domIds.length,
+          domIds: domIds.map(id => id.slice(-6)),
+          dbCount: currentImageIds.length,
+          dbIds: currentImageIds.map(id => id.slice(-6)),
+          inRequestNotInDOM: inRequestNotInDOM.map(id => id.slice(-6)),
+          inRequestNotInDB: inRequestNotInDB.map(id => id.slice(-6)),
+          inDOMNotInRequest: inDOMNotInRequest.map(id => id.slice(-6)),
+          inDBNotInRequest: inDBNotInRequest.map(id => id.slice(-6)),
+          isDeletion,
+          deletedIds: deletedIds.map(id => id.slice(-6)),
+          // Детали каждого изображения в запросе
+          requestDetails: requestImageIds.map(id => ({
+            id: id.slice(-6),
+            fullId: id,
+            inDOM: domIds.includes(id),
+            inDB: currentImageIds.includes(id),
+            imageData: requestImages[id] ? {
+              src: requestImages[id].src?.substring(0, 50) || 'no-src',
+              left: requestImages[id].left,
+              top: requestImages[id].top,
+              scale: requestImages[id].scale,
+              timestamp: id.match(/\d+$/)?.[0] || 'unknown'
+            } : null
+          }))
+        });
+        
+        if (inRequestNotInDOM.length > 0) {
+          console.error(`[INVESTIGATE] ⚠️ GM: Request contains ${inRequestNotInDOM.length} images NOT in DOM:`, inRequestNotInDOM.map(id => id.slice(-6)));
+        }
+        if (inRequestNotInDB.length > 0) {
+          console.warn(`[INVESTIGATE] ⚠️ GM: Request contains ${inRequestNotInDB.length} images NOT in DB:`, inRequestNotInDB.map(id => id.slice(-6)));
+        }
         
         if (isDeletion && deletedIds.length > 0) {
           console.log(`[INVESTIGATE] GM imageUpdateRequest: Detected deletion of ${deletedIds.length} images:`, deletedIds.map(id => id.slice(-6)));
@@ -618,24 +685,48 @@ Hooks.once("ready", async () => {
               });
             }
             
-            // Sync rank if present in socket data (fractional indexing)
-            // Only update if rank actually changed to avoid unnecessary DOM updates
-            if (imageData.rank && typeof imageData.rank === 'string') {
-              if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
-                const currentRank = window.ZIndexManager.getRank(id);
-                if (currentRank !== imageData.rank) {
-                  window.ZIndexManager.setRank(id, imageData.rank);
-                }
-              }
-            } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
-              // If no rank and object doesn't exist in manager, assign new rank
-              if (typeof window.ZIndexManager.assignImage === 'function') {
-                window.ZIndexManager.assignImage(id);
-              }
-            }
+            // NOTE: Rank sync is handled by rankUpdate/rankConfirm handlers, not here
+            // This handler only updates object properties, not z-index order
           } else {
+            // [INVESTIGATE] Проверка: изображение отсутствует в DOM и БД GM
+            // Это может быть старое изображение, которое было удалено у GM, но осталось у Player
+            const imageTimestamp = id.match(/\d+$/)?.[0] || 'unknown';
+            const currentTime = Date.now();
+            const imageAge = imageTimestamp ? (currentTime - parseInt(imageTimestamp)) : Infinity;
+            const isOldImage = imageAge > 60000; // Старше 1 минуты
+            
+            console.log(`[INVESTIGATE] GM creating image from Player request:`, {
+              id: id.slice(-6),
+              fullId: id,
+              imageTimestamp,
+              imageAge: imageAge > 60000 ? `${Math.round(imageAge / 1000)}s` : `${imageAge}ms`,
+              isOldImage,
+              notInDOM: true,
+              notInDB: true,
+              senderUserId: data.userId || 'unknown',
+              senderName: data.userName || 'unknown'
+            });
+            
+            if (isOldImage) {
+              console.error(`[INVESTIGATE] ⚠️⚠️⚠️ GM BLOCKING: Player sent OLD image (${Math.round(imageAge / 1000)}s old) that doesn't exist in GM's DB/DOM!`, {
+                id: id.slice(-6),
+                fullId: id,
+                senderUserId: data.userId || 'unknown',
+                senderName: data.userName || 'unknown',
+                imageData: {
+                  src: imageData.src?.substring(0, 50) || 'no-src',
+                  left: imageData.left,
+                  top: imageData.top,
+                  scale: imageData.scale
+                }
+              });
+              // НЕ создаем старое изображение - оно было удалено у GM
+              // Вместо этого пропускаем его - Player должен получить обновление от GM с правильным списком
+              continue;
+            }
 
             // Socket update - recreate image from other client's data
+            // Только для новых изображений (созданных недавно)
             ImageTools.createImageElement({
               id,
               src: imageData.src,
@@ -652,7 +743,8 @@ Hooks.once("ready", async () => {
               borderWidth: imageData.borderWidth,
               borderRadius: imageData.borderRadius,
               shadowHex: imageData.shadowHex,
-              shadowOpacity: imageData.shadowOpacity
+              shadowOpacity: imageData.shadowOpacity,
+              rank: imageData.rank
               // displayWidth/displayHeight not passed for socket updates
             });
           }
@@ -698,17 +790,87 @@ Hooks.once("ready", async () => {
           });
         }
 
-        game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: requestImages });
+        // CRITICAL FIX: Always send full sync to prevent "ghost" images in Player cache
+        game.socket.emit(`module.${MODID}`, { type: "imageUpdate", images: requestImages, isFullSync: true });
       }
     }
 
     if (data.type === "imageUpdate") {
 
-      // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track imageUpdate reception
+      // [INVESTIGATE] Детальное логирование получения imageUpdate (может быть от самого себя для GM)
       const updateTime = Date.now();
       const updateImages = data.images || {};
       const updateImageIds = Object.keys(updateImages);
-      console.log(`[INVESTIGATE] Received imageUpdate: [${updateTime}] images=${updateImageIds.length}, isGM=${game.user.isGM}`);
+      const updateLayer = getOrCreateLayer();
+      const updateDomElements = updateLayer ? Array.from(updateLayer.querySelectorAll('.wbe-canvas-image-container')) : [];
+      const updateDomIds = updateDomElements.map(el => el.id);
+      const updateCurrentImages = await ImageTools.getAllImages();
+      const updateCurrentIds = Object.keys(updateCurrentImages);
+      
+      const inUpdateNotInDOM = updateImageIds.filter(id => !updateDomIds.includes(id));
+      const inUpdateNotInDB = updateImageIds.filter(id => !updateCurrentIds.includes(id));
+      const inDOMNotInUpdate = updateDomIds.filter(id => !updateImageIds.includes(id));
+      const inDBNotInUpdate = updateCurrentIds.filter(id => !updateImageIds.includes(id));
+      
+      console.log(`[INVESTIGATE] Received imageUpdate:`, {
+        updateTime,
+        userId: game.user.id,
+        userName: game.user.name,
+        isGM: game.user.isGM,
+        updateCount: updateImageIds.length,
+        updateIds: updateImageIds.map(id => id.slice(-6)),
+        domCount: updateDomIds.length,
+        domIds: updateDomIds.map(id => id.slice(-6)),
+        dbCount: updateCurrentIds.length,
+        dbIds: updateCurrentIds.map(id => id.slice(-6)),
+        inUpdateNotInDOM: inUpdateNotInDOM.map(id => id.slice(-6)),
+        inUpdateNotInDB: inUpdateNotInDB.map(id => id.slice(-6)),
+        inDOMNotInUpdate: inDOMNotInUpdate.map(id => id.slice(-6)),
+        inDBNotInUpdate: inDBNotInUpdate.map(id => id.slice(-6)),
+        // Детали каждого изображения в обновлении
+        updateDetails: updateImageIds.map(id => ({
+          id: id.slice(-6),
+          fullId: id,
+          inDOM: updateDomIds.includes(id),
+          inDB: updateCurrentIds.includes(id),
+          imageData: updateImages[id] ? {
+            src: updateImages[id].src?.substring(0, 50) || 'no-src',
+            left: updateImages[id].left,
+            top: updateImages[id].top,
+            scale: updateImages[id].scale,
+            timestamp: id.match(/\d+$/)?.[0] || 'unknown'
+          } : null
+        }))
+      });
+      
+      if (inUpdateNotInDOM.length > 0) {
+        console.error(`[INVESTIGATE] ⚠️ Received imageUpdate: Contains ${inUpdateNotInDOM.length} images NOT in DOM:`, inUpdateNotInDOM.map(id => id.slice(-6)));
+      }
+      if (inUpdateNotInDB.length > 0) {
+        console.warn(`[INVESTIGATE] ⚠️ Received imageUpdate: Contains ${inUpdateNotInDB.length} images NOT in DB:`, inUpdateNotInDB.map(id => id.slice(-6)));
+      }
+
+      // CRITICAL FIX: Sync ZIndexManager with ranks from socket data before creating elements
+      // This ensures correct z-index order when receiving initial state after F5
+      if (data.isFullSync && window.ZIndexManager && typeof window.ZIndexManager.syncWithExisting === 'function') {
+        const imageData = Object.entries(data.images || {}).map(([id, imageData]) => ({
+          id,
+          zIndex: imageData.zIndex,
+          rank: imageData.rank,
+          type: 'image'
+        }));
+        // Also get texts from DOM to include them in sync (they may arrive later)
+        const layer = getOrCreateLayer();
+        const textElements = layer ? Array.from(layer.querySelectorAll('.wbe-canvas-text-container')) : [];
+        const textData = textElements.map(el => {
+          const id = el.id;
+          const rank = window.ZIndexManager?.getRank?.(id) || null;
+          const zIndex = window.ZIndexManager?.get?.(id) || 0;
+          return { id, rank, zIndex, type: 'text' };
+        });
+        const allData = [...imageData, ...textData];
+        window.ZIndexManager.syncWithExisting(allData);
+      }
 
       const layer = getOrCreateLayer();
       if (layer) {
@@ -754,21 +916,8 @@ Hooks.once("ready", async () => {
               });
             }
             
-            // Sync rank if present in socket data (fractional indexing)
-            // Only update if rank actually changed to avoid unnecessary DOM updates
-            if (imageData.rank && typeof imageData.rank === 'string') {
-              if (window.ZIndexManager && typeof window.ZIndexManager.setRank === 'function') {
-                const currentRank = window.ZIndexManager.getRank(id);
-                if (currentRank !== imageData.rank) {
-                  window.ZIndexManager.setRank(id, imageData.rank);
-                }
-              }
-            } else if (window.ZIndexManager && typeof window.ZIndexManager.has === 'function' && !window.ZIndexManager.has(id)) {
-              // If no rank and object doesn't exist in manager, assign new rank
-              if (typeof window.ZIndexManager.assignImage === 'function') {
-                window.ZIndexManager.assignImage(id);
-              }
-            }
+            // NOTE: Rank sync is handled by rankUpdate/rankConfirm handlers, not here
+            // This handler only updates object properties, not z-index order
           } else {
 
             // Socket update - recreate image from other client's data
@@ -788,7 +937,8 @@ Hooks.once("ready", async () => {
               borderWidth: imageData.borderWidth,
               borderRadius: imageData.borderRadius,
               shadowHex: imageData.shadowHex,
-              shadowOpacity: imageData.shadowOpacity
+              shadowOpacity: imageData.shadowOpacity,
+              rank: imageData.rank
               // displayWidth/displayHeight not passed for socket updates
             });
           }
@@ -808,12 +958,20 @@ Hooks.once("ready", async () => {
           await window.ZIndexManager.syncAllDOMZIndexes();
         }
 
-        // CRITICAL FIX: Only remove elements if they're explicitly missing from socket data
-        // AND not actively being edited/manipulated (to prevent race conditions during rapid updates)
+        // CRITICAL FIX: Remove elements missing from socket data
+        // If isFullSync: true, remove ALL missing elements (except actively edited) to clear "ghosts"
+        // Otherwise, only remove if not actively being edited/manipulated
+        const isFullSync = data.isFullSync === true;
         existingElements.forEach(element => {
           if (!existingIds.has(element.id)) {
-            // Don't remove if element is locked/being manipulated
-            if (element.dataset.lockedBy) {
+            // Skip removal if element is actively being dragged
+            if (element.dataset.dragging === "true") {
+              return;
+            }
+            
+            // For full sync: remove even if locked (clears "ghosts" from stale cache)
+            // For incremental sync: skip if locked (prevents interrupting user)
+            if (!isFullSync && element.dataset.lockedBy) {
               return;
             }
             
@@ -1149,6 +1307,46 @@ Hooks.once("ready", async () => {
     }
 
     // NEW: Handle lock request - respond with our active locks
+    if (data.type === "requestInitialState") {
+      // CRITICAL FIX: GM sends current state to Player on F5 refresh
+      // This prevents Player from loading "ghosts" from stale cache
+      if (game.user.isGM) {
+        const texts = await TextTools.getAllTexts();
+        const images = await ImageTools.getAllImages();
+        
+        // CRITICAL FIX: Ensure ZIndexManager is synced with DB before sending to Player
+        // This ensures ranks are up-to-date and z-index order is correct
+        const textData = Object.entries(texts).map(([id, data]) => ({
+          id,
+          zIndex: data.zIndex,
+          rank: data.rank,
+          type: 'text'
+        }));
+        const imageData = Object.entries(images).map(([id, data]) => ({
+          id,
+          zIndex: data.zIndex,
+          rank: data.rank,
+          type: 'image'
+        }));
+        const allData = [...textData, ...imageData];
+        if (window.ZIndexManager && typeof window.ZIndexManager.syncWithExisting === 'function') {
+          window.ZIndexManager.syncWithExisting(allData);
+        }
+        
+        // Send full sync to Player - this will clear any "ghosts" from stale cache
+        game.socket.emit(`module.${MODID}`, { 
+          type: "textUpdate", 
+          texts, 
+          isFullSync: true 
+        });
+        game.socket.emit(`module.${MODID}`, { 
+          type: "imageUpdate", 
+          images, 
+          isFullSync: true 
+        });
+      }
+    }
+
     if (data.type === "requestLocks") {
       const activeLocks = getActiveLocks();
       if (activeLocks.textLocks.length > 0 || activeLocks.imageLocks.length > 0) {
@@ -1627,19 +1825,19 @@ async function fixInteractionIssues() {
   const textContainers = document.querySelectorAll('.wbe-canvas-text-container');
   textContainers.forEach(container => {
     const isSelected = container.dataset.selected === 'true';
-    const textElement = container.querySelector('.wbe-canvas-text');
+    const clickTarget = container.querySelector('.wbe-text-click-target');
     
     if (isSelected) {
-      // Selected text: container auto, text element auto
-      container.style.setProperty("pointer-events", "auto", "important");
-      if (textElement) {
-        textElement.style.setProperty("pointer-events", "auto", "important");
+      // Selected text: container has pointer-events: none, click target has auto
+      container.style.setProperty("pointer-events", "none", "important");
+      if (clickTarget) {
+        clickTarget.style.setProperty("pointer-events", "auto", "important");
       }
     } else {
-      // Deselected text: both have pointer-events: none
+      // Deselected text: both have pointer-events: none for canvas pass-through
       container.style.setProperty("pointer-events", "none", "important");
-      if (textElement) {
-        textElement.style.setProperty("pointer-events", "none", "important");
+      if (clickTarget) {
+        clickTarget.style.setProperty("pointer-events", "none", "important");
       }
     }
     pointerFixCount++;
@@ -1757,23 +1955,23 @@ async function pasteMultiSelection() {
     const newLeft = worldPos.x + (textData.left || 0) + offset;
     const newTop = worldPos.y + (textData.top || 0) + offset;
 
-    TextTools.createTextElement(
-      newId,
-      textData.text,
-      newLeft,
-      newTop,
-      textData.scale,
-      textData.color,
-      textData.backgroundColor,
-      textData.borderColor,
-      textData.borderWidth,
-      textData.fontWeight,
-      textData.fontStyle,
-      textData.textAlign,
-      textData.fontFamily,
-      textData.fontSize,
-      textData.width
-    );
+    TextTools.createTextElement({
+      id: newId,
+      text: textData.text,
+      left: newLeft,
+      top: newTop,
+      scale: textData.scale,
+      color: textData.color,
+      backgroundColor: textData.backgroundColor,
+      borderColor: textData.borderColor,
+      borderWidth: textData.borderWidth,
+      fontWeight: textData.fontWeight,
+      fontStyle: textData.fontStyle,
+      textAlign: textData.textAlign,
+      fontFamily: textData.fontFamily,
+      fontSize: textData.fontSize,
+      width: textData.width
+    });
 
     // Save the new text
     await TextTools.persistTextState(newId, document.getElementById(newId)?.querySelector(".wbe-canvas-text"), document.getElementById(newId));
@@ -1918,6 +2116,147 @@ function setupGlobalPasteHandler() {
   });
 }
 
+function setupIndependentPanZoomHooks() {
+  const closePanels = () => {
+    window.wbeColorPanel?.cleanup();
+    window.wbeImageControlPanel?.cleanup();
+  };
+
+  const disableClickTargets = () => {
+    document.querySelectorAll('.wbe-text-click-target, .wbe-image-click-target').forEach(target => {
+      if (target.style.pointerEvents !== 'none') {
+        target.dataset.wbeOriginalPointerEvents = target.style.pointerEvents || '';
+        target.style.setProperty('pointer-events', 'none', 'important');
+      }
+    });
+  };
+
+  const restoreClickTargets = () => {
+    document.querySelectorAll('.wbe-text-click-target, .wbe-image-click-target').forEach(target => {
+      if (target.dataset.wbeOriginalPointerEvents !== undefined) {
+        const original = target.dataset.wbeOriginalPointerEvents;
+        if (original) {
+          target.style.setProperty('pointer-events', original, 'important');
+        } else {
+          target.style.removeProperty('pointer-events');
+        }
+        delete target.dataset.wbeOriginalPointerEvents;
+      }
+    });
+  };
+
+  let panStartX = null;
+  let panStartY = null;
+  let panStartPivot = null;
+  let isPanning = false;
+  const RIGHT_CLICK_DRAG_THRESHOLD = 5;
+
+  // Capture phase: отключаем pointer-events ДО того, как событие обработается другими обработчиками
+  document.addEventListener("mousedown", (e) => {
+    if (e.button !== 2) return;
+    
+    const elements = document.elementsFromPoint(e.clientX, e.clientY);
+    const clickTarget = elements.find(el => 
+      el.classList.contains('wbe-text-click-target') || 
+      el.classList.contains('wbe-image-click-target')
+    );
+    
+    // Если нет clickTarget - пропускаем событие дальше к Foundry (canvas сам обработает пан)
+    if (!clickTarget) {
+      return;
+    }
+    
+    // Проверяем, что под мышкой не canvas элемент
+    const canvasElement = elements.find(el => el.id === 'board' || el.classList.contains('board'));
+    if (canvasElement && elements.indexOf(canvasElement) < elements.indexOf(clickTarget)) {
+      // Canvas находится выше clickTarget - пропускаем событие к Foundry
+      return;
+    }
+    
+    if (!canvas?.stage) {
+      return;
+    }
+    
+    e.preventDefault();
+    
+    // Отключаем pointer-events СРАЗУ в capture phase
+    disableClickTargets();
+    
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    panStartPivot = {
+      x: canvas.stage.pivot.x,
+      y: canvas.stage.pivot.y
+    };
+    isPanning = false;
+    
+    closePanels();
+  }, true);
+
+  document.addEventListener("mousemove", (e) => {
+    if (!e.buttons || (e.buttons & 2) === 0) {
+      if (panStartX !== null || panStartY !== null) {
+        restoreClickTargets();
+      }
+      panStartX = null;
+      panStartY = null;
+      panStartPivot = null;
+      isPanning = false;
+      return;
+    }
+
+    // Если пан не начат (нет panStartX) - пропускаем событие дальше к Foundry
+    if (panStartX === null || panStartY === null || !panStartPivot) {
+      return;
+    }
+
+    if (!canvas?.stage) {
+      return;
+    }
+
+    const deltaX = Math.abs(e.clientX - panStartX);
+    const deltaY = Math.abs(e.clientY - panStartY);
+    
+    if (deltaX > RIGHT_CLICK_DRAG_THRESHOLD || deltaY > RIGHT_CLICK_DRAG_THRESHOLD) {
+      if (!isPanning) {
+        wbeLog('PanZoom', `mousemove: STARTING PAN via Foundry API`);
+        isPanning = true;
+      }
+      
+      const dx = e.clientX - panStartX;
+      const dy = e.clientY - panStartY;
+      
+      canvas.pan({
+        x: panStartPivot.x - dx / canvas.stage.scale.x,
+        y: panStartPivot.y - dy / canvas.stage.scale.y
+      });
+    }
+  }, true);
+
+  document.addEventListener("mouseup", (e) => {
+    if (e.button !== 2) return;
+    
+    if (isPanning || panStartX !== null) {
+      restoreClickTargets();
+    }
+    
+    panStartX = null;
+    panStartY = null;
+    panStartPivot = null;
+    isPanning = false;
+  }, true);
+
+  document.addEventListener("wheel", (e) => {
+    if (e.deltaY === 0) return;
+    disableClickTargets();
+    closePanels();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        restoreClickTargets();
+      });
+    });
+  }, { capture: true, passive: true });
+}
 
 
 
@@ -1983,8 +2322,30 @@ function requestActiveLocks() {
 }
 
 async function loadCanvasElements() {
+  // CRITICAL FIX: Player should request current state from GM instead of reading stale cache
+  // GM is the source of truth - cache may contain "ghosts" from previous deletions
+  if (!game.user.isGM) {
+    // Player requests current state from GM
+    game.socket.emit(`module.${MODID}`, { 
+      type: "requestInitialState",
+      userId: game.user.id 
+    });
+    // Don't load from cache - wait for GM response
+    return;
+  }
+  
+  // GM reads from database (source of truth)
   const texts = await TextTools.getAllTexts();
   const images = await ImageTools.getAllImages();
+
+  // DEBUG: Log what we're reading from DB
+  console.log(`[ZIndexDebug] loadCanvasElements: Found ${Object.keys(texts).length} texts, ${Object.keys(images).length} images`);
+  Object.entries(texts).forEach(([id, data]) => {
+    console.log(`[ZIndexDebug] Text ${id.slice(-6)} from DB: rank="${data.rank}", zIndex=${data.zIndex}`);
+  });
+  Object.entries(images).forEach(([id, data]) => {
+    console.log(`[ZIndexDebug] Image ${id.slice(-6)} from DB: rank="${data.rank}", zIndex=${data.zIndex}, rankType=${typeof data.rank}`);
+  });
 
   // Sync ZIndexManager with existing z-index and rank values
   // IMPORTANT: Include ALL objects even without zIndex/rank - migration will assign ranks to them
@@ -2006,32 +2367,31 @@ async function loadCanvasElements() {
   ZIndexManager.syncWithExisting(allData);
 
   for (const [id, data] of Object.entries(texts)) {
-    TextTools.createTextElement(
-      id,
-      data.text,
-      data.left,
-      data.top,
-      data.scale,
-      data.color,
-      data.backgroundColor,
-      data.borderColor,
-      data.borderWidth,
-      data.fontWeight,
-      data.fontStyle,
-      data.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
-      data.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
-      data.fontSize || TextTools.DEFAULT_FONT_SIZE,
-      data.width,
-      data.zIndex // Pass existing z-index
-    );
-  }
-
-  for (const [id, data] of Object.entries(texts)) {
-    if (data.width && data.width > 0) {
-    }
+    // NOTE: syncRankEntry not needed here - syncWithExisting already registered all objects with their ranks
+    // createTextElement will use the rank from data.rank parameter
+    TextTools.createTextElement({
+      id: id,
+      text: data.text,
+      left: data.left,
+      top: data.top,
+      scale: data.scale,
+      color: data.color,
+      backgroundColor: data.backgroundColor,
+      borderColor: data.borderColor,
+      borderWidth: data.borderWidth,
+      fontWeight: data.fontWeight,
+      fontStyle: data.fontStyle,
+      textAlign: data.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
+      fontFamily: data.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
+      fontSize: data.fontSize || TextTools.DEFAULT_FONT_SIZE,
+      width: data.width,
+      rank: data.rank
+    });
   }
 
   for (const [id, data] of Object.entries(images)) {
+    // NOTE: syncRankEntry not needed here - syncWithExisting already registered all objects with their ranks
+    // createImageElement will use the rank from data.rank parameter
     // Validate image data before creating element
     if (!data.src || typeof data.src !== 'string') {
       console.warn(`[WB-E] Skipping image ${id}: invalid or missing src`);
@@ -2076,11 +2436,28 @@ async function loadCanvasElements() {
         borderWidth: data.borderWidth,
         borderRadius: data.borderRadius,
         shadowHex: data.shadowHex,
-        shadowOpacity: data.shadowOpacity
+        shadowOpacity: data.shadowOpacity,
+        rank: data.rank
       });
     } catch (error) {
       console.error(`[WB-E] Failed to restore image ${id}:`, error);
     }
+  }
+  
+  // CRITICAL FIX: Sync all DOM z-indexes after loading all elements
+  // This ensures correct z-index order after F5 reload
+  if (window.ZIndexManager && typeof window.ZIndexManager.syncAllDOMZIndexes === 'function') {
+    await window.ZIndexManager.syncAllDOMZIndexes();
+    
+    // DEBUG: Verify z-index order after sync
+    const allObjects = window.ZIndexManager.getAllObjectsSorted();
+    console.log(`[ZIndexDebug] After syncAllDOMZIndexes: ${allObjects.length} objects total`);
+    allObjects.forEach((obj, idx) => {
+      const el = document.getElementById(obj.id);
+      const domZIndex = el ? parseInt(el.style.zIndex) || 0 : null;
+      const managerZIndex = window.ZIndexManager.get(obj.id);
+      console.log(`[ZIndexDebug] ${idx}: ${obj.type} ${obj.id.slice(-6)} rank="${obj.rank}" Manager z-index=${managerZIndex} DOM z-index=${domZIndex}`);
+    });
   }
 }
 

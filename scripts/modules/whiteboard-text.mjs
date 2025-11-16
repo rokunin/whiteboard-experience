@@ -13,7 +13,8 @@ import {
   deselectAllElements,
   getOrCreateLayer,
   ZIndexManager,
-  ZIndexConstants
+  ZIndexConstants,
+  wbeLog
 } from "../main.mjs";
 
 let copiedTextData = null; // Буфер для копирования текста
@@ -42,8 +43,12 @@ const RESIZE_HANDLE_OFFSET_Y = -6; // pixels from bottom edge (negative = inside
 // Map of element-id -> disposer function
 let pendingColorPickerTimeout = null;
 let pendingColorPickerRaf = null;
+let isPastingText = false;
 let skipNextTextDeselect = false;
 const disposers = new Map();
+// Registry to track all text containers for centralized selection management (like images)
+const textRegistry = new Map(); // { id: { container, selectFn, deselectFn, clickTarget } }
+let globalTextSelectionHandlerInstalled = false;
 
 /* ======================== Edit and Lock System ======================== */
 
@@ -461,7 +466,7 @@ function extractTextState(id, textElement, container, options = {}) {
   
   // [ZINDEX_ANALYSIS] Track z-index extraction
   if (!options.skipZIndex) {
-    console.log(`[ZINDEX_ANALYSIS] extractTextState: ${id.slice(-6)} extracted zIndex=${zIndex}, rank="${rank}" from ZIndexManager`);
+    //console.log(`[ZINDEX_ANALYSIS] extractTextState: ${id.slice(-6)} extracted zIndex=${zIndex}, rank="${rank}" from ZIndexManager`);
   }
 
   // Get text from span if it exists, otherwise from textElement
@@ -553,12 +558,12 @@ function logDuplicateZIndexesInTextPayload(prefix, payload) {
 const debouncedFlushTextUpdates = debounce(async () => {
   // [ZINDEX_ANALYSIS] Track debounced flush
   const pendingIds = Array.from(pendingTextUpdates.keys());
-  console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates ENTRY: pending=${pendingTextUpdates.size}, ids=`, pendingIds.slice(0, 5));
+  //console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates ENTRY: pending=${pendingTextUpdates.size}, ids=`, pendingIds.slice(0, 5));
   if (pendingTextUpdates.size === 0) {
-    console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: Early return - no pending updates`);
+    //console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: Early return - no pending updates`);
   }
   
-  console.log(`[WB-E] debouncedFlushTextUpdates: Flushing ${pendingTextUpdates.size} pending updates:`, pendingIds.slice(0, 5));
+  //console.log(`[WB-E] debouncedFlushTextUpdates: Flushing ${pendingTextUpdates.size} pending updates:`, pendingIds.slice(0, 5));
   // CRITICAL FIX: Build complete state from DOM FIRST (source of truth during rapid updates)
   // Then merge with DB state, then apply pending updates
   const texts = {};
@@ -572,7 +577,7 @@ const debouncedFlushTextUpdates = debounce(async () => {
   if (layer) {
     const existingContainers = layer.querySelectorAll('.wbe-canvas-text-container');
     const domIds = Array.from(existingContainers).map(c => c.id);
-    console.log(`[WB-E] debouncedFlushTextUpdates: DOM has ${domIds.length} elements:`, domIds.slice(0, 5));
+    //console.log(`[WB-E] debouncedFlushTextUpdates: DOM has ${domIds.length} elements:`, domIds.slice(0, 5));
     existingContainers.forEach(existingContainer => {
       const existingId = existingContainer.id;
       if (existingId) {
@@ -598,11 +603,11 @@ const debouncedFlushTextUpdates = debounce(async () => {
   });
   
   const finalIds = Object.keys(texts);
-  console.log(`[WB-E] debouncedFlushTextUpdates: Final state has ${finalIds.length} texts (${domExtractedCount} from DOM):`, finalIds.slice(0, 5));
+  //console.log(`[WB-E] debouncedFlushTextUpdates: Final state has ${finalIds.length} texts (${domExtractedCount} from DOM):`, finalIds.slice(0, 5));
   // [ZINDEX_ANALYSIS] Track final state before sending
-  console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: Final state before setAllTexts: texts=${finalIds.length}, fromDOM=${domExtractedCount}, pending=${pendingTextUpdates.size}`);
+  //console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: Final state before setAllTexts: texts=${finalIds.length}, fromDOM=${domExtractedCount}, pending=${pendingTextUpdates.size}`);
   if (finalIds.length === 0) {
-    console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: WARNING - Final state is empty! DOM had ${domExtractedCount} elements`);
+    //console.log(`[ZINDEX_ANALYSIS] debouncedFlushTextUpdates: WARNING - Final state is empty! DOM had ${domExtractedCount} elements`);
   }
   
   // [ZINDEX_ANALYSIS] Track z-index values in final state
@@ -633,15 +638,15 @@ async function persistTextState(id, textElement, container, options = {}) {
   // [ZINDEX_ANALYSIS] Track persistTextState calls
   const currentZIndex = window.ZIndexManager?.get(id) || 0;
   const currentRank = window.ZIndexManager?.getRank(id) || '';
-  console.log(`[ZINDEX_ANALYSIS] persistTextState ENTRY: ${id.slice(-6)}, zIndex=${currentZIndex}, rank="${currentRank}", skipZIndex=${options.skipZIndex || false}`);
+  //console.log(`[ZINDEX_ANALYSIS] persistTextState ENTRY: ${id.slice(-6)}, zIndex=${currentZIndex}, rank="${currentRank}", skipZIndex=${options.skipZIndex || false}`);
   const state = extractTextState(id, textElement, container, options);
   if (!state) return;
   
   // [ZINDEX_ANALYSIS] Track z-index in extracted state
   if (state.zIndex) {
-    console.log(`[ZINDEX_ANALYSIS] persistTextState: Extracted state has zIndex=${state.zIndex} for ${id.slice(-6)}`);
+    //console.log(`[ZINDEX_ANALYSIS] persistTextState: Extracted state has zIndex=${state.zIndex} for ${id.slice(-6)}`);
   } else {
-    console.log(`[ZINDEX_ANALYSIS] persistTextState: Extracted state has NO zIndex for ${id.slice(-6)}, will use Manager value`);
+    //console.log(`[ZINDEX_ANALYSIS] persistTextState: Extracted state has NO zIndex for ${id.slice(-6)}, will use Manager value`);
   }
   
   // Queue the update for debounced batching
@@ -1441,21 +1446,47 @@ function safeReshowColorPicker(targetId, delayMs = 0) {
 // Install global pan hooks (module scope, once)
 let __wbePanHooksInstalled = false;
 
+// DEPRECATED: Pan/zoom handling moved to main.mjs (setupIndependentPanZoomHooks)
+// This function can be removed if user requests it
 function installGlobalPanHooks() {
   if (__wbePanHooksInstalled) return;
   __wbePanHooksInstalled = true;
 
   let isCanvasPanningGlobal = false;
+  const clickTargetsToRestore = new Map();
+
+  // Helper: Temporarily disable pointer-events on click targets for canvas pan/zoom
+  const disableTextClickTargets = () => {
+    if (!selectedTextId) return;
+    const container = document.getElementById(selectedTextId);
+    if (!container) return;
+    
+    const clickTarget = container.querySelector('.wbe-text-click-target');
+    if (clickTarget && clickTarget.style.pointerEvents !== 'none') {
+      clickTargetsToRestore.set(clickTarget, clickTarget.style.pointerEvents);
+      clickTarget.style.setProperty("pointer-events", "none", "important");
+    }
+  };
+
+  // Helper: Restore pointer-events on click targets
+  const restoreTextClickTargets = () => {
+    clickTargetsToRestore.forEach((originalValue, clickTarget) => {
+      if (clickTarget.parentNode) {
+        clickTarget.style.setProperty("pointer-events", originalValue || "auto", "important");
+      }
+    });
+    clickTargetsToRestore.clear();
+  };
 
   // Start pan on ANY right-button down; close panel immediately
   document.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
     if (e.target.closest(".wbe-canvas-text-container")) {
-      // If you want to keep the panel when RMB starts ON the text, comment this line:
       killColorPanel();
     } else {
       killColorPanel();
     }
+    disableTextClickTargets();
     isCanvasPanningGlobal = true;
   }, true);
 
@@ -1464,6 +1495,8 @@ function installGlobalPanHooks() {
     if (e.button !== 2) return;
     if (!isCanvasPanningGlobal) return;
     isCanvasPanningGlobal = false;
+    
+    restoreTextClickTargets();
 
     if (selectedTextId && !window.wbeColorPanel) {
       // Give the canvas a tick to settle transforms
@@ -1474,14 +1507,35 @@ function installGlobalPanHooks() {
   // Zoom wheel should also temporarily hide + then restore
   document.addEventListener("wheel", (e) => {
     if (e.deltaY === 0) return;
-    if (!selectedTextId) return;
-    killColorPanel();
-    safeReshowColorPicker(selectedTextId, 150);
-  }, { passive: true });
+    
+    // Temporarily disable click target to allow wheel events to pass through to canvas
+    disableTextClickTargets();
+    
+    // CRITICAL: Restore after Foundry has processed the event (use double RAF for better timing)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        restoreTextClickTargets();
+      });
+    });
+    
+    // Manage panel - only if text is selected
+    if (selectedTextId) {
+      killColorPanel();
+      
+      // Show panel after wheel event settles (same timing as images)
+      setTimeout(() => {
+        if (selectedTextId) {
+          safeReshowColorPicker(selectedTextId, 150);
+        }
+      }, 150);
+    }
+  }, { capture: true, passive: true });
 }
 
 // call this once, after defining killColorPanel/safeReshowColorPicker
-installGlobalPanHooks();
+// DISABLED: Pan/zoom handling moved to main.mjs (setupIndependentPanZoomHooks)
+// This function can be removed if user requests it
+// installGlobalPanHooks();
 
 /* ======================== End Color Picker System ======================== */
 
@@ -1587,13 +1641,21 @@ function installCanvasTextModeHandler() {
     if (e.button !== 0) return;
     
     // Don't create text if clicking on existing elements
-    if (e.target.closest(".wbe-canvas-text-container") || 
-        e.target.closest(".wbe-color-picker-panel")) {
+    // Use elementsFromPoint to properly detect elements under cursor (works with pointer-events: none)
+    const elementsAtPoint = document.elementsFromPoint(e.clientX, e.clientY);
+    const hasObjectAtPoint = elementsAtPoint.some(el => 
+      el.closest(".wbe-canvas-text-container") || 
+      el.closest(".wbe-color-picker-panel") ||
+      el.closest(".wbe-canvas-image-container") ||
+      el.closest(".wbe-image-click-target")
+    );
+    if (hasObjectAtPoint) {
       return;
     }
     
     e.preventDefault();
     e.stopPropagation();
+    e.stopImmediatePropagation();
     
     // Create text in text mode with auto-edit
     addTextToCanvas(e.clientX, e.clientY, true);
@@ -1611,40 +1673,60 @@ installCanvasTextModeHandler();
 // Глобальная функция вставки текста
 async function globalPasteText() {
     if (!copiedTextData) return;
-    
-    // Конвертируем screen → world coordinates (через Pixi.js)
-    const { lastMouseX, lastMouseY } = getSharedVars();
-    const worldPos = screenToWorld(lastMouseX, lastMouseY);
-    
-    const newTextId = `wbe-text-${Date.now()}`;
-    const container = createTextElement(
-      newTextId,
-      copiedTextData.text,
-      worldPos.x,
-      worldPos.y,
-      copiedTextData.scale ?? DEFAULT_TEXT_SCALE,
-      copiedTextData.color || DEFAULT_TEXT_COLOR,
-      copiedTextData.backgroundColor || DEFAULT_BACKGROUND_COLOR,
-      copiedTextData.borderColor || null,
-      copiedTextData.borderWidth ?? DEFAULT_BORDER_WIDTH,
-      copiedTextData.fontWeight || DEFAULT_FONT_WEIGHT,
-      copiedTextData.fontStyle || DEFAULT_FONT_STYLE,
-      copiedTextData.textAlign || DEFAULT_TEXT_ALIGN,
-      copiedTextData.fontFamily || DEFAULT_FONT_FAMILY,
-      copiedTextData.fontSize || DEFAULT_FONT_SIZE,
-      copiedTextData.width || null
-    );
-    if (!container) return;
-    const textEl = container.querySelector(".wbe-canvas-text");
-    if (!textEl) return;
-    await persistTextState(newTextId, textEl, container);
-    
-    // LOG: Track global text paste with z-index
-    const zIndex = ZIndexManager.get(newTextId);
-    console.log(`[Text Paste] ID: ${newTextId} | z-index: ${zIndex} (global paste)`);
+    if (isPastingText) return;
+    isPastingText = true;
+    try {
+      // Конвертируем screen → world coordinates (через Pixi.js)
+      const { lastMouseX, lastMouseY } = getSharedVars();
+      const worldPos = screenToWorld(lastMouseX, lastMouseY);
+      
+      const newTextId = `wbe-text-${Date.now()}`;
+      const container = createTextElement({
+        id: newTextId,
+        text: copiedTextData.text,
+        left: worldPos.x,
+        top: worldPos.y,
+        scale: copiedTextData.scale ?? DEFAULT_TEXT_SCALE,
+        color: copiedTextData.color || DEFAULT_TEXT_COLOR,
+        backgroundColor: copiedTextData.backgroundColor || DEFAULT_BACKGROUND_COLOR,
+        borderColor: copiedTextData.borderColor || null,
+        borderWidth: copiedTextData.borderWidth ?? DEFAULT_BORDER_WIDTH,
+        fontWeight: copiedTextData.fontWeight || DEFAULT_FONT_WEIGHT,
+        fontStyle: copiedTextData.fontStyle || DEFAULT_FONT_STYLE,
+        textAlign: copiedTextData.textAlign || DEFAULT_TEXT_ALIGN,
+        fontFamily: copiedTextData.fontFamily || DEFAULT_FONT_FAMILY,
+        fontSize: copiedTextData.fontSize || DEFAULT_FONT_SIZE,
+        width: copiedTextData.width || null
+      });
+      if (!container) return;
+      const textEl = container.querySelector(".wbe-canvas-text");
+      if (!textEl) return;
+      
+      // Force layout recalculation to get proper dimensions
+      textEl.offsetHeight;
+      
+      // Wait for DOM to fully update before reading dimensions
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      
+      // Update container dimensions BEFORE persisting
+      updateTextUI(container);
+      
+      // IMMEDIATE save to DB (like images) - no debounce to avoid race condition
+      const texts = await getAllTexts();
+      texts[newTextId] = extractTextState(newTextId, textEl, container);
+      await setAllTexts(texts);
+      
+      // LOG: Track global text paste with z-index
+      const zIndex = ZIndexManager.get(newTextId);
+      console.log(`[Text Paste] ID: ${newTextId} | z-index: ${zIndex} (global paste)`);
+    } finally {
+      isPastingText = false;
+    }
 }
 
 async function handleTextPasteFromClipboard(text) {
+  if (isPastingText) return;
+  isPastingText = true;
   try {
     // Сбрасываем наши скопированные элементы (вставляем из системного буфера)
     setCopiedImageData(null);
@@ -1657,21 +1739,50 @@ async function handleTextPasteFromClipboard(text) {
     
     // Создаем новый текстовый элемент
     const textId = `wbe-text-${Date.now()}`;
-    const container = createTextElement(textId, text, worldPos.x, worldPos.y, DEFAULT_TEXT_SCALE, DEFAULT_TEXT_COLOR, DEFAULT_BACKGROUND_COLOR, null, DEFAULT_BORDER_WIDTH, DEFAULT_FONT_WEIGHT, DEFAULT_FONT_STYLE, DEFAULT_TEXT_ALIGN, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, null);
+    const container = createTextElement({
+      id: textId,
+      text: text,
+      left: worldPos.x,
+      top: worldPos.y,
+      scale: DEFAULT_TEXT_SCALE,
+      color: DEFAULT_TEXT_COLOR,
+      backgroundColor: DEFAULT_BACKGROUND_COLOR,
+      borderColor: null,
+      borderWidth: DEFAULT_BORDER_WIDTH,
+      fontWeight: DEFAULT_FONT_WEIGHT,
+      fontStyle: DEFAULT_FONT_STYLE,
+      textAlign: DEFAULT_TEXT_ALIGN,
+      fontFamily: DEFAULT_FONT_FAMILY,
+      fontSize: DEFAULT_FONT_SIZE,
+      width: null
+    });
     if (!container) return;
     const textEl = container.querySelector(".wbe-canvas-text");
     if (!textEl) return;
-    await persistTextState(textId, textEl, container);
+    
+    // Force layout recalculation to get proper dimensions
+    textEl.offsetHeight;
+    
+    // Wait for DOM to fully update before reading dimensions
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    
+    // Update container dimensions BEFORE persisting
+    updateTextUI(container);
+    
+    // IMMEDIATE save to DB (like images) - no debounce to avoid race condition
+    const texts = await getAllTexts();
+    texts[textId] = extractTextState(textId, textEl, container);
+    await setAllTexts(texts);
     
     // LOG: Track clipboard text paste with z-index
     const zIndex = ZIndexManager.get(textId);
-    console.log(`[Text Paste] ID: ${textId} | z-index: ${zIndex} (clipboard paste)`);
-    // Update container dimensions after paste
-    updateTextUI(container);
+    //console.log(`[Text Paste] ID: ${textId} | z-index: ${zIndex} (clipboard paste)`);
     
   } catch (err) {
     console.error("[WB-E] Text paste error:", err);
     ui.notifications.error("Text paste error");
+  } finally {
+    isPastingText = false;
   }
 }
 
@@ -1720,7 +1831,7 @@ async function injectTextTool() {
   setTimeout(() => sc.render(true), 10);
 }
 
-function createTextElement(
+function createTextElement({
     id,
     text,
     left,
@@ -1736,38 +1847,41 @@ function createTextElement(
     fontFamily = DEFAULT_FONT_FAMILY,
     fontSize = DEFAULT_FONT_SIZE,
     width = null,
-    existingZIndex = null
-  ) {
-    const layer = getOrCreateLayer();
-    if (!layer) return null;
-    
-    // Контейнер для позиционирования (БЕЗ translate)
-    const container = document.createElement("div");
-    container.id = id;
-    container.className = "wbe-canvas-text-container";
-    
-    // FIX: Get z-index from manager
-    // If existingZIndex is provided, the object should already be registered via syncWithExisting
-    // But we check anyway to be safe - if not registered, assignText() will register it
-    let zIndex;
-    if (existingZIndex !== null && existingZIndex !== undefined) {
-      // Object should already be registered by syncWithExisting, but check to be safe
-      if (ZIndexManager.has && typeof ZIndexManager.has === 'function' && ZIndexManager.has(id)) {
-        // Object is registered, use its current z-index from manager
-        zIndex = ZIndexManager.get(id);
-      } else {
-        // Object not registered yet - assign new rank (will be corrected by syncAllDOMZIndexes if rank exists)
-        // This can happen if syncWithExisting hasn't run yet or if object was added after migration
-        zIndex = ZIndexManager.assignText(id);
-      }
-    } else {
-      // No existing z-index provided - assign new rank (places at top)
-      zIndex = ZIndexManager.assignText(id);
-    }
-    
-    // LOG: Track text creation with z-index
-    console.log(`[Text Creation] ID: ${id} | z-index: ${zIndex} ${existingZIndex ? '(existing provided, using manager)' : '(newly assigned)'}`);
-    container.style.cssText = `
+    rank = null
+  }) {
+  const layer = getOrCreateLayer();
+  if (!layer) return null;
+
+  // Контейнер для позиционирования (БЕЗ translate)
+  const container = document.createElement("div");
+  container.id = id;
+  container.className = "wbe-canvas-text-container";
+
+  // Register in ZIndexManager if not already registered (migration handles existing objects)
+  // CRITICAL FIX: If object already exists (from syncWithExisting), don't overwrite its rank
+  // syncWithExisting already registered all objects with correct ranks from DB
+  const desiredRank = typeof rank === "string" ? rank : null;
+  if (!ZIndexManager.has(id)) {
+    // Object doesn't exist - assign new rank
+    ZIndexManager.assignText(id, desiredRank);
+  }
+  // NOTE: Don't overwrite rank if object already exists - syncWithExisting already set it correctly
+  // Get z-index AFTER assignment - assignText already marks cache as dirty
+  // so get() will rebuild the cache including the new object
+  const zIndex = ZIndexManager.get(id);
+  const assignedRank = ZIndexManager.getRank(id);
+  const allObjects = ZIndexManager.getAllObjectsSorted();
+  const position = allObjects.findIndex(o => o.id === id);
+  const totalObjects = allObjects.length;
+
+  // DEBUG: Log z-index assignment
+  console.log(`[ZIndexDebug] createTextElement ${id.slice(-6)}: zIndex=${zIndex}, rank="${assignedRank}", position=${position}/${totalObjects - 1}, totalObjects=${totalObjects}`);
+  if (position !== totalObjects - 1) {
+    console.warn(`[ZIndexDebug] WARNING: Text ${id.slice(-6)} is NOT at top! Position: ${position}/${totalObjects - 1}`);
+    console.log(`[ZIndexDebug] Top 3 objects:`, allObjects.slice(-3).map(o => ({ id: o.id.slice(-6), rank: o.rank, type: o.type, zIndex: ZIndexManager.get(o.id) })));
+  }
+
+  container.style.cssText = `
       position: absolute;
       left: ${left}px;
       top: ${top}px;
@@ -1837,6 +1951,11 @@ function createTextElement(
     
     container.appendChild(textElement);
     layer.appendChild(container);
+    
+    // NOTE: Images don't call syncAllDOMZIndexes after creation - they just set z-index directly
+    // We do the same for texts to match the working behavior of images
+    // syncAllDOMZIndexes will be called later when needed (e.g., during z-index operations)
+    
     applyBorderDataToElement(textElement, borderColor, borderWidth);
     
     // Resize handle (круглая точка) - в контейнере, позиционируется относительно textElement
@@ -1858,6 +1977,22 @@ function createTextElement(
       user-select: none;
     `;
     container.appendChild(resizeHandle);
+    
+    // Click target for drag/interaction (similar to image click-target pattern)
+    // MUST be LAST to be on top of textElement and handle all interactions
+    const clickTarget = document.createElement("div");
+    clickTarget.className = "wbe-text-click-target";
+    clickTarget.style.cssText = `
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      pointer-events: none;
+      /* NEVER ADD Z-INDEX TO CLICK TARGET */
+    `;
+    container.appendChild(clickTarget);
     
     // No separate resize handles - borders will be directly draggable
     
@@ -1886,7 +2021,6 @@ function createTextElement(
     
     // Обработчики событий
     let isEditing = false;
-    let isSelected = false;
     let dragging = false, dragInitialized = false, startScreenX = 0, startScreenY = 0, startWorldX = 0, startWorldY = 0;
     let resizing = false, resizeStartX = 0, resizeStartScale = scale;
     
@@ -1894,24 +2028,43 @@ function createTextElement(
     
     // Edit blur handler - exits edit mode when clicking outside
     const editBlurHandler = async (e) => {
-      if (!isEditing) return;
+      // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track editBlurHandler calls
+      console.log(`[INVESTIGATE] editBlurHandler called for ${id.slice(-6)}: isEditing=${isEditing}, target=${e.target?.tagName || 'null'}, targetId=${e.target?.id || 'null'}, button=${e.button}`);
+      if (!isEditing) {
+        console.log(`[INVESTIGATE] editBlurHandler: Early return - isEditing=false for ${id.slice(-6)}`);
+        return;
+      }
       
       // Ignore if clicking anywhere inside the container (including textElement, span, and all children)
-      if (container.contains(e.target)) return;
+      if (container.contains(e.target)) {
+        console.log(`[INVESTIGATE] editBlurHandler: Ignoring click inside container for ${id.slice(-6)}`);
+        return;
+      }
       
       // Ignore if clicking on color panel
-      if (window.wbeColorPanel?.contains(e.target)) return;
+      if (window.wbeColorPanel?.contains(e.target)) {
+        console.log(`[INVESTIGATE] editBlurHandler: Ignoring click on color panel for ${id.slice(-6)}`);
+        return;
+      }
       
       // Ignore if clicking on resize handle
-      if (resizeHandle.contains(e.target)) return;
+      if (resizeHandle.contains(e.target)) {
+        console.log(`[INVESTIGATE] editBlurHandler: Ignoring click on resize handle for ${id.slice(-6)}`);
+        return;
+      }
       
-      // User clicked somewhere else in Foundry - exit edit mode
+      console.log(`[INVESTIGATE] editBlurHandler: CALLING exitEditMode for ${id.slice(-6)} - click outside`);
       await exitEditMode();
     };
     
     // NEW: Add exitEditMode function
     async function exitEditMode() {
-      if (!isEditing) return;
+      // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track exitEditMode calls
+      console.log(`[INVESTIGATE] exitEditMode called for ${id.slice(-6)}: isEditing=${isEditing}, contentEditable=${textElement.contentEditable}, lockedBy=${container.dataset.lockedBy || 'none'}`);
+      if (!isEditing) {
+        console.log(`[INVESTIGATE] exitEditMode: Early return - isEditing=false for ${id.slice(-6)}`);
+        return;
+      }
       
       // Check if text is empty - delete if so
       const textSpan = textElement.querySelector(".wbe-text-background-span");
@@ -1952,14 +2105,17 @@ function createTextElement(
       }
       
       isEditing = false;
+      console.log(`[INVESTIGATE] exitEditMode: Set isEditing=false for ${id.slice(-6)}`);
       
       // Exit contentEditable from span or textElement (reuse textSpan from above scope)
       const editableElement = textSpan || textElement;
+      console.log(`[INVESTIGATE] exitEditMode: Setting contentEditable=false for ${id.slice(-6)}, editableElement=${editableElement.tagName}`);
       editableElement.contentEditable = "false";
       editableElement.style.userSelect = "none";
       
       textElement.contentEditable = "false";
       textElement.style.userSelect = "none";
+      console.log(`[INVESTIGATE] exitEditMode: contentEditable set to false for ${id.slice(-6)}`);
       
       // Remove the blur handler
       document.removeEventListener("mousedown", editBlurHandler, true);
@@ -1983,10 +2139,12 @@ function createTextElement(
       if (window.MassSelection && window.MassSelection.selectedCount > 0) {
         window.MassSelection.clear();
       }
-      selectText();
+      if (container.dataset.selected !== "true") {
+        selectText();
+      }
       
       // Show scale gizmo again
-      if (isSelected) {
+      if (container.dataset.selected === "true") {
         resizeHandle.style.display = "flex";
         resizeHandle.style.opacity = "0";
         
@@ -2000,15 +2158,19 @@ function createTextElement(
       
     }
     
-    // Двойной клик для редактирования
-    textElement.addEventListener("dblclick", async (e) => {
+    // Двойной клик для редактирования (on click-target, not textElement)
+    clickTarget.addEventListener("dblclick", async (e) => {
+      // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track dblclick handler
+      console.log(`[INVESTIGATE] Text dblclick handler called for ${id.slice(-6)}: isEditing=${isEditing}, lockedBy=${container.dataset.lockedBy || 'none'}`);
       // NEW: Check if locked by another user
       if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
+        console.log(`[INVESTIGATE] Text dblclick: Locked by another user for ${id.slice(-6)}`);
         return;
       }
       
       // NEW: If already editing, don't interfere - let browser handle word selection
       if (isEditing) {
+        console.log(`[INVESTIGATE] Text dblclick: Already editing, returning early for ${id.slice(-6)}`);
         // Already editing - don't prevent default, let browser select word
         return;
       }
@@ -2019,6 +2181,7 @@ function createTextElement(
       
       // NEW: Enter edit mode with lock
       isEditing = true;
+      console.log(`[INVESTIGATE] Text dblclick: Setting isEditing=true for ${id.slice(-6)}`);
       
       // Get current dimensions for lock overlay
       const scale = getTextScale(textElement);
@@ -2046,9 +2209,11 @@ function createTextElement(
       editableElement.style.userSelect = "text";
       editableElement.style.outline = "none";
       editableElement.focus();
+      console.log(`[INVESTIGATE] Text dblclick: Set contentEditable=true for ${id.slice(-6)}, editableElement=${editableElement.tagName}`);
       
       // Add the blur handler to detect clicks outside
       document.addEventListener("mousedown", editBlurHandler, true);
+      console.log(`[INVESTIGATE] Text dblclick: Added editBlurHandler listener for ${id.slice(-6)}`);
       
       // Hide color panel during editing
       killColorPanel();
@@ -2152,9 +2317,13 @@ function createTextElement(
         return; // Don't select mass-selected text individually
       }
       
-      isSelected = true;
+      // Prevent re-selection if already selected
+      if (container.dataset.selected === "true") {
+        return; // Already selected, skip
+      }
+      
       selectedTextId = id; // Устанавливаем глобальный ID
-      console.log(`[INVESTIGATE] Text selected: Setting selectedTextId=${id.slice(-6)}`); // TEMPORARY FOR INVESTIGATION
+      //console.log(`[INVESTIGATE] Text selected: Setting selectedTextId=${id.slice(-6)}`); // TEMPORARY FOR INVESTIGATION
 
       setSelectedImageId(null); // Сбрасываем выделение картинки
       
@@ -2174,7 +2343,8 @@ function createTextElement(
       // Mark container as selected
       container.dataset.selected = "true";
       
-      container.style.setProperty("pointer-events", "auto", "important");
+      // Enable click-target for drag interaction (similar to image pattern)
+      clickTarget.style.setProperty("pointer-events", "auto", "important");
       textElement.style.setProperty("outline", "1px solid #4a9eff", "important");
       textElement.style.setProperty("outline-offset", "0px", "important");
       // container.style.setProperty("cursor", "move", "important"); // Removed move cursor
@@ -2214,12 +2384,11 @@ function createTextElement(
       range.selectNodeContents(textElement);
       selection.removeAllRanges();
       selection.addRange(range);
-      console.log("zindex of text element from dom", container.style.zIndex);
+      //console.log("zindex of text element from dom", container.style.zIndex);
     }
     
     function deselectText() {
       if (!isEditing) {
-        isSelected = false;
         delete container.dataset.selected; // Убираем метку
         if (selectedTextId === id) {
           console.log(`[INVESTIGATE] Text deselected: Clearing selectedTextId for ${id.slice(-6)}`); // TEMPORARY FOR INVESTIGATION
@@ -2227,7 +2396,8 @@ function createTextElement(
         }
 
         
-        container.style.removeProperty("pointer-events");
+        // Disable click-target for canvas pass-through (similar to image pattern)
+        clickTarget.style.setProperty("pointer-events", "none", "important");
         textElement.style.removeProperty("outline");
         textElement.style.removeProperty("outline-offset");
         container.style.removeProperty("cursor");
@@ -2283,23 +2453,23 @@ function createTextElement(
       
       // Создаём новый текст
       const newTextId = `wbe-text-${Date.now()}`;
-      const container = createTextElement(
-        newTextId,
-        copiedTextData.text,
-        worldX,
-        worldY,
-        copiedTextData.scale ?? DEFAULT_TEXT_SCALE,
-        copiedTextData.color || DEFAULT_TEXT_COLOR,
-        copiedTextData.backgroundColor || DEFAULT_BACKGROUND_COLOR,
-        copiedTextData.borderColor || null,
-        copiedTextData.borderWidth ?? DEFAULT_BORDER_WIDTH,
-        copiedTextData.fontWeight || DEFAULT_FONT_WEIGHT,
-        copiedTextData.fontStyle || DEFAULT_FONT_STYLE,
-        copiedTextData.textAlign || DEFAULT_TEXT_ALIGN,
-        copiedTextData.fontFamily || DEFAULT_FONT_FAMILY,
-        copiedTextData.fontSize || DEFAULT_FONT_SIZE,
-        copiedTextData.width || null
-      );
+      const container = createTextElement({
+        id: newTextId,
+        text: copiedTextData.text,
+        left: worldX,
+        top: worldY,
+        scale: copiedTextData.scale ?? DEFAULT_TEXT_SCALE,
+        color: copiedTextData.color || DEFAULT_TEXT_COLOR,
+        backgroundColor: copiedTextData.backgroundColor || DEFAULT_BACKGROUND_COLOR,
+        borderColor: copiedTextData.borderColor || null,
+        borderWidth: copiedTextData.borderWidth ?? DEFAULT_BORDER_WIDTH,
+        fontWeight: copiedTextData.fontWeight || DEFAULT_FONT_WEIGHT,
+        fontStyle: copiedTextData.fontStyle || DEFAULT_FONT_STYLE,
+        textAlign: copiedTextData.textAlign || DEFAULT_TEXT_ALIGN,
+        fontFamily: copiedTextData.fontFamily || DEFAULT_FONT_FAMILY,
+        fontSize: copiedTextData.fontSize || DEFAULT_FONT_SIZE,
+        width: copiedTextData.width || null
+      });
       
     if (container) {
       const textEl = container.querySelector(".wbe-canvas-text");
@@ -2317,10 +2487,10 @@ function createTextElement(
     // ---- Document-level handlers bound to this element ----
     const keydownHandler = async (e) => {
       // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track keydown handler calls
-      console.log(`[INVESTIGATE] Text keydown handler called for ${id.slice(-6)}: key=${e.key}, selectedTextId=${selectedTextId?.slice(-6) || 'null'}, id=${id.slice(-6)}, isEditing=${isEditing}, selectedImageId=${window.ImageTools?.selectedImageId?.slice(-6) || 'null'}, massSelectionSize=${globalThis.selectedObjects?.size || 0}`);
+      //console.log(`[INVESTIGATE] Text keydown handler called for ${id.slice(-6)}: key=${e.key}, selectedTextId=${selectedTextId?.slice(-6) || 'null'}, id=${id.slice(-6)}, isEditing=${isEditing}, selectedImageId=${window.ImageTools?.selectedImageId?.slice(-6) || 'null'}, massSelectionSize=${globalThis.selectedObjects?.size || 0}`);
       
       if (selectedTextId !== id) {
-        console.log(`[INVESTIGATE] Text keydown handler: selectedTextId (${selectedTextId?.slice(-6) || 'null'}) !== id (${id.slice(-6)}), returning early`);
+        //console.log(`[INVESTIGATE] Text keydown handler: selectedTextId (${selectedTextId?.slice(-6) || 'null'}) !== id (${id.slice(-6)}), returning early`);
         return;
       }
       
@@ -2350,7 +2520,7 @@ function createTextElement(
         // Z-index operations are queued at ZIndexManager level
         const oldZIndex = ZIndexManager.get(id);
         // [ZINDEX_ANALYSIS] Track moveDown call
-        console.log(`[ZINDEX_ANALYSIS] moveDown called for ${id.slice(-6)}: oldZIndex=${oldZIndex}`);
+        //console.log(`[ZINDEX_ANALYSIS] moveDown called for ${id.slice(-6)}: oldZIndex=${oldZIndex}`);
         // [INVESTIGATE] Track DOM state before move - check ALL objects for duplicates
         const moveStartTime = Date.now();
         const elBeforeMove = document.getElementById(id);
@@ -2371,7 +2541,7 @@ function createTextElement(
           console.warn(`[INVESTIGATE] moveDown: DUPLICATES IN DOM BEFORE move for ${id.slice(-6)}:`, duplicateZBeforeMove.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
         }
         
-        console.log(`[INVESTIGATE] moveDown: DOM z-index BEFORE move for ${id.slice(-6)}: ${domStateBeforeMove}, Manager: ${oldZIndex}`);
+        //console.log(`[INVESTIGATE] moveDown: DOM z-index BEFORE move for ${id.slice(-6)}: ${domStateBeforeMove}, Manager: ${oldZIndex}`);
         const result = await ZIndexManager.moveDown(id);
         const moveDuration = Date.now() - moveStartTime;
         const newZIndex = ZIndexManager.get(id);
@@ -2403,7 +2573,7 @@ function createTextElement(
           // Sync all DOM z-indexes (ensures consistency across all objects)
           // [ZINDEX_ANALYSIS] Track sync call after moveDown
           const syncStartTime = Date.now();
-          console.log(`[ZINDEX_ANALYSIS] Calling syncAllDOMZIndexes after moveDown for ${id.slice(-6)}`);
+          //console.log(`[ZINDEX_ANALYSIS] Calling syncAllDOMZIndexes after moveDown for ${id.slice(-6)}`);
           await ZIndexManager.syncAllDOMZIndexes();
           const syncDuration = Date.now() - syncStartTime;
           
@@ -2470,7 +2640,7 @@ function createTextElement(
         // Z-index operations are queued at ZIndexManager level
         const oldZIndex = ZIndexManager.get(id);
         // [ZINDEX_ANALYSIS] Track moveUp call
-        console.log(`[ZINDEX_ANALYSIS] moveUp called for ${id.slice(-6)}: oldZIndex=${oldZIndex}`);
+        //console.log(`[ZINDEX_ANALYSIS] moveUp called for ${id.slice(-6)}: oldZIndex=${oldZIndex}`);
         // [INVESTIGATE] Track DOM state before move - check ALL objects for duplicates
         const moveStartTime = Date.now();
         const elBeforeMove = document.getElementById(id);
@@ -2488,10 +2658,10 @@ function createTextElement(
         });
         const duplicateZBeforeMove = Array.from(duplicatesBeforeMove.entries()).filter(([z, ids]) => ids.length > 1 && z >= 1000);
         if (duplicateZBeforeMove.length > 0) {
-          console.warn(`[INVESTIGATE] moveUp: DUPLICATES IN DOM BEFORE move for ${id.slice(-6)}:`, duplicateZBeforeMove.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
+          //console.warn(`[INVESTIGATE] moveUp: DUPLICATES IN DOM BEFORE move for ${id.slice(-6)}:`, duplicateZBeforeMove.map(([z, ids]) => `z=${z}: ${ids.join(', ')}`));
         }
         
-        console.log(`[INVESTIGATE] moveUp: DOM z-index BEFORE move for ${id.slice(-6)}: ${domStateBeforeMove}, Manager: ${oldZIndex}`);
+        //console.log(`[INVESTIGATE] moveUp: DOM z-index BEFORE move for ${id.slice(-6)}: ${domStateBeforeMove}, Manager: ${oldZIndex}`);
         const result = await ZIndexManager.moveUp(id);
         const moveDuration = Date.now() - moveStartTime;
         const newZIndex = ZIndexManager.get(id);
@@ -2523,7 +2693,7 @@ function createTextElement(
           // Sync all DOM z-indexes (ensures consistency across all objects)
           // [ZINDEX_ANALYSIS] Track sync call after moveUp
           const syncStartTime = Date.now();
-          console.log(`[ZINDEX_ANALYSIS] Calling syncAllDOMZIndexes after moveUp for ${id.slice(-6)}`);
+          //console.log(`[ZINDEX_ANALYSIS] Calling syncAllDOMZIndexes after moveUp for ${id.slice(-6)}`);
           await ZIndexManager.syncAllDOMZIndexes();
           const syncDuration = Date.now() - syncStartTime;
           
@@ -2629,140 +2799,101 @@ function createTextElement(
       setCopiedImageData(null);
       
       // Persist current state to scene flags to ensure fonts are saved across socket hops (skip z-index read - it doesn't change during copy)
-      persistTextState(id, textElement, container, { skipZIndex: true });
+      //persistTextState(id, textElement, container, { skipZIndex: true });
 
       // Add marker to clipboard so paste handler knows this is a FATE text copy
       if (e.clipboardData) e.clipboardData.setData("text/plain", `[wbe-TEXT-COPY:${id}]\n${textElement.textContent}`);
 
     };
 
-    const onDocMouseDown = (e) => {
-      if (window.wbeColorPanel && window.wbeColorPanel.contains(e.target)) {
-        return;
-      }
-      if (e.button !== 0) return;
-      
-      // PREVENT SINGLE CLICK SELECTION OF MASS-SELECTED TEXT
-      if (container.classList.contains("wbe-mass-selected")) {
-        e.preventDefault();
-        e.stopPropagation();
-        return; // Don't select mass-selected text on single click
-      }
-      
-      if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
-        container.style.setProperty("pointer-events", "none", "important");
-        return; // Let everything pass through to canvas
-      }
-      
-      // CRITICAL FIX: Enable pointer-events BEFORE checking elementsFromPoint
-      // This ensures clicks register even when container has pointer-events: none
-      // Must be done before elementsFromPoint to get accurate z-order
-      container.style.setProperty("pointer-events", "auto", "important");
-      
-      // CRITICAL FIX: Also check if click target is directly on text element/container
-      // This handles cases where elementsFromPoint might not include elements with pointer-events: none
-      const clickedDirectlyOnText = container.contains(e.target) || 
-                                     e.target === container || 
-                                     e.target === textElement ||
-                                     textElement.contains(e.target);
-      
-      // FIX: Check elementsFromPoint to see if text is actually on top
-      // Use elementsFromPoint (not elementFromPoint) to check z-order when overlapping with images
-      const elementsAtPoint = document.elementsFromPoint(e.clientX, e.clientY);
-      const textInStack = elementsAtPoint.some(el => el === container || container.contains(el));
-      const textIndex = elementsAtPoint.findIndex(el => el === container || container.contains(el));
-      const imageIndex = elementsAtPoint.findIndex(el => 
-        el.classList.contains('wbe-image-click-target') || 
-        el.classList.contains('wbe-canvas-image-container')
-      );
-      
-      // Only proceed if text is on top (or no image found) OR if clicked directly on text
-      // Direct click check handles cases where pointer-events was none initially
-      const textIsOnTop = clickedDirectlyOnText || (textInStack && (imageIndex === -1 || textIndex < imageIndex));
-      
-      if (textIsOnTop) {
-        if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
-          e.preventDefault(); e.stopPropagation();
-          return; // Don't select locked text
-        }
-        if (!isSelected) {
-          e.preventDefault(); e.stopPropagation();
-          
-          // CLEAR MASS SELECTION when selecting individual text
-          if (window.MassSelection && window.MassSelection.selectedCount > 0) {
-            window.MassSelection.clear();
-          }
-          
-          selectText();
-          
-      // FIX: Ensure drag works and visual feedback is applied immediately after selection
-      // Re-apply styles to prevent async image deselection from removing them
-      container.style.setProperty("pointer-events", "auto", "important");
-      textElement.style.setProperty("outline", "1px solid #4a9eff", "important");
-      textElement.style.setProperty("outline-offset", "0px", "important");
-      
-      // FIX: Ensure border persists even if image handler runs after
-      // Use requestAnimationFrame to re-apply after any pending DOM updates
-      requestAnimationFrame(() => {
-        if (container.dataset.selected === "true") {
-          textElement.style.setProperty("outline", "1px solid #4a9eff", "important");
-          textElement.style.setProperty("outline-offset", "0px", "important");
-        }
-      });
-        } else if (!window.wbeColorPanel) {
-          safeReshowColorPicker(id, 0);
-        }
-      } else {
-        if (skipNextTextDeselect) {
-          skipNextTextDeselect = false;
-          return;
-        }
-        if (isSelected) {
-          deselectText();
-        } else {
-          container.style.removeProperty("pointer-events");
-        }
-      }
-    };
+    // Register text in global registry for centralized selection management (like images)
+    textRegistry.set(id, { container, selectFn: selectText, deselectFn: deselectText, clickTarget });
 
     document.addEventListener("keydown", keydownHandler);
-    console.log(`[INVESTIGATE] Text keydown handler registered for ${id.slice(-6)}`); // TEMPORARY FOR INVESTIGATION
     document.addEventListener("copy",    copyHandler);
-    document.addEventListener("mousedown", onDocMouseDown, true);
 
-    // Register disposer for this element
+    // Register disposer for this element (no mousedown cleanup needed - handled by global handler)
     disposers.set(id, () => {
       document.removeEventListener("keydown",  keydownHandler);
       document.removeEventListener("copy",     copyHandler);
-      document.removeEventListener("mousedown", onDocMouseDown, true);
+      textRegistry.delete(id); // Remove from registry when element is destroyed
     });
   
   
-    // Перетаскивание — только левой кнопкой (на container)
-    container.addEventListener("mousedown", (e) => {
+    // Unified mousedown handler on click-target for drag AND border resize
+    // Check border resize first (priority), then fall back to drag
+    clickTarget.addEventListener("mousedown", (e) => {
       // [INVESTIGATE] TEMPORARY FOR INVESTIGATION - Track mousedown event
-      console.log(`[INVESTIGATE] Text drag mousedown: Called for text ${id.slice(-6)}, button=${e.button}, isEditing=${isEditing}`);
+      console.log(`[INVESTIGATE] Text mousedown: Called for text ${id.slice(-6)}, button=${e.button}, isEditing=${isEditing}`);
       
       if (isEditing) return;
+      if (e.button !== 0) return; // Only left button
       
-      // Только левая кнопка (0) → перетаскивание объекта
-      if (e.button === 0) {
-        console.log(`[INVESTIGATE] Text drag mousedown: Starting drag for text ${id.slice(-6)}`);
+      // Auto-select if not selected (like ImageDragController does)
+      // This ensures drag works on freshly pasted texts
+      if (container.dataset.selected !== "true") {
+        console.log(`[INVESTIGATE] Text mousedown: Auto-selecting text ${id.slice(-6)}`);
+        selectText();
+      }
+      
+      // Check if text is selected (needed for both drag and border resize)
+      const isTextSelected = container.dataset.selected === "true" || 
+                             selectedTextId === id ||
+                             textElement.style.outline.includes("#4a9eff") ||
+                             getComputedStyle(textElement).outline.includes("rgb(74, 158, 255)");
+      
+      // Calculate position relative to textElement for border resize check
+      const rect = textElement.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const width = rect.width;
+      
+      // PRIORITY 1: Border resize (if near left or right border)
+      if (isTextSelected && (x <= 8 || x >= width - 8)) {
+        console.log(`[INVESTIGATE] Text border resize: Starting for text ${id.slice(-6)}, x=${x.toFixed(1)}, width=${width.toFixed(1)}`);
         e.preventDefault();
         e.stopPropagation();
         
-        dragging = true;
-        dragInitialized = false;
-        startScreenX = e.clientX;
-        startScreenY = e.clientY;
-      
-        // Запоминаем НАЧАЛЬНУЮ позицию КОНТЕЙНЕРА в пикселях
-        startWorldX = parseFloat(container.style.left) || 0;
-        startWorldY = parseFloat(container.style.top) || 0;
+        killColorPanel();
         
-        document.addEventListener("mousemove", handleMouseMove);
-        document.addEventListener("mouseup", handleMouseUp);
+        resizing = true;
+        resizeStartX = e.clientX;
+        resizeStartScale = textElement.offsetWidth;
+        
+        // Hide scaling gizmo
+        resizeHandle.style.transition = "opacity 0.15s ease";
+        resizeHandle.style.opacity = "0";
+        setTimeout(() => {
+          resizeHandle.style.display = "none";
+        }, 150);
+        
+        textElement.style.cursor = "ew-resize";
+        
+        // Choose left or right resize based on position
+        if (x <= 8) {
+          document.addEventListener("mousemove", handleLeftResize);
+        } else {
+          document.addEventListener("mousemove", handleRightResize);
+        }
+        document.addEventListener("mouseup", handleResizeUp);
+        return; // Don't start drag
       }
+      
+      // PRIORITY 2: Object drag (if not on border)
+      console.log(`[INVESTIGATE] Text drag: Starting for text ${id.slice(-6)}`);
+      e.preventDefault();
+      e.stopPropagation();
+      
+      dragging = true;
+      dragInitialized = false;
+      startScreenX = e.clientX;
+      startScreenY = e.clientY;
+    
+      // Запоминаем НАЧАЛЬНУЮ позицию КОНТЕЙНЕРА в пикселях
+      startWorldX = parseFloat(container.style.left) || 0;
+      startWorldY = parseFloat(container.style.top) || 0;
+      
+      document.addEventListener("mousemove", handleMouseMove);
+      document.addEventListener("mouseup", handleMouseUp);
     });
   
     async function handleMouseMove(e) {
@@ -2774,6 +2905,7 @@ function createTextElement(
 
       if (!dragInitialized && (Math.abs(deltaScreenX) > 1 || Math.abs(deltaScreenY) > 1)) {
         dragInitialized = true;
+        container.dataset.dragging = "true";
         killColorPanel();
       }
       
@@ -2802,6 +2934,7 @@ function createTextElement(
         const wasDragging = dragInitialized; // Remember if we actually dragged
         dragging = false;
         dragInitialized = false;
+        delete container.dataset.dragging;
         document.removeEventListener("mousemove", handleMouseMove);
         document.removeEventListener("mouseup", handleMouseUp);
         
@@ -2820,11 +2953,11 @@ function createTextElement(
         }
         
         // Only restore panel if we actually dragged (not just a click)
-        if (wasDragging) {
+        if (wasDragging && container.dataset.selected !== "true") {
           selectText();            // keeps outline, selection state, id, restores panel
-        } else {
-          // Just a click on already selected text - don't kill/restore panel
-          // Panel update already handled in onDocMouseDown
+        } else if (wasDragging && !window.wbeColorPanel) {
+          // Text already selected, just restore panel
+          safeReshowColorPicker(id, 0);
         }
       }
     }
@@ -2856,7 +2989,8 @@ function createTextElement(
     });
     
     // Show resize cursor when hovering over borders - ONLY if text is selected (blue border visible)
-    textElement.addEventListener("mousemove", (e) => {
+    // Listen on click-target (it's on top) and calculate position relative to textElement
+    clickTarget.addEventListener("mousemove", (e) => {
       if (isEditing || resizing) return;
       
       // CRITICAL FIX: Only show ew-resize cursor if text is selected (blue outline visible in DOM)
@@ -2881,77 +3015,6 @@ function createTextElement(
         textElement.style.cursor = "ew-resize";
       } else {
         textElement.style.cursor = "";
-      }
-    });
-    
-    // Border dragging functionality - detect when dragging left or right border
-    textElement.addEventListener("mousedown", (e) => {
-      if (isEditing || e.button !== 0) return;
-      
-      // CRITICAL FIX: Only allow border resize if text is selected (blue outline visible)
-      const isTextSelected = container.dataset.selected === "true" || 
-                             selectedTextId === id ||
-                             textElement.style.outline.includes("#4a9eff") ||
-                             getComputedStyle(textElement).outline.includes("rgb(74, 158, 255)");
-      
-      if (!isTextSelected) {
-        // Text not selected - no blue border, no border resize
-        return;
-      }
-      
-      const rect = textElement.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const width = rect.width;
-      
-      // Check if click is near left border (within 8px)
-      if (x <= 8) {
-        e.preventDefault();
-        e.stopPropagation();
-        
-        // Kill color panel during width resize
-        killColorPanel();
-        
-        resizing = true;
-        resizeStartX = e.clientX;
-        resizeStartScale = textElement.offsetWidth;
-        
-        // Hide scaling gizmo during resize with smooth animation
-        resizeHandle.style.transition = "opacity 0.15s ease";
-        resizeHandle.style.opacity = "0";
-        setTimeout(() => {
-          resizeHandle.style.display = "none";
-        }, 150);
-        
-        // Set cursor to ew-resize
-        textElement.style.cursor = "ew-resize";
-        
-        document.addEventListener("mousemove", handleLeftResize);
-        document.addEventListener("mouseup", handleResizeUp);
-      }
-      // Check if click is near right border (within 8px)
-      else if (x >= width - 8) {
-        e.preventDefault();
-        e.stopPropagation();
-        
-        // Kill color panel during width resize
-        killColorPanel();
-        
-        resizing = true;
-        resizeStartX = e.clientX;
-        resizeStartScale = textElement.offsetWidth;
-        
-        // Hide scaling gizmo during resize with smooth animation
-        resizeHandle.style.transition = "opacity 0.15s ease";
-        resizeHandle.style.opacity = "0";
-        setTimeout(() => {
-          resizeHandle.style.display = "none";
-        }, 150);
-        
-        // Set cursor to ew-resize
-        textElement.style.cursor = "ew-resize";
-        
-        document.addEventListener("mousemove", handleRightResize);
-        document.addEventListener("mouseup", handleResizeUp);
       }
     });
     
@@ -3010,7 +3073,7 @@ function createTextElement(
         
         // Reset cursor and show scaling gizmo again after resize
         textElement.style.cursor = "";
-        if (isSelected) {
+        if (container.dataset.selected === "true") {
           resizeHandle.style.display = "flex";
           resizeHandle.style.opacity = "0";
           
@@ -3036,7 +3099,11 @@ function createTextElement(
         if (window.MassSelection && window.MassSelection.selectedCount > 0) {
           window.MassSelection.clear();
         }
-        selectText();            // keeps outline, selection state, id, restores panel
+        if (container.dataset.selected !== "true") {
+          selectText();            // keeps outline, selection state, id, restores panel
+        } else if (!window.wbeColorPanel) {
+          safeReshowColorPicker(id, 0);
+        }
       }
     }
     
@@ -3064,7 +3131,23 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
     
     // Создаем новый текст в world coordinates
     const textId = `wbe-text-${Date.now()}`;
-    const container = createTextElement(textId, autoEdit ? "" : "Двойной клик для редактирования", worldPos.x, worldPos.y, DEFAULT_TEXT_SCALE, DEFAULT_TEXT_COLOR, DEFAULT_BACKGROUND_COLOR, null, DEFAULT_BORDER_WIDTH, DEFAULT_FONT_WEIGHT, DEFAULT_FONT_STYLE, DEFAULT_TEXT_ALIGN, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, null);
+    const container = createTextElement({
+      id: textId,
+      text: autoEdit ? "" : "Двойной клик для редактирования",
+      left: worldPos.x,
+      top: worldPos.y,
+      scale: DEFAULT_TEXT_SCALE,
+      color: DEFAULT_TEXT_COLOR,
+      backgroundColor: DEFAULT_BACKGROUND_COLOR,
+      borderColor: null,
+      borderWidth: DEFAULT_BORDER_WIDTH,
+      fontWeight: DEFAULT_FONT_WEIGHT,
+      fontStyle: DEFAULT_FONT_STYLE,
+      textAlign: DEFAULT_TEXT_ALIGN,
+      fontFamily: DEFAULT_FONT_FAMILY,
+      fontSize: DEFAULT_FONT_SIZE,
+      width: null
+    });
     if (!container) return;
     const textEl = container.querySelector(".wbe-canvas-text");
     if (!textEl) return;
@@ -3090,18 +3173,22 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
     
     // LOG: Track main text creation with z-index
     const zIndex = ZIndexManager.get(textId);
-    console.log(`[Text Creation] ID: ${textId} | z-index: ${zIndex} (addTextToCanvas)`);
+    //console.log(`[Text Creation] ID: ${textId} | z-index: ${zIndex} (addTextToCanvas)`);
     if (autoEdit) {
-      // Select the text element first
+      // Get click-target for event dispatching
+      const clickTarget = container.querySelector('.wbe-text-click-target');
+      if (!clickTarget) return;
+      
+      // Select the text element first - dispatch on click-target (not container)
       const selectEvent = new MouseEvent("mousedown", {
         bubbles: true,
         cancelable: true,
         clientX: clickX,
         clientY: clickY
       });
-      container.dispatchEvent(selectEvent);
+      clickTarget.dispatchEvent(selectEvent);
       
-      // Then trigger edit mode
+      // Then trigger edit mode - dispatch on click-target (where dblclick listener is)
       setTimeout(() => {
         const editEvent = new MouseEvent("dblclick", {
           bubbles: true,
@@ -3109,7 +3196,7 @@ async function addTextToCanvas(clickX, clickY, autoEdit = false) {
           clientX: clickX,
           clientY: clickY
         });
-        textEl.dispatchEvent(editEvent);
+        clickTarget.dispatchEvent(editEvent);
       }, 100);
     }
     
@@ -3231,19 +3318,24 @@ async function setAllTexts(texts) {
               }
             } else {
               // Создаем новый элемент
-              const createdContainer = TextTools.createTextElement(
-                id,
-                textData.backgroundColor,
-                textData.borderColor,
-                textData.borderWidth,
-                textData.fontWeight,
-                textData.fontStyle,
-                textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
-                textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
-                textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
-                textData.width,
-                textData.zIndex ?? null // Use null instead of undefined so default parameter works
-              );
+              const createdContainer = TextTools.createTextElement({
+                id: id,
+                text: textData.text,
+                left: textData.left,
+                top: textData.top,
+                scale: textData.scale,
+                color: textData.color,
+                backgroundColor: textData.backgroundColor,
+                borderColor: textData.borderColor,
+                borderWidth: textData.borderWidth,
+                fontWeight: textData.fontWeight,
+                fontStyle: textData.fontStyle,
+                textAlign: textData.textAlign || TextTools.DEFAULT_TEXT_ALIGN,
+                fontFamily: textData.fontFamily || TextTools.DEFAULT_FONT_FAMILY,
+                fontSize: textData.fontSize || TextTools.DEFAULT_FONT_SIZE,
+                width: textData.width,
+                rank: textData.rank
+              });
 
               // Apply color to newly created element (background already set in createTextElement via span)
               const created = createdContainer || document.getElementById(id);
@@ -3287,7 +3379,8 @@ async function setAllTexts(texts) {
           });
         }
 
-        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts });
+        // CRITICAL FIX: Always send full sync to prevent "ghost" texts in Player cache
+        game.socket.emit(`module.${MODID}`, { type: "textUpdate", texts, isFullSync: true });
       } else {
         // Игрок отправляет запрос GM через сокет
         // CRITICAL FIX: Добавить rank из Manager для всех текстов без rank
@@ -3394,24 +3487,24 @@ async function setAllTexts(texts) {
               }
             } else {
               // Создаем новый элемент
-              const createdContainer = createTextElement(
-                id,
-                textData.text,
-                textData.left,
-                textData.top,
-                textData.scale,
-                textData.color || DEFAULT_TEXT_COLOR,
-                textData.backgroundColor || DEFAULT_BACKGROUND_COLOR,
-                textData.borderColor || null,
-                textData.borderWidth ?? DEFAULT_BORDER_WIDTH,
-                textData.fontWeight || DEFAULT_FONT_WEIGHT,
-                textData.fontStyle || DEFAULT_FONT_STYLE,
-                textData.textAlign || DEFAULT_TEXT_ALIGN,
-                textData.fontFamily || DEFAULT_FONT_FAMILY,
-                textData.fontSize || DEFAULT_FONT_SIZE,
-                textData.width ?? null,
-                textData.zIndex // Pass existing z-index
-              );
+              const createdContainer = createTextElement({
+                id: id,
+                text: textData.text,
+                left: textData.left,
+                top: textData.top,
+                scale: textData.scale,
+                color: textData.color || DEFAULT_TEXT_COLOR,
+                backgroundColor: textData.backgroundColor || DEFAULT_BACKGROUND_COLOR,
+                borderColor: textData.borderColor || null,
+                borderWidth: textData.borderWidth ?? DEFAULT_BORDER_WIDTH,
+                fontWeight: textData.fontWeight || DEFAULT_FONT_WEIGHT,
+                fontStyle: textData.fontStyle || DEFAULT_FONT_STYLE,
+                textAlign: textData.textAlign || DEFAULT_TEXT_ALIGN,
+                fontFamily: textData.fontFamily || DEFAULT_FONT_FAMILY,
+                fontSize: textData.fontSize || DEFAULT_FONT_SIZE,
+                width: textData.width ?? null,
+                rank: textData.rank
+              });
               
               if (createdContainer) {
                 const textElement = createdContainer.querySelector(".wbe-canvas-text");
@@ -3637,6 +3730,201 @@ function setupTextKeyboardShortcuts() {
     }
   });
 }
+
+/**
+ * Install global text selection handler (like images)
+ * Single handler for ALL texts - manages selection through textRegistry
+ */
+function installGlobalTextSelectionHandler() {
+  if (globalTextSelectionHandlerInstalled) return;
+
+  document.addEventListener("mousedown", (e) => {
+    const handlerStartTime = performance.now();
+    const handlerId = `TEXT-${handlerStartTime.toFixed(3)}`;
+    
+    if (e.button !== 0) return;
+
+    wbeLog(handlerId, 'TEXT HANDLER START', {
+      target: e.target?.className || 'none',
+      clientX: e.clientX,
+      clientY: e.clientY
+    });
+
+    // Skip if clicking on color panel
+    if (window.wbeColorPanel && window.wbeColorPanel.contains(e.target)) {
+      wbeLog(handlerId, 'TEXT HANDLER: Clicked on color panel, returning');
+      return;
+    }
+
+    // Find which text was clicked (if any) using registry
+    let clickedTextId = null;
+    let clickedTextData = null;
+
+    // Temporarily enable pointer-events on ALL text click-targets for hit detection
+    const layer = document.getElementById('whiteboard-experience-layer') ||
+                  document.querySelector('.wbe-layer') || 
+                  document.getElementById('board')?.parentElement?.querySelector('#whiteboard-experience-layer') ||
+                  document.querySelector('[class*="wbe-layer"]');
+    const textPointerEventsMap = new Map();
+
+    if (layer) {
+      for (const [textId, textData] of textRegistry) {
+        const container = textData.container;
+        
+        // Skip locked or mass-selected texts
+        if ((container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) ||
+            container.classList.contains("wbe-mass-selected")) {
+          continue;
+        }
+
+        const clickTarget = textData.clickTarget;
+        if (clickTarget) {
+          const originalPointerEvents = clickTarget.style.pointerEvents;
+          textPointerEventsMap.set(textId, originalPointerEvents);
+          clickTarget.style.setProperty("pointer-events", "auto", "important");
+        }
+      }
+    }
+
+    // Use elementsFromPoint to check z-order
+    const elementsAtPoint = document.elementsFromPoint(e.clientX, e.clientY);
+    
+    // Find topmost text (lowest index in elementsAtPoint = highest z-index)
+    // Same algorithm as images - iterate elementsAtPoint, not registry
+    for (let i = 0; i < elementsAtPoint.length; i++) {
+      const el = elementsAtPoint[i];
+      
+      // Check if this element belongs to a text
+      const textContainer = el.closest('.wbe-canvas-text-container');
+      if (textContainer) {
+        const id = textContainer.id;
+        const textData = textRegistry.get(id);
+        
+        console.log(`[GLOBAL TEXT HANDLER] Found text at index ${i}: ${id.slice(-6)}, locked=${!!(textContainer.dataset.lockedBy && textContainer.dataset.lockedBy !== game.user.id)}, massSelected=${textContainer.classList.contains("wbe-mass-selected")}`);
+        
+        // Validate (skip locked, mass-selected)
+        if (textData &&
+            !(textContainer.dataset.lockedBy && textContainer.dataset.lockedBy !== game.user.id) &&
+            !textContainer.classList.contains("wbe-mass-selected")) {
+          
+          // Found topmost valid text (first in elementsAtPoint = highest z-index)
+          clickedTextId = id;
+          clickedTextData = textData;
+          console.log(`[GLOBAL TEXT HANDLER] Selected topmost text: ${id.slice(-6)}`);
+          break; // Stop at first valid text (topmost)
+        }
+      }
+    }
+    
+    console.log(`[GLOBAL TEXT HANDLER] Final clickedTextId: ${clickedTextId ? clickedTextId.slice(-6) : 'none'}`);
+
+    // Check if image is on top (compare with text position if text was found)
+    const imageIndex = elementsAtPoint.findIndex(el => 
+      el.classList.contains('wbe-image-click-target') || 
+      el.classList.contains('wbe-canvas-image-container')
+    );
+
+    // If we found a text, check if any image is higher (lower index = higher z-index)
+    let textIsOnTop = false;
+    if (clickedTextId) {
+      const textIndex = elementsAtPoint.findIndex(el => 
+        el === clickedTextData.container || clickedTextData.container.contains(el)
+      );
+      textIsOnTop = textIndex !== -1 && (imageIndex === -1 || textIndex < imageIndex);
+    }
+
+    if (textIsOnTop) {
+      const container = clickedTextData.container;
+      
+      // Skip locked texts
+      if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
+        e.preventDefault();
+        e.stopPropagation();
+        restorePointerEvents(textPointerEventsMap);
+        return;
+      }
+
+      // PREVENT SINGLE CLICK SELECTION OF MASS-SELECTED TEXT
+      if (container.classList.contains("wbe-mass-selected")) {
+        e.preventDefault();
+        e.stopPropagation();
+        restorePointerEvents(textPointerEventsMap);
+        return;
+      }
+
+      if (container.dataset.selected !== "true") {
+        // First click - select text
+        // NOTE: DON'T block event - let drag handler also receive it for auto-select
+        // This allows drag to work immediately after paste without separate click
+        
+        const selectStartTime = performance.now();
+        wbeLog(handlerId, 'TEXT HANDLER: Calling selectFn()', { textId: clickedTextId.slice(-6) });
+        
+        // CLEAR MASS SELECTION
+        if (window.MassSelection && window.MassSelection.selectedCount > 0) {
+          window.MassSelection.clear();
+        }
+
+        clickedTextData.selectFn();
+        
+        const selectEndTime = performance.now();
+        wbeLog(handlerId, 'TEXT HANDLER: selectFn() completed', {
+          textId: clickedTextId.slice(-6),
+          duration: (selectEndTime - selectStartTime).toFixed(3),
+          selectedTextId: window.TextTools?.selectedTextId?.slice(-6) || 'none',
+          stoppedPropagation: false
+        });
+
+        // Restore pointer events (exclude selected text)
+        restorePointerEvents(textPointerEventsMap, clickedTextId);
+        // Don't return - let event propagate to drag handler
+      } else {
+        // Already selected - let drag handler receive event
+        restorePointerEvents(textPointerEventsMap, clickedTextId);
+        if (!window.wbeColorPanel) {
+          safeReshowColorPicker(clickedTextId, 0);
+        }
+        return;
+      }
+    } else {
+      // Clicked elsewhere - deselect all texts
+      if (skipNextTextDeselect) {
+        skipNextTextDeselect = false;
+        restorePointerEvents(textPointerEventsMap);
+        return;
+      }
+
+      for (const [textId, textData] of textRegistry) {
+        if (textData.container.dataset.selected === "true") {
+          textData.deselectFn();
+        }
+      }
+
+      restorePointerEvents(textPointerEventsMap);
+    }
+
+    // Helper: restore pointer-events
+    function restorePointerEvents(pointerEventsMap, excludeId = null) {
+      for (const [textId, originalPointerEvents] of pointerEventsMap) {
+        if (textId === excludeId) continue; // Keep selected text's pointer-events
+        
+        const textData = textRegistry.get(textId);
+        if (textData && textData.clickTarget) {
+          if (originalPointerEvents) {
+            textData.clickTarget.style.setProperty("pointer-events", originalPointerEvents, "important");
+          } else {
+            textData.clickTarget.style.removeProperty("pointer-events");
+          }
+        }
+      }
+    }
+  }, true);
+
+  globalTextSelectionHandlerInstalled = true;
+}
+
+// Install global text selection handler once
+installGlobalTextSelectionHandler();
 
 export const TextTools = {
   // UI and actions
