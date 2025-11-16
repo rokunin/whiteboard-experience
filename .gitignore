@@ -16,3 +16,5 @@ test.txt
 browser-test-image.js
 test-results.json
 scripts/whiteboard-experience.code-workspace
+/.dev
+

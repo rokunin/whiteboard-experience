@@ -397,7 +397,6 @@ function handleUnfreezeAction(container) {
         }
 
         console.log('[handleUnfreezeAction] Unfreezing image:', container.id);
-
         hideFrozenSelection(container);
         hideUnfreezeIcon(container);
 
@@ -409,7 +408,6 @@ function handleUnfreezeAction(container) {
         }, 50);
 
         console.log('[handleUnfreezeAction] Successfully unfroze image:', container.id);
-
     } catch (error) {
         console.error('[handleUnfreezeAction] Failed to unfreeze image:', error);
     }
@@ -420,7 +418,6 @@ function handleUnfreezeAction(container) {
  */
 function reinitializeUnfreezeIcons() {
     console.log('[reinitializeUnfreezeIcons] Re-initializing unfreeze icons...');
-
     const frozenImages = document.querySelectorAll('.wbe-canvas-image-container.wbe-image-frozen');
     let reinitCount = 0;
 
@@ -434,7 +431,6 @@ function reinitializeUnfreezeIcons() {
     });
 
     console.log(`[reinitializeUnfreezeIcons] Re-initialized ${reinitCount} unfreeze icons`);
-    return reinitCount;
 }
 
 /**
