@@ -1453,7 +1453,15 @@ class WhiteboardLayer {
 
     if (handles.top || handles.right || handles.bottom || handles.left) {
       // Rect handles - position on boundaries of visible area
-      CropGizmoManager.updateRectHandlesPosition(handles, dims);
+      // SPECIAL CASE: In crop mode, container is FULL size, so we need to pass dims.left/top
+      // In normal mode, container is shrunk to visible area, so dims.left/top should be 0
+      if (obj.isCropping) {
+        // Crop mode: container = full size, gizmos need offset
+        CropGizmoManager.updateRectHandlesPosition(handles, dims);
+      } else {
+        // Normal mode: container = visible area, no offset needed
+        CropGizmoManager.updateRectHandlesPosition(handles, { width: dims.width, height: dims.height, left: 0, top: 0 });
+      }
     } else if (handles.circleResize) {
       // SPECIAL CASE: Circle in crop mode - position relative to FULL image, not dims
       if (obj.isCropping) {
@@ -1903,6 +1911,11 @@ class WhiteboardLayer {
     this._selectionOverlay.style.width = `${finalWidth}px`;
     this._selectionOverlay.style.height = `${finalHeight}px`;
     this._selectionOverlay.setAttribute('viewBox', `0 0 ${finalWidth} ${finalHeight}`);
+    
+    // Apply rotation to match object rotation
+    const rotation = obj.rotation || 0;
+    this._selectionOverlay.style.transform = rotation !== 0 ? `rotate(${rotation}deg)` : '';
+    this._selectionOverlay.style.transformOrigin = 'center';
     
     // Update rect dimensions (selection overlay is always rectangular)
     // Hide selection rect in crop mode - purple crop border is shown instead
@@ -2416,8 +2429,6 @@ class WhiteboardLayer {
       const fullWidth = Math.round(baseWidth * scale);
       const fullHeight = Math.round(baseHeight * scale);
       
-
-      
       if (roundedWidth > 0 && roundedHeight > 0) {
         // Container = visible area size, positioned to compensate for left/top crop
         // This keeps the VISIBLE part of the image in the same screen position
@@ -2459,10 +2470,12 @@ class WhiteboardLayer {
         
       }
       
-      // Update rect handles position (pass rounded dims)
+      // Update rect handles position
+      // CRITICAL: Pass left: 0, top: 0 because container is already shifted by roundedLeft/roundedTop
+      // Gizmos are inside container, so they don't need additional offset
       const handles = this._cropHandles.get(imageId);
       if (handles && (handles.top || handles.right || handles.bottom || handles.left)) {
-        CropGizmoManager.updateRectHandlesPosition(handles, { width: roundedWidth, height: roundedHeight, left: roundedLeft, top: roundedTop });
+        CropGizmoManager.updateRectHandlesPosition(handles, { width: roundedWidth, height: roundedHeight, left: 0, top: 0 });
       }
     } else if (maskType === 'circle') {
       // Circle crop: update clip-path and handle position
@@ -2798,10 +2811,11 @@ class WhiteboardLayer {
         // CRITICAL: Update scale even during resize for smooth scaling
         // Scale must be updated during resize, otherwise scaling will be jerky
         // Unification: transform on container (like images) for consistent DOM structure
-        if (!changes || 'scale' in changes) {
+        if (!changes || 'scale' in changes || 'rotation' in changes) {
           const scale = obj.scale !== undefined ? obj.scale : 1;
-          container.style.transform = `scale(${scale})`;
-          container.style.transformOrigin = 'top left';
+          const rotation = obj.rotation || 0;
+          container.style.transform = `scale(${scale}) rotate(${rotation}deg)`;
+          container.style.transformOrigin = 'center';
         }
 
         // Exit early - don't apply any other styles during edit/resize
@@ -2908,10 +2922,11 @@ class WhiteboardLayer {
 
       // Unification: transform on container (like images) for consistent DOM structure
       // Do NOT apply scale to textElement - scale is now on container
-      if (!changes || 'scale' in changes) {
+      if (!changes || 'scale' in changes || 'rotation' in changes) {
         const scale = obj.scale !== undefined ? obj.scale : 1;
-        container.style.transform = `scale(${scale})`;
-        container.style.transformOrigin = 'top left';
+        const rotation = obj.rotation || 0;
+        container.style.transform = `scale(${scale}) rotate(${rotation}deg)`;
+        container.style.transformOrigin = 'center';
       }
 
       // Note: outline is applied to container (above) to prevent scaling with transform
@@ -3058,6 +3073,14 @@ class WhiteboardLayer {
         container.style.top = `${Math.round(obj.y) + (dims.top || 0)}px`;
       }
       
+      // Apply rotation to container (scale is applied via width/height, not transform)
+      // CRITICAL: Must update rotation when it changes
+      if (!changes || 'rotation' in changes) {
+        const rotation = obj.rotation || 0;
+        container.style.transform = rotation !== 0 ? `rotate(${rotation}deg)` : '';
+        container.style.transformOrigin = 'center';
+      }
+      
       // Update imageWrapper size and border-radius to clip the image
       // CRITICAL: imageWrapper must match container size (visible area) to prevent clicking outside crop
       // clip-path on imageElement already clips the image, so imageWrapper should match visible area
@@ -3116,11 +3139,11 @@ class WhiteboardLayer {
         // BUT in crop mode, permanentBorder is hidden, so no offset needed
         if (dims.width > 0 && dims.height > 0) {
           if (obj.isCropping) {
-            // In crop mode: no offset (permanentBorder is hidden)
+            // In crop mode: container is full size, selection border shows crop boundaries
             selectionBorder.style.width = `${dims.width}px`;
             selectionBorder.style.height = `${dims.height}px`;
-            selectionBorder.style.left = `0px`;
-            selectionBorder.style.top = `0px`;
+            selectionBorder.style.left = `${dims.left || 0}px`;
+            selectionBorder.style.top = `${dims.top || 0}px`;
           } else {
             // Normal mode: expand by borderWidth to be outside permanentBorder
             // Round to prevent subpixel jittering
@@ -4138,6 +4161,7 @@ class WhiteboardText extends WhiteboardObject {
     this.borderWidth = data.borderWidth !== undefined ? data.borderWidth : DEFAULT_BORDER_WIDTH;
     this.textWidth = data.textWidth || null; // null = auto width, number = fixed width in px
     this.scale = data.scale !== undefined ? data.scale : 1;
+    this.rotation = data.rotation || 0;
 
     // Callback for updating registry (set by Registry when object is registered)
     this._updateCallback = null;
@@ -4164,8 +4188,8 @@ class WhiteboardText extends WhiteboardObject {
             position: absolute;
             left: ${this.x}px;
             top: ${this.y}px;
-            transform: scale(${scale});
-            transform-origin: top left;
+            transform: scale(${scale}) rotate(${this.rotation || 0}deg);
+            transform-origin: center;
             cursor: inherit;
             user-select: none;
         `;
@@ -4208,9 +4232,12 @@ class WhiteboardText extends WhiteboardObject {
     if (this.text && /<[a-z][\s\S]*>/i.test(this.text)) {
       // HTML markup detected - use innerHTML with sanitization
       textSpan.innerHTML = sanitizeHtml(this.text);
-    } else {
+    } else if (this.text) {
       // Plain text - use textContent for safety
-      textSpan.textContent = this.text || '';
+      textSpan.textContent = this.text;
+    } else {
+      // Empty text - add <br> so caret is visible when editing
+      textSpan.innerHTML = '<br>';
     }
     textSpan.contentEditable = "false";
     let spanBgColor;
@@ -4233,6 +4260,8 @@ class WhiteboardText extends WhiteboardObject {
             vertical-align: top;
             resize: none;
             user-select: none;
+            caret-color: currentColor;
+            min-height: 1em;
         `;
     textElement.appendChild(textSpan);
 
@@ -4260,8 +4289,8 @@ class WhiteboardText extends WhiteboardObject {
         const isPanelClick = relatedTarget && (
           relatedTarget.closest('.wbe-text-styling-panel') ||
           relatedTarget.closest('.wbe-image-control-panel') ||
-          relatedTarget.closest('.wbe-text-styling-subpanel') ||
-          relatedTarget.closest('.wbe-image-control-subpanel')
+          relatedTarget.closest('.wbe-color-subpanel') ||
+          relatedTarget.closest('.wbe-rotation-subpanel')
         );
         
         // If blur was caused by panel click, restore focus and don't finish editing
@@ -4278,7 +4307,10 @@ class WhiteboardText extends WhiteboardObject {
         // Save HTML markup with sanitization (like in Miro)
         // If HTML exists - save innerHTML, otherwise textContent for plain text
         const content = textSpan.innerHTML.trim();
-        if (content && /<[a-z][\s\S]*>/i.test(content)) {
+        // Check if content is just <br>, zero-width space, or nbsp (empty placeholder) - save as empty string
+        if (content === '<br>' || content === '<br/>' || content === '<br />' || content === '\u200B' || content === '​' || content === '&nbsp;' || content === '\u00A0' || content === ' ') {
+          this.text = '';
+        } else if (content && /<[a-z][\s\S]*>/i.test(content)) {
           // HTML markup detected - save with sanitization
           this.text = sanitizeHtml(content);
         } else {
@@ -4355,7 +4387,6 @@ class WhiteboardText extends WhiteboardObject {
       pointer-events: none;
       display: none;
       z-index: 1000;
-      transform-origin: top left;
     `;
 
     // Click target for event interception
@@ -4396,7 +4427,8 @@ class WhiteboardText extends WhiteboardObject {
       borderOpacity: this.borderOpacity,
       borderWidth: this.borderWidth,
       textWidth: this.textWidth,
-      scale: this.scale
+      scale: this.scale,
+      rotation: this.rotation
     };
   }
 
@@ -4590,7 +4622,7 @@ class WhiteboardImage extends WhiteboardObject {
   applyScaleTransform(container, scale) {
     // // Image-specific logic
     container.style.transform = `rotate(${this.rotation || 0}deg)`;
-    container.style.transformOrigin = 'top left';
+    container.style.transformOrigin = 'center';
     const imageElement = container.querySelector('.wbe-canvas-image');
     if (imageElement) {
       // Round to prevent subpixel jittering
@@ -4880,6 +4912,15 @@ class WhiteboardImage extends WhiteboardObject {
       return;
     }
 
+    // Reset rotation before entering crop mode (crop doesn't support rotated images)
+    // This is KISS approach - crop always works in non-rotated coordinate system
+    if (this.rotation && this.rotation !== 0) {
+      registry.update(this.id, {
+        rotation: 0
+      }, 'local');
+      this.rotation = 0;
+    }
+
     // Set crop state via Registry
     registry.update(this.id, {
       isCropping: true
@@ -5094,12 +5135,16 @@ class WhiteboardImage extends WhiteboardObject {
           cropPreview.remove();
         }
         
-        // 5. Selection border = full size with purple outline
+        // 5. Selection border = cropped area with purple outline (shows current crop boundaries)
         if (selectionBorder) {
-          selectionBorder.style.width = `${fullWidth}px`;
-          selectionBorder.style.height = `${fullHeight}px`;
-          selectionBorder.style.left = '0px';
-          selectionBorder.style.top = '0px';
+          const croppedWidth = Math.round((baseWidth - crop.left - crop.right) * scale);
+          const croppedHeight = Math.round((baseHeight - crop.top - crop.bottom) * scale);
+          const cropLeft = Math.round(crop.left * scale);
+          const cropTop = Math.round(crop.top * scale);
+          selectionBorder.style.width = `${croppedWidth}px`;
+          selectionBorder.style.height = `${croppedHeight}px`;
+          selectionBorder.style.left = `${cropLeft}px`;
+          selectionBorder.style.top = `${cropTop}px`;
         }
         
         // 6. Click target = full size
@@ -5373,32 +5418,35 @@ class CropGizmoManager {
     if (!handles || !dims) return;
     if (dims.width === 0 || dims.height === 0) return;
 
-    // CRITICAL: Handles are added to container, which has dimensions dims.width × dims.height
-    // Position handles on the boundaries of the visible area (already scaled)
+    // CRITICAL: Handles are positioned relative to visible area
+    // dims.left/top are offsets when container is full-size (crop mode)
+    // dims.left/top are 0 when container is shrunk to visible area (normal mode)
     const halfHandleSize = this.HANDLE_SIZE / 2;
+    const offsetLeft = dims.left || 0;
+    const offsetTop = dims.top || 0;
 
     // Top handle: center of top edge
     if (handles.top) {
-      handles.top.style.left = `${dims.width / 2 - halfHandleSize}px`;
-      handles.top.style.top = `${-halfHandleSize}px`; // Half outside for better visibility
+      handles.top.style.left = `${offsetLeft + dims.width / 2 - halfHandleSize}px`;
+      handles.top.style.top = `${offsetTop - halfHandleSize}px`; // Half outside for better visibility
     }
 
     // Right handle: center of right edge
     if (handles.right) {
-      handles.right.style.left = `${dims.width - halfHandleSize}px`; // Half outside for better visibility
-      handles.right.style.top = `${dims.height / 2 - halfHandleSize}px`;
+      handles.right.style.left = `${offsetLeft + dims.width - halfHandleSize}px`; // Half outside for better visibility
+      handles.right.style.top = `${offsetTop + dims.height / 2 - halfHandleSize}px`;
     }
 
     // Bottom handle: center of bottom edge
     if (handles.bottom) {
-      handles.bottom.style.left = `${dims.width / 2 - halfHandleSize}px`;
-      handles.bottom.style.top = `${dims.height - halfHandleSize}px`; // Half outside for better visibility
+      handles.bottom.style.left = `${offsetLeft + dims.width / 2 - halfHandleSize}px`;
+      handles.bottom.style.top = `${offsetTop + dims.height - halfHandleSize}px`; // Half outside for better visibility
     }
 
     // Left handle: center of left edge
     if (handles.left) {
-      handles.left.style.left = `${-halfHandleSize}px`; // Half outside for better visibility
-      handles.left.style.top = `${dims.height / 2 - halfHandleSize}px`;
+      handles.left.style.left = `${offsetLeft - halfHandleSize}px`; // Half outside for better visibility
+      handles.left.style.top = `${offsetTop + dims.height / 2 - halfHandleSize}px`;
     }
   }
 
@@ -5773,7 +5821,7 @@ class TextStylingPanelView {
   render(data, onSubpanelOpen) {
     // Create panel DOM structure
     const panel = document.createElement("div");
-    panel.className = "wbe-color-picker-panel";
+    panel.className = "wbe-text-styling-panel";
     panel.style.cssText = `
             position: fixed;
             background: white;
@@ -5823,11 +5871,13 @@ class TextStylingPanelView {
       const textBtn = this.makeToolbarButton("Text", "fas fa-font", () => onSubpanelOpen("text", textBtn));
       const bgBtn = this.makeToolbarButton("Background", "fas fa-fill", () => onSubpanelOpen("background", bgBtn));
       const borderBtn = this.makeToolbarButton("Border", "fas fa-border-all", () => onSubpanelOpen("border", borderBtn));
+      const rotateBtn = this.makeToolbarButton("Rotate", "fas fa-sync-alt", () => onSubpanelOpen("rotation", rotateBtn));
       // Universal solution: setButtonActive is now called automatically in makeToolbarButton
       // These calls can be kept for clarity or removed - the result is the same
       toolbar.appendChild(textBtn);
       toolbar.appendChild(bgBtn);
       toolbar.appendChild(borderBtn);
+      toolbar.appendChild(rotateBtn);
     }
     panel.appendChild(toolbar);
     this.panel = panel;
@@ -5951,6 +6001,11 @@ class TextStylingController {
       borderColor,
       borderOpacity,
       borderWidth
+    }, 'local');
+  }
+  handleRotationChange(rotation) {
+    this.registry.update(this.textId, {
+      rotation
     }, 'local');
   }
 }
@@ -6467,6 +6522,167 @@ class BorderSubpanel {
 }
 
 // ==========================================
+// RotationSubpanel - Shared subpanel for rotation (text and image)
+// DRY: Single implementation for both object types
+// KISS: One slider with center at 0°, drag left/right to rotate
+// ==========================================
+class RotationSubpanel {
+  constructor(controller, currentRotation, uiHelpers) {
+    this.controller = controller;
+    this.currentRotation = currentRotation || 0;
+    this.uiHelpers = uiHelpers;
+    this.element = null;
+  }
+  render() {
+    const sub = document.createElement("div");
+    sub.className = "wbe-color-subpanel wbe-rotation-subpanel";
+    sub.style.cssText = `
+      position: absolute;
+      background: white;
+      border: 1px solid #dcdcdc;
+      border-radius: 12px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      pointer-events: auto;
+    `;
+
+    // Left rotation button (-90°)
+    const leftBtn = document.createElement("button");
+    leftBtn.type = "button";
+    leftBtn.title = "Rotate left 90°";
+    leftBtn.style.cssText = `
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: 1px solid #d0d0d0;
+      background: #f5f5f7;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    `;
+    const leftIcon = document.createElement("i");
+    leftIcon.className = "fas fa-undo";
+    leftIcon.style.cssText = "font-size: 14px; color: #333;";
+    leftBtn.appendChild(leftIcon);
+    sub.appendChild(leftBtn);
+
+    // Single slider: -180 to +180, center is 0
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "-180";
+    slider.max = "180";
+    slider.step = "1";
+    slider.value = String(Math.max(-180, Math.min(180, this.currentRotation)));
+    slider.style.cssText = "width: 140px; height: 6px;";
+    sub.appendChild(slider);
+
+    // Input field for exact degrees
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "-360";
+    input.max = "360";
+    input.step = "1";
+    input.value = String(this.currentRotation);
+    input.style.cssText = `
+      width: 55px;
+      padding: 5px 6px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      background: white;
+      font-size: 12px;
+      color: #333;
+      text-align: center;
+    `;
+    sub.appendChild(input);
+
+    const degLabel = document.createElement("span");
+    degLabel.textContent = "°";
+    degLabel.style.cssText = "font-size: 12px; color: #666; margin-left: -6px;";
+    sub.appendChild(degLabel);
+
+    // Right rotation button (+90°)
+    const rightBtn = document.createElement("button");
+    rightBtn.type = "button";
+    rightBtn.title = "Rotate right 90°";
+    rightBtn.style.cssText = `
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: 1px solid #d0d0d0;
+      background: #f5f5f7;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    `;
+    const rightIcon = document.createElement("i");
+    rightIcon.className = "fas fa-redo";
+    rightIcon.style.cssText = "font-size: 14px; color: #333;";
+    rightBtn.appendChild(rightIcon);
+    sub.appendChild(rightBtn);
+
+    // Reset button (0°)
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.title = "Reset rotation (0°)";
+    resetBtn.style.cssText = `
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: 1px solid #d0d0d0;
+      background: #f5f5f7;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+      margin-left: 4px;
+    `;
+    const resetIcon = document.createElement("i");
+    resetIcon.className = "fas fa-times";
+    resetIcon.style.cssText = "font-size: 14px; color: #333;";
+    resetBtn.appendChild(resetIcon);
+    sub.appendChild(resetBtn);
+
+    // Sync function
+    const sync = (newRotation) => {
+      let rotation = Number(newRotation) || 0;
+      rotation = Math.max(-360, Math.min(360, rotation));
+      
+      input.value = String(rotation);
+      slider.value = String(Math.max(-180, Math.min(180, rotation)));
+      
+      this.controller.handleRotationChange(rotation);
+    };
+
+    // Event handlers
+    leftBtn.addEventListener("click", () => sync((Number(input.value) || 0) - 90));
+    leftBtn.addEventListener("mouseenter", () => { leftBtn.style.background = "#e0ebff"; });
+    leftBtn.addEventListener("mouseleave", () => { leftBtn.style.background = "#f5f5f7"; });
+
+    rightBtn.addEventListener("click", () => sync((Number(input.value) || 0) + 90));
+    rightBtn.addEventListener("mouseenter", () => { rightBtn.style.background = "#e0ebff"; });
+    rightBtn.addEventListener("mouseleave", () => { rightBtn.style.background = "#f5f5f7"; });
+
+    resetBtn.addEventListener("click", () => sync(0));
+    resetBtn.addEventListener("mouseenter", () => { resetBtn.style.background = "#ffe0e0"; });
+    resetBtn.addEventListener("mouseleave", () => { resetBtn.style.background = "#f5f5f7"; });
+
+    slider.addEventListener("input", () => sync(Number(slider.value) || 0));
+    input.addEventListener("change", () => sync(Number(input.value) || 0));
+
+    this.element = sub;
+    return sub;
+  }
+}
+
+// ==========================================
 class TextStylingPanel {
   constructor(registry, layer) {
     this.registry = registry;
@@ -6534,6 +6750,9 @@ class TextStylingPanel {
           borderWidth: obj.borderWidth || DEFAULT_BORDER_WIDTH
         }, uiHelpers);
         subpanelElement = borderSubpanel.render();
+      } else if (type === "rotation") {
+        const rotationSubpanel = new RotationSubpanel(this.controller, obj.rotation || 0, uiHelpers);
+        subpanelElement = rotationSubpanel.render();
       }
       if (!subpanelElement) return;
       subpanelElement.style.opacity = "0";
@@ -7217,7 +7436,7 @@ class ImageControlPanelView {
   render(openSubpanelFn) {
     // Unification: use the same styles as the text panel
     const panel = document.createElement("div");
-    panel.className = "wbe-color-picker-panel"; // Same class for style unification
+    panel.className = "wbe-image-control-panel";
     panel.style.cssText = `
             position: fixed;
             background: white;
@@ -7263,6 +7482,12 @@ class ImageControlPanelView {
       if (openSubpanelFn) openSubpanelFn("border", borderBtn);
     });
     toolbar.appendChild(borderBtn);
+
+    // Rotate button - same icon as text panel for consistency
+    const rotateBtn = this.makeToolbarButton("Rotate", "fas fa-sync-alt", () => {
+      if (openSubpanelFn) openSubpanelFn("rotation", rotateBtn);
+    });
+    toolbar.appendChild(rotateBtn);
 
     // Lock button - icon from legacy code
     // Get frozen state from registry if available (passed via openSubpanelFn context)
@@ -7345,6 +7570,11 @@ class ImageControlController {
   handleLockChange(frozen) {
     this.registry.update(this.imageId, {
       frozen
+    }, 'local');
+  }
+  handleRotationChange(rotation) {
+    this.registry.update(this.imageId, {
+      rotation
     }, 'local');
   }
   
@@ -7635,6 +7865,9 @@ class ImageControlPanel {
           this.layer
         );
         subpanelElement = cropSubpanel;
+      } else if (type === "rotation") {
+        const rotationSubpanel = new RotationSubpanel(this.controller, obj.rotation || 0, uiHelpers);
+        subpanelElement = rotationSubpanel.render();
       }
       if (!subpanelElement) return;
       subpanelElement.style.opacity = "0";
@@ -10111,9 +10344,10 @@ class InteractionManager {
     if (element.closest('#ui-left') || 
         element.closest('#ui-right') || 
         element.closest('#ui-top') || 
-        element.closest('.wbe-color-picker-panel') || 
         element.closest('.wbe-text-styling-panel') || 
         element.closest('.wbe-image-control-panel') || 
+        element.closest('.wbe-color-subpanel') || 
+        element.closest('.wbe-rotation-subpanel') || 
         element.closest('.wbe-image-resize-handle') || 
         element.closest('.wbe-mass-selection-box')) {
       return true;
@@ -11024,14 +11258,29 @@ class InteractionManager {
     textElement.style.pointerEvents = "auto";
     textSpan.style.pointerEvents = "auto";
     textSpan.style.userSelect = "text";
+    
+    const textContent = textSpan.textContent || '';
+    const isEmpty = textContent.length === 0 || textSpan.innerHTML === '<br>';
+    
+    // For empty text: insert nbsp so caret is visible
+    if (isEmpty) {
+      textSpan.innerHTML = '&nbsp;';
+    }
+    
     textSpan.focus();
 
-    // Select all text for easy replacement
-    const range = document.createRange();
-    range.selectNodeContents(textSpan);
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
+    // For existing text - select all for easy replacement
+    // For empty text - just focus, caret will be at the end of nbsp
+    if (!isEmpty) {
+      requestAnimationFrame(() => {
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(textSpan);
+        selection.addRange(range);
+      });
+    }
+    
     console.log(`${MODULE_ID} | Started editing text: ${id}`);
   }
   _endEditText(id) {
@@ -11044,7 +11293,10 @@ class InteractionManager {
       // If HTML exists - save innerHTML, otherwise textContent for plain text
       const content = textSpan.innerHTML.trim();
       let newText;
-      if (content && /<[a-z][\s\S]*>/i.test(content)) {
+      // Check if content is just <br>, zero-width space, or nbsp (empty placeholder) - save as empty string
+      if (content === '<br>' || content === '<br/>' || content === '<br />' || content === '\u200B' || content === '​' || content === '&nbsp;' || content === '\u00A0' || content === ' ') {
+        newText = '';
+      } else if (content && /<[a-z][\s\S]*>/i.test(content)) {
         // HTML markup detected - save with sanitization
         newText = sanitizeHtml(content);
       } else {

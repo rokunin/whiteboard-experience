@@ -210,8 +210,8 @@ export class EventContext {
     return !!(
       target.closest('.wbe-text-styling-panel') ||
       target.closest('.wbe-image-control-panel') ||
-      target.closest('.wbe-text-styling-subpanel') ||
-      target.closest('.wbe-image-control-subpanel')
+      target.closest('.wbe-color-subpanel') ||
+      target.closest('.wbe-rotation-subpanel')
     );
   }
 

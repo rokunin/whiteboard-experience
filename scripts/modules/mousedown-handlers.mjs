@@ -54,10 +54,13 @@ export const PanelImmunityHandler = {
     }
     
     return !!(
+      target.closest('.wbe-color-picker-panel') ||
       target.closest('.wbe-text-styling-panel') ||
       target.closest('.wbe-image-control-panel') ||
       target.closest('.wbe-text-styling-subpanel') ||
-      target.closest('.wbe-image-control-subpanel')
+      target.closest('.wbe-image-control-subpanel') ||
+      target.closest('.wbe-color-subpanel') ||
+      target.closest('.wbe-rotation-subpanel')
     );
   },
 
@@ -328,16 +331,17 @@ export const MassSelectionStartHandler = {
 };
 
 /**
- * TextModeCreateHandler (priority 600)
+ * TextModeCreateHandler (priority 660)
  * 
  * Creates text at cursor position when in text mode and clicking on canvas or image.
  * If clicking on existing text, edits it instead of creating new.
+ * Priority above MassSelectionStartHandler (650) so T-cursor works even with toggle mode on.
  * 
  * Requirements: 3.5, 6.5
  */
 export const TextModeCreateHandler = {
   name: 'textModeCreate',
-  priority: 600,
+  priority: 660,
 
   /**
    * Check if in text mode and left click on non-UI element
