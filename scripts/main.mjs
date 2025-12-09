@@ -6552,7 +6552,7 @@ class RotationSubpanel {
     // Left rotation button (-90°)
     const leftBtn = document.createElement("button");
     leftBtn.type = "button";
-    leftBtn.title = "Rotate left 90°";
+    leftBtn.title = "Rotate left 15°";
     leftBtn.style.cssText = `
       width: 32px;
       height: 32px;
@@ -6608,7 +6608,7 @@ class RotationSubpanel {
     // Right rotation button (+90°)
     const rightBtn = document.createElement("button");
     rightBtn.type = "button";
-    rightBtn.title = "Rotate right 90°";
+    rightBtn.title = "Rotate right 15°";
     rightBtn.style.cssText = `
       width: 32px;
       height: 32px;
@@ -6645,7 +6645,7 @@ class RotationSubpanel {
       margin-left: 4px;
     `;
     const resetIcon = document.createElement("i");
-    resetIcon.className = "fas fa-times";
+    resetIcon.className = "fas fa-refresh";
     resetIcon.style.cssText = "font-size: 14px; color: #333;";
     resetBtn.appendChild(resetIcon);
     sub.appendChild(resetBtn);
@@ -6662,11 +6662,11 @@ class RotationSubpanel {
     };
 
     // Event handlers
-    leftBtn.addEventListener("click", () => sync((Number(input.value) || 0) - 90));
+    leftBtn.addEventListener("click", () => sync((Number(input.value) || 0) - 15));
     leftBtn.addEventListener("mouseenter", () => { leftBtn.style.background = "#e0ebff"; });
     leftBtn.addEventListener("mouseleave", () => { leftBtn.style.background = "#f5f5f7"; });
 
-    rightBtn.addEventListener("click", () => sync((Number(input.value) || 0) + 90));
+    rightBtn.addEventListener("click", () => sync((Number(input.value) || 0) + 15));
     rightBtn.addEventListener("mouseenter", () => { rightBtn.style.background = "#e0ebff"; });
     rightBtn.addEventListener("mouseleave", () => { rightBtn.style.background = "#f5f5f7"; });
 
