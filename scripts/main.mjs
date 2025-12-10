@@ -31,6 +31,10 @@ Hooks.once("ready", async () => {
   // Initialize whiteboard
   if (window.Whiteboard) {
     await window.Whiteboard.init();
+    
+    // Register color picker UI elements so clicks don't deselect objects
+    window.Whiteboard.registerUISelector('.pcr-app');
+    window.Whiteboard.registerUISelector('.wbe-color-swatches-popup');
   }
   console.log(`whiteboard-experience | Initialized`);
 });
@@ -39,6 +43,327 @@ Hooks.once("ready", async () => {
 import { HandlerResolver } from './modules/handler-resolver.mjs';
 import { EventContext } from './modules/event-context.mjs';
 import { getAllMouseDownHandlers } from './modules/mousedown-handlers.mjs';
+
+// Alignment guides - auto-initializes via Hooks.once('ready')
+import './modules/alignment-guides.mjs';
+
+// Shapes (primitives) - auto-initializes via Hooks.once('ready')
+import './modules/shapes.mjs';
+
+// WBE Floating Toolbar - независимый от Foundry тулбар
+import { initToolbar, registerTool } from './modules/wbe-toolbar.mjs';
+
+// ==========================================
+// Pickr - Color Picker Library (@simonwep/pickr)
+// ==========================================
+let _pickrLoaded = false;
+let _pickrLoading = null;
+
+/**
+ * Load Pickr library from CDN
+ * @returns {Promise<void>}
+ */
+async function loadPickr() {
+  if (_pickrLoaded && window.Pickr) return;
+  if (_pickrLoading) return _pickrLoading;
+
+  _pickrLoading = new Promise((resolve, reject) => {
+    // Load nano theme CSS
+    if (!document.getElementById('pickr-css')) {
+      const link = document.createElement('link');
+      link.id = 'pickr-css';
+      link.rel = 'stylesheet';
+      link.href = 'https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/themes/nano.min.css';
+      document.head.appendChild(link);
+    }
+
+    // Add custom WBE styles for pickr
+    if (!document.getElementById('wbe-pickr-css')) {
+      const style = document.createElement('style');
+      style.id = 'wbe-pickr-css';
+      style.textContent = `
+        .pcr-app {
+          z-index: 100000 !important;
+          border-radius: 12px !important;
+          box-shadow: 0 12px 32px rgba(0,0,0,0.25) !important;
+          font-family: system-ui, -apple-system, sans-serif !important;
+        }
+        .pcr-app * {
+          box-sizing: border-box !important;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    // Load JS
+    if (!document.getElementById('pickr-js')) {
+      const script = document.createElement('script');
+      script.id = 'pickr-js';
+      script.src = 'https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/pickr.min.js';
+      script.onload = () => {
+        _pickrLoaded = true;
+        console.log(`${MODULE_ID} | Pickr loaded`);
+        resolve();
+      };
+      script.onerror = () => reject(new Error('Failed to load Pickr'));
+      document.head.appendChild(script);
+    } else {
+      _pickrLoaded = true;
+      resolve();
+    }
+  });
+
+  return _pickrLoading;
+}
+
+// Load Pickr early
+loadPickr().catch(err => console.warn(`${MODULE_ID} | ${err.message}`));
+
+// Default color swatches (Miro-style palette + extended)
+const DEFAULT_SWATCHES = [
+  // Row 1: Yellow + white
+  '#fff6b6', '#ffdc4a', '#af7e04', '#FFFFFF',
+  // Row 2: Orange + light gray
+  '#f8d3af', '#fe9f4d', '#9b4a08', '#e7e7e7',
+  // Row 3: Pink/red + gray
+  '#ffc6c6', '#ff6464', '#bd0a0a', '#b0b0b0',
+  // Row 4: Green + dark gray
+  '#adf0c7', '#2dc75c', '#067429', '#595959',
+  // Row 5: Blue + black
+  '#c6dcff', '#659df2', '#305bab', '#1a1a1a',
+  // Row 6: Purple + red
+  '#dedaff', '#8f7fee', '#6631d7', '#fd0101'
+];
+
+// Custom swatches added by user (persisted in localStorage)
+let _customSwatches = [];
+try {
+  const saved = localStorage.getItem('wbe-custom-swatches');
+  if (saved) _customSwatches = JSON.parse(saved);
+} catch {}
+
+function _saveCustomSwatches() {
+  try {
+    localStorage.setItem('wbe-custom-swatches', JSON.stringify(_customSwatches));
+  } catch {}
+}
+
+/**
+ * Attach two-level color picker to a swatch element
+ * Level 1: Quick swatches panel with "+" button
+ * Level 2: Full Pickr (opens on "+" click)
+ * @param {HTMLElement} swatch - Swatch element to click
+ * @param {string} initialColor - Initial color hex
+ * @param {Function} onChange - Callback (hexColor) => void
+ */
+function attachColorPicker(swatch, initialColor, onChange) {
+  let popup = null;
+  let picker = null;
+  let currentColor = initialColor;
+
+  swatch.addEventListener('click', (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+
+    // If popup exists, close it (toggle)
+    if (popup) {
+      closePopup();
+      return;
+    }
+
+    // Create quick swatches popup
+    const rect = swatch.getBoundingClientRect();
+    popup = document.createElement('div');
+    popup.className = 'wbe-color-swatches-popup';
+    popup.style.cssText = `
+      position: fixed;
+      left: ${rect.left}px;
+      top: ${rect.bottom + 6}px;
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+      z-index: 100000;
+      display: grid;
+      grid-template-columns: repeat(8, 24px);
+      gap: 4px;
+    `;
+
+    // Add default swatches
+    DEFAULT_SWATCHES.forEach(color => {
+      const sw = createSwatchButton(color);
+      popup.appendChild(sw);
+    });
+
+    // Add custom swatches
+    _customSwatches.forEach(color => {
+      const sw = createSwatchButton(color);
+      popup.appendChild(sw);
+    });
+
+    // Add "+" button to open full picker
+    const addBtn = document.createElement('button');
+    addBtn.innerHTML = '<i class="fas fa-plus" style="font-size: 10px; color: #666;"></i>';
+    addBtn.title = 'Custom color';
+    addBtn.style.cssText = `
+      all: unset;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      border: 1px dashed #ccc;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #f9f9f9;
+    `;
+    addBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openFullPicker();
+    });
+    popup.appendChild(addBtn);
+
+    document.body.appendChild(popup);
+
+    // Close on outside click
+    setTimeout(() => {
+      document.addEventListener('mousedown', onOutsideClick);
+    }, 10);
+
+    function createSwatchButton(color) {
+      const sw = document.createElement('button');
+      sw.style.cssText = `
+        all: unset;
+        width: 24px;
+        height: 24px;
+        border-radius: 4px;
+        background: ${color};
+        cursor: pointer;
+        border: 1px solid rgba(0,0,0,0.1);
+        ${color.toUpperCase() === '#FFFFFF' ? 'border-color: #ddd;' : ''}
+      `;
+      sw.title = color;
+      sw.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        currentColor = color;
+        swatch.style.background = color;
+        onChange(color);
+        closePopup();
+      });
+      return sw;
+    }
+
+    function onOutsideClick(ev) {
+      if (popup && !popup.contains(ev.target) && ev.target !== swatch) {
+        if (!picker) closePopup();
+      }
+    }
+
+    function openFullPicker() {
+      if (!window.Pickr) return;
+
+      // Create anchor for Pickr
+      const btn = document.createElement('button');
+      btn.style.cssText = 'position: fixed; opacity: 0; pointer-events: none; width: 1px; height: 1px;';
+      document.body.appendChild(btn);
+
+      picker = window.Pickr.create({
+        el: btn,
+        theme: 'nano',
+        default: currentColor,
+        position: 'bottom-middle',
+        adjustableNumbers: true,
+        comparison: false,
+        useAsButton: true,
+        swatches: [], // Swatches shown in quick popup, not here
+        components: {
+          preview: true,
+          opacity: false,
+          hue: true,
+          interaction: {
+            hex: true,
+            input: true,
+            save: true
+          }
+        }
+      });
+
+      picker.show();
+
+      // Position picker
+      requestAnimationFrame(() => {
+        const app = picker.getRoot().app;
+        if (app) {
+          const popupRect = popup.getBoundingClientRect();
+          app.style.position = 'fixed';
+          app.style.left = `${popupRect.left}px`;
+          app.style.top = `${popupRect.bottom + 4}px`;
+          app.style.zIndex = '100001';
+        }
+      });
+
+      picker.on('change', (color) => {
+        const hex = color.toHEXA().toString().substring(0, 7);
+        currentColor = hex;
+        swatch.style.background = hex;
+        onChange(hex);
+      });
+
+      picker.on('save', (color) => {
+        const hex = color.toHEXA().toString().substring(0, 7).toUpperCase();
+        currentColor = hex;
+        swatch.style.background = hex;
+        onChange(hex);
+        
+        // Add to custom swatches if not already there
+        if (!DEFAULT_SWATCHES.includes(hex) && !_customSwatches.includes(hex)) {
+          _customSwatches.push(hex);
+          if (_customSwatches.length > 12) _customSwatches.shift(); // Keep max 12 custom
+          _saveCustomSwatches();
+        }
+        
+        closePicker();
+        closePopup();
+      });
+
+      picker.on('hide', () => {
+        closePicker();
+      });
+
+      function closePicker() {
+        if (picker) {
+          picker.destroyAndRemove();
+          picker = null;
+        }
+        btn.remove();
+      }
+    }
+
+    function closePopup() {
+      document.removeEventListener('mousedown', onOutsideClick);
+      if (picker) {
+        picker.destroyAndRemove();
+        picker = null;
+      }
+      if (popup) {
+        popup.remove();
+        popup = null;
+      }
+    }
+  });
+
+  // Return update function
+  return {
+    setColor: (hex) => {
+      currentColor = hex;
+      swatch.style.background = hex;
+    }
+  };
+}
+
+// Export globally for use in subpanel classes
+window.WBE_attachColorPicker = attachColorPicker;
 
 // Use wbe-logger if available (should be loaded via scripts/main.mjs)
 // Logger will be used in future steps for instrumentation
@@ -141,6 +466,26 @@ function registerModuleSettings() {
     requiresReload: true
   });
 
+  game.settings.register(MODULE_ID, 'enableFateCards', {
+    name: 'Enable Fate Cards',
+    hint: 'Allow creating Fate character cards on the whiteboard (requires fate-card module).',
+    scope: 'world',
+    config: true,
+    type: Boolean,
+    default: true,
+    requiresReload: true
+  });
+
+  game.settings.register(MODULE_ID, 'enableShapes', {
+    name: 'Enable Shapes',
+    hint: 'Allow drawing shapes (rectangles, circles, freehand) on the whiteboard.',
+    scope: 'world',
+    config: true,
+    type: Boolean,
+    default: true,
+    requiresReload: true
+  });
+
   // Google Fonts setting
   game.settings.register(MODULE_ID, 'googleFonts', {
     name: 'Google Fonts',
@@ -164,7 +509,9 @@ function isFeatureEnabled(feature) {
   const settingMap = {
     texts: 'enableTexts',
     images: 'enableImages',
-    massSelection: 'enableMassSelection'
+    massSelection: 'enableMassSelection',
+    fateCards: 'enableFateCards',
+    shapes: 'enableShapes'
   };
   const settingName = settingMap[feature];
   if (!settingName) return true;
@@ -234,6 +581,27 @@ function _getGoogleFonts() {
 // ==========================================
 // 0. Utility Functions
 // ==========================================
+
+/**
+ * Get current canvas zoom/scale level
+ * Works across Foundry v11 and v13 with different API structures
+ * @returns {number} Canvas scale (1 = 100% zoom)
+ */
+function getCanvasScale() {
+  if (!canvas?.ready || !canvas?.stage) return 1;
+  
+  // Try worldTransform.a first (most reliable, used in _sync)
+  if (canvas.stage.worldTransform?.a) {
+    return canvas.stage.worldTransform.a;
+  }
+  
+  // Fallback to stage.scale.x
+  if (canvas.stage.scale?.x) {
+    return canvas.stage.scale.x;
+  }
+  
+  return 1;
+}
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -1451,16 +1819,19 @@ class WhiteboardLayer {
     // dims contains scaled visible area dimensions (already accounts for scale and crop)
     const dims = this._calculateImageVisibleDimensions(imageElement, imageId);
 
+    // Get canvas scale for gizmo size compensation
+    const canvasScale = getCanvasScale();
+    
     if (handles.top || handles.right || handles.bottom || handles.left) {
       // Rect handles - position on boundaries of visible area
       // SPECIAL CASE: In crop mode, container is FULL size, so we need to pass dims.left/top
       // In normal mode, container is shrunk to visible area, so dims.left/top should be 0
       if (obj.isCropping) {
         // Crop mode: container = full size, gizmos need offset
-        CropGizmoManager.updateRectHandlesPosition(handles, dims);
+        CropGizmoManager.updateRectHandlesPosition(handles, dims, canvasScale);
       } else {
         // Normal mode: container = visible area, no offset needed
-        CropGizmoManager.updateRectHandlesPosition(handles, { width: dims.width, height: dims.height, left: 0, top: 0 });
+        CropGizmoManager.updateRectHandlesPosition(handles, { width: dims.width, height: dims.height, left: 0, top: 0 }, canvasScale);
       }
     } else if (handles.circleResize) {
       // SPECIAL CASE: Circle in crop mode - position relative to FULL image, not dims
@@ -1484,15 +1855,18 @@ class WhiteboardLayer {
         const halfHandleSize = CropGizmoManager.HANDLE_SIZE / 2;
         handles.circleResize.style.left = `${handleX - halfHandleSize}px`;
         handles.circleResize.style.top = `${handleY - halfHandleSize}px`;
+        // Compensate for canvas zoom
+        handles.circleResize.style.transform = `scale(${1 / canvasScale})`;
       } else {
         // Normal mode - use dims
-      CropGizmoManager.updateCircleHandlePosition(
-        handles.circleResize,
-        imageElement,
-        obj.circleOffset,
-        obj.circleRadius,
-        dims
-      );
+        CropGizmoManager.updateCircleHandlePosition(
+          handles.circleResize,
+          imageElement,
+          obj.circleOffset,
+          obj.circleRadius,
+          dims,
+          canvasScale
+        );
       }
     }
   }
@@ -1857,13 +2231,19 @@ class WhiteboardLayer {
     const isDragging = this._interactionManager?.isDragging(this._selectionOverlaySelectedId);
     if (isDragging && this._selectionOverlay.style.width) {
       // Just update position - dimensions are cached from before drag
-      // Round to prevent subpixel jittering
-      const borderWidth = obj.borderWidth || 0;
-      const scale = obj.scale !== undefined ? obj.scale : 1;
-      const scaledBorderWidth = Math.round(obj.type === 'text' ? borderWidth * scale : borderWidth);
-      // No minPadding needed - textElement has overflow:hidden, textSpan can't peek outside
-      this._selectionOverlay.style.left = `${Math.round(x) - scaledBorderWidth}px`;
-      this._selectionOverlay.style.top = `${Math.round(y) - scaledBorderWidth}px`;
+      // Use cached overlay dimensions to calculate center-aligned position
+      const overlayWidth = parseFloat(this._selectionOverlay.style.width) || 0;
+      const overlayHeight = parseFloat(this._selectionOverlay.style.height) || 0;
+      // CRITICAL: For text with auto-width, container.style.width may be empty - use offsetWidth as fallback
+      const containerWidth = parseFloat(container.style.width) || container.offsetWidth || 0;
+      const containerHeight = parseFloat(container.style.height) || container.offsetHeight || 0;
+      
+      // CRITICAL: For transformOrigin: center, the visual center is at (x + baseWidth/2, y + baseHeight/2)
+      // NOT at (x + scaledWidth/2) - because transform scales around the BASE center
+      const containerCenterX = x + containerWidth / 2;
+      const containerCenterY = y + containerHeight / 2;
+      this._selectionOverlay.style.left = `${containerCenterX - overlayWidth / 2}px`;
+      this._selectionOverlay.style.top = `${containerCenterY - overlayHeight / 2}px`;
       return;
     }
     
@@ -1893,17 +2273,25 @@ class WhiteboardLayer {
     }
     
     // Account for borderWidth - selection overlay should be OUTSIDE permanent border
-    // borderWidth is already scaled for transform:scale() types, but we need to add it to overlay position
+    // For transform:scale() types (text): border is scaled, need to add it
+    // For images: border is already included in container dimensions via CSS box model
     const borderWidth = obj.borderWidth || 0;
-    const scaledBorderWidth = usesTransformScale ? borderWidth * scale : borderWidth;
+    const borderPadding = usesTransformScale ? borderWidth * scale : 0;
     
-    // No minPadding needed - textElement has overflow:hidden, textSpan can't peek outside
+    // Fixed 1px padding around selection overlay (in world coordinates, independent of canvas scale)
+    const SELECTION_PADDING = 1;
     
     // Calculate final dimensions (no rounding needed for SVG - it handles subpixels well)
-    const left = x - scaledBorderWidth;
-    const top = y - scaledBorderWidth;
-    const finalWidth = width + 2 * scaledBorderWidth;
-    const finalHeight = height + 2 * scaledBorderWidth;
+    const finalWidth = width + 2 * borderPadding + 2 * SELECTION_PADDING;
+    const finalHeight = height + 2 * borderPadding + 2 * SELECTION_PADDING;
+    
+    // CRITICAL: Position overlay so its CENTER matches container's visual CENTER
+    // For transformOrigin: center, the visual center is at (x + baseWidth/2, y + baseHeight/2)
+    // NOT at (x + scaledWidth/2) - because transform scales around the BASE center
+    const containerCenterX = x + baseWidth / 2;
+    const containerCenterY = y + baseHeight / 2;
+    const left = containerCenterX - finalWidth / 2;
+    const top = containerCenterY - finalHeight / 2;
     
     // Position SVG overlay
     this._selectionOverlay.style.left = `${left}px`;
@@ -1932,11 +2320,18 @@ class WhiteboardLayer {
     // Update resize handle position (bottom-right corner with offset)
     // Handle is positioned at corner + small offset for better UX
     if (this._selectionOverlayHandle) {
+      const canvasScale = getCanvasScale();
       const handleOffset = 4; // Offset from corner (same as old RESIZE_HANDLE_OFFSET)
       const handleX = finalWidth + handleOffset;
       const handleY = finalHeight + handleOffset;
       this._selectionOverlayHandle.setAttribute('cx', `${handleX}`);
       this._selectionOverlayHandle.setAttribute('cy', `${handleY}`);
+      // Compensate for canvas zoom so handle stays same visual size
+      // Base radius is 6, divide by canvasScale to keep constant screen size
+      const compensatedRadius = 6 / canvasScale;
+      const compensatedStroke = 2 / canvasScale;
+      this._selectionOverlayHandle.setAttribute('r', `${compensatedRadius}`);
+      this._selectionOverlayHandle.setAttribute('stroke-width', `${compensatedStroke}`);
       
       // Show/hide handle based on object state (frozen objects cannot be scaled)
       const isFrozen = obj.isFrozen?.() ?? false;
@@ -1999,7 +2394,7 @@ class WhiteboardLayer {
       if (!this._massSelectionRects.has(id)) {
         const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
         rect.setAttribute('stroke', '#1c86ff');
-        rect.setAttribute('stroke-width', '2');
+        rect.setAttribute('stroke-width', '1');
         rect.setAttribute('fill', 'none');
         rect.setAttribute('vector-effect', 'non-scaling-stroke');
         rect.dataset.objectId = id;
@@ -2036,8 +2431,11 @@ class WhiteboardLayer {
       const baseHeight = parseFloat(container.style.height) || container.offsetHeight;
       const scale = obj.scale !== undefined ? obj.scale : 1;
       
+      // Types that use transform: scale() for scaling
+      const usesTransformScale = obj.usesTransformScale?.() ?? (obj.type === 'text');
+      
       let width, height;
-      if (obj.type === 'text') {
+      if (usesTransformScale) {
         // Text uses transform: scale()
         width = baseWidth * scale;
         height = baseHeight * scale;
@@ -2049,17 +2447,34 @@ class WhiteboardLayer {
       
       // Account for border
       const borderWidth = obj.borderWidth || 0;
-      const scaledBorderWidth = obj.type === 'text' ? borderWidth * scale : borderWidth;
+      const scaledBorderWidth = usesTransformScale ? borderWidth * scale : borderWidth;
       
-      const left = x - scaledBorderWidth;
-      const top = y - scaledBorderWidth;
       const finalWidth = width + 2 * scaledBorderWidth;
       const finalHeight = height + 2 * scaledBorderWidth;
+      
+      // CRITICAL: Position overlay so its CENTER matches container's visual CENTER
+      // For transformOrigin: center, the visual center is at (x + baseWidth/2, y + baseHeight/2)
+      const containerCenterX = x + baseWidth / 2;
+      const containerCenterY = y + baseHeight / 2;
+      const left = containerCenterX - finalWidth / 2;
+      const top = containerCenterY - finalHeight / 2;
       
       rect.setAttribute('x', `${left}`);
       rect.setAttribute('y', `${top}`);
       rect.setAttribute('width', `${finalWidth}`);
       rect.setAttribute('height', `${finalHeight}`);
+      
+      // Apply rotation to match object rotation
+      const rotation = obj.rotation || 0;
+      if (rotation !== 0) {
+        // SVG transform rotates around center of the rect
+        const centerX = left + finalWidth / 2;
+        const centerY = top + finalHeight / 2;
+        rect.setAttribute('transform', `rotate(${rotation} ${centerX} ${centerY})`);
+      } else {
+        rect.removeAttribute('transform');
+      }
+      
       rect.style.display = 'block';
     }
   }
@@ -2114,6 +2529,8 @@ class WhiteboardLayer {
             overflow: visible;
             isolation: isolate;
         `;
+    // WBE layer is above canvas (z-index: 0) but below UI elements
+    // Foundry drawings/tokens are inside PIXI canvas, not DOM - can't interleave
     board.parentElement.insertBefore(this.element, board.nextSibling);
     
     // Initialize global styles for whiteboard (text mode cursor, etc.)
@@ -2332,11 +2749,13 @@ class WhiteboardLayer {
     // This ensures DOM matches Registry state, especially for z-index
     // Use requestAnimationFrame to ensure DOM is fully ready
     requestAnimationFrame(() => {
-      // Update z-index and position to match Registry (SSOT)
+      // Update z-index, position, scale and rotation to match Registry (SSOT)
       this._updateObjectElement(obj.id, obj, {
         zIndex: obj.zIndex,
         x: obj.x,
-        y: obj.y
+        y: obj.y,
+        scale: obj.scale,
+        rotation: obj.rotation
       });
 
     // Apply outline immediately if object is selected
@@ -2460,6 +2879,9 @@ class WhiteboardLayer {
         if (selectionBorder) {
           selectionBorder.style.width = `${roundedWidth}px`;
           selectionBorder.style.height = `${roundedHeight}px`;
+          // Container is shrunk to visible area, so selectionBorder is at origin
+          selectionBorder.style.left = '0px';
+          selectionBorder.style.top = '0px';
         }
         
         const clickTarget = container.querySelector('.wbe-image-click-target');
@@ -2473,9 +2895,10 @@ class WhiteboardLayer {
       // Update rect handles position
       // CRITICAL: Pass left: 0, top: 0 because container is already shifted by roundedLeft/roundedTop
       // Gizmos are inside container, so they don't need additional offset
+      const canvasScale = getCanvasScale();
       const handles = this._cropHandles.get(imageId);
       if (handles && (handles.top || handles.right || handles.bottom || handles.left)) {
-        CropGizmoManager.updateRectHandlesPosition(handles, { width: roundedWidth, height: roundedHeight, left: 0, top: 0 });
+        CropGizmoManager.updateRectHandlesPosition(handles, { width: roundedWidth, height: roundedHeight, left: 0, top: 0 }, canvasScale);
       }
     } else if (maskType === 'circle') {
       // Circle crop: update clip-path and handle position
@@ -2506,6 +2929,7 @@ class WhiteboardLayer {
       }
       
       // Update circle resize handle position
+      const canvasScale = getCanvasScale();
       const handles = this._cropHandles.get(imageId);
       if (handles && handles.circleResize) {
         const handleX = Math.round(scaledCenterX + scaledRadius * 0.707);
@@ -2513,6 +2937,8 @@ class WhiteboardLayer {
         const halfHandleSize = CropGizmoManager.HANDLE_SIZE / 2;
         handles.circleResize.style.left = `${handleX - halfHandleSize}px`;
         handles.circleResize.style.top = `${handleY - halfHandleSize}px`;
+        // Compensate for canvas zoom
+        handles.circleResize.style.transform = `scale(${1 / canvasScale})`;
       }
     }
   }
@@ -3205,7 +3631,7 @@ class WhiteboardLayer {
 
       // Border and shadow styles (architecturally aligned with text)
       // Structure as in the old code: container (shadow, overflow) > permanentBorder (border) > clickTarget > img
-      const imageStyleFields = new Set(['borderHex', 'borderOpacity', 'borderWidth', 'borderRadius', 'shadowHex', 'shadowOpacity']);
+      const imageStyleFields = new Set(['borderHex', 'borderOpacity', 'borderWidth', 'borderRadius', 'shadowHex', 'shadowOpacity', 'shadowOffsetX', 'shadowOffsetY']);
       const hasStyleChanges = !changes || Object.keys(changes).some(key => imageStyleFields.has(key) || key === 'scale');
       
       if (hasStyleChanges) {
@@ -3275,10 +3701,12 @@ class WhiteboardLayer {
         
         // Apply shadow to container (as in old code - using filter: drop-shadow)
         // Old code has NO border-radius on container for shadow
-        if (shouldUpdate('shadowHex') || shouldUpdate('shadowOpacity')) {
+        if (shouldUpdate('shadowHex') || shouldUpdate('shadowOpacity') || shouldUpdate('shadowOffsetX') || shouldUpdate('shadowOffsetY')) {
           const shadowRgba = hexToRgba(obj.shadowHex || DEFAULT_SHADOW_HEX, obj.shadowOpacity !== undefined ? obj.shadowOpacity : DEFAULT_SHADOW_OPACITY);
+          const offsetX = obj.shadowOffsetX ?? 4;
+          const offsetY = obj.shadowOffsetY ?? 4;
           container.style.filter = shadowRgba 
-            ? `drop-shadow(0 4px 8px ${shadowRgba})` 
+            ? `drop-shadow(${offsetX}px ${offsetY}px 8px ${shadowRgba})` 
             : "none";
         }
       }
@@ -3720,16 +4148,20 @@ class WhiteboardLayer {
   _handleUnfreezeAction(container, id) {
     if (!container || !id) return;
 
-    // Hide unfreeze icon
-    this._hideUnfreezeIcon(container);
+    // Hide unfreeze icon (universal - works for any object type)
+    const unfreezeIcon = container?.querySelector('.wbe-unfreeze-icon');
+    if (unfreezeIcon) {
+      unfreezeIcon.remove();
+      container._unfreezeIcon = null;
+    }
 
-    // Unfreeze image through Registry
+    // Unfreeze object through Registry (works for any type)
     if (this.registry) {
       this.registry.update(id, {
         frozen: false
       }, 'local');
 
-      // Select image after unfreezing
+      // Select object after unfreezing
       setTimeout(() => {
         if (this._interactionManager) {
           this._interactionManager._select(id);
@@ -3849,8 +4281,10 @@ class WhiteboardObject {
    * @param {number} scale - Object scale
    */
   applyScaleTransform(container, scale) {
-    // Base implementation - applies transform: scale()
-    container.style.transform = `scale(${scale})`;
+    // Base implementation - applies transform: scale() and rotate()
+    const rotation = this.rotation || 0;
+    container.style.transform = `scale(${scale}) rotate(${rotation}deg)`;
+    container.style.transformOrigin = 'center';
   }
 
   /**
@@ -4500,6 +4934,8 @@ class WhiteboardImage extends WhiteboardObject {
     // Shadow properties
     this.shadowHex = data.shadowHex || DEFAULT_SHADOW_HEX;
     this.shadowOpacity = data.shadowOpacity !== undefined ? data.shadowOpacity : DEFAULT_SHADOW_OPACITY;
+    this.shadowOffsetX = data.shadowOffsetX !== undefined ? data.shadowOffsetX : 4;
+    this.shadowOffsetY = data.shadowOffsetY !== undefined ? data.shadowOffsetY : 4;
     // Lock state
     this.frozen = data.frozen !== undefined ? data.frozen : false;
   }
@@ -4669,6 +5105,8 @@ class WhiteboardImage extends WhiteboardObject {
     const shadowRgba = this.shadowHex && this.shadowOpacity !== undefined && this.shadowOpacity > 0
       ? hexToRgba(this.shadowHex, this.shadowOpacity)
       : null;
+    const shadowOffsetX = this.shadowOffsetX ?? 4;
+    const shadowOffsetY = this.shadowOffsetY ?? 4;
     
     // Calculate display dimensions - round to prevent subpixel jittering
     const displayWidth = Math.round(this.baseWidth * scale);
@@ -4688,7 +5126,7 @@ class WhiteboardImage extends WhiteboardObject {
             width: ${displayWidth}px;
             height: ${displayHeight}px;
             z-index: ${zIndex};
-            filter: ${shadowRgba ? `drop-shadow(0 8px 8px ${shadowRgba})` : 'none'};
+            filter: ${shadowRgba ? `drop-shadow(${shadowOffsetX}px ${shadowOffsetY}px 8px ${shadowRgba})` : 'none'};
             pointer-events: ${pointerEvents};
             will-change: transform;
         `;
@@ -4878,6 +5316,8 @@ class WhiteboardImage extends WhiteboardObject {
       // Shadow properties
           shadowHex: this.shadowHex,
           shadowOpacity: this.shadowOpacity,
+          shadowOffsetX: this.shadowOffsetX,
+          shadowOffsetY: this.shadowOffsetY,
       // Lock state
           frozen: this.frozen,
       // Base dimensions
@@ -5413,8 +5853,9 @@ class CropGizmoManager {
    * Update rect positions of handles
    * @param {Object} handles - Object with handles {top, right, bottom, left}
    * @param {Object} dims - Visible dimensions {width, height, left, top} from _calculateImageVisibleDimensions
+   * @param {number} [canvasScale=1] - Canvas zoom level for size compensation
    */
-  static updateRectHandlesPosition(handles, dims) {
+  static updateRectHandlesPosition(handles, dims, canvasScale = 1) {
     if (!handles || !dims) return;
     if (dims.width === 0 || dims.height === 0) return;
 
@@ -5424,29 +5865,36 @@ class CropGizmoManager {
     const halfHandleSize = this.HANDLE_SIZE / 2;
     const offsetLeft = dims.left || 0;
     const offsetTop = dims.top || 0;
+    
+    // Compensate for canvas zoom so handles stay same visual size
+    const scaleCompensation = canvasScale > 0 ? `scale(${1 / canvasScale})` : '';
 
     // Top handle: center of top edge
     if (handles.top) {
       handles.top.style.left = `${offsetLeft + dims.width / 2 - halfHandleSize}px`;
       handles.top.style.top = `${offsetTop - halfHandleSize}px`; // Half outside for better visibility
+      handles.top.style.transform = scaleCompensation;
     }
 
     // Right handle: center of right edge
     if (handles.right) {
       handles.right.style.left = `${offsetLeft + dims.width - halfHandleSize}px`; // Half outside for better visibility
       handles.right.style.top = `${offsetTop + dims.height / 2 - halfHandleSize}px`;
+      handles.right.style.transform = scaleCompensation;
     }
 
     // Bottom handle: center of bottom edge
     if (handles.bottom) {
       handles.bottom.style.left = `${offsetLeft + dims.width / 2 - halfHandleSize}px`;
       handles.bottom.style.top = `${offsetTop + dims.height - halfHandleSize}px`; // Half outside for better visibility
+      handles.bottom.style.transform = scaleCompensation;
     }
 
     // Left handle: center of left edge
     if (handles.left) {
       handles.left.style.left = `${offsetLeft - halfHandleSize}px`; // Half outside for better visibility
       handles.left.style.top = `${offsetTop + dims.height / 2 - halfHandleSize}px`;
+      handles.left.style.transform = scaleCompensation;
     }
   }
 
@@ -5457,8 +5905,9 @@ class CropGizmoManager {
    * @param {Object} circleOffset - Object {x, y} in base coordinates (unused, kept for API compatibility)
    * @param {number} circleRadius - Circle radius in base coordinates (unused, kept for API compatibility)
    * @param {Object} dims - Visible dimensions {width, height, left, top} from _calculateImageVisibleDimensions
+   * @param {number} [canvasScale=1] - Canvas zoom level for size compensation
    */
-  static updateCircleHandlePosition(handle, imageElement, circleOffset, circleRadius, dims) {
+  static updateCircleHandlePosition(handle, imageElement, circleOffset, circleRadius, dims, canvasScale = 1) {
     if (!handle || !dims) return;
     if (dims.width === 0 || dims.height === 0) return;
 
@@ -5477,6 +5926,11 @@ class CropGizmoManager {
     const halfHandleSize = this.HANDLE_SIZE / 2;
     handle.style.left = `${handleX - halfHandleSize}px`;
     handle.style.top = `${handleY - halfHandleSize}px`;
+    
+    // Compensate for canvas zoom so handle stays same visual size
+    if (canvasScale > 0) {
+      handle.style.transform = `scale(${1 / canvasScale})`;
+    }
   }
 
   /**
@@ -5932,7 +6386,15 @@ class TextStylingPanelView {
   isClickInside(ev) {
     if (!this.panel) return false;
     const path = ev.composedPath();
-    return path.includes(this.panel) || this.activeSubpanel && path.includes(this.activeSubpanel);
+    // Check panel, subpanel, and color picker popups
+    const isInPanel = path.includes(this.panel) || (this.activeSubpanel && path.includes(this.activeSubpanel));
+    if (isInPanel) return true;
+    // Check if click is on color picker elements
+    const target = ev.target;
+    if (target?.closest?.('.wbe-color-swatches-popup') || target?.closest?.('.pcr-app')) {
+      return true;
+    }
+    return false;
   }
   destroy() {
     // Remove global event listeners
@@ -6149,11 +6611,16 @@ class TextSubpanel {
     sub.appendChild(colorGroup);
     const swatch = this.uiHelpers.makeSwatch(this.stylingData.textColor.hex);
     colorGroup.appendChild(swatch);
-    const textColorInput = document.createElement("input");
-    textColorInput.type = "color";
-    textColorInput.value = this.stylingData.textColor.hex;
-    textColorInput.style.cssText = "position:absolute; opacity:0; pointer-events:none;";
-    sub.appendChild(textColorInput);
+    
+    // Use Vanilla Picker instead of native color input
+    let currentTextColor = this.stylingData.textColor.hex;
+    if (window.WBE_attachColorPicker) {
+      window.WBE_attachColorPicker(swatch, currentTextColor, (hex) => {
+        currentTextColor = hex;
+        this.controller.handleColorChange(hex, Number(opacityInput.value));
+      });
+    }
+    
     const {
       wrapper: opacityRow,
       input: opacityInput,
@@ -6165,7 +6632,7 @@ class TextSubpanel {
       format: v => `${Math.round(v)}%`,
       presetValues: [0, 25, 50, 75, 100],
       onChange: (opacity) => {
-        this.controller.handleColorChange(textColorInput.value, opacity);
+        this.controller.handleColorChange(currentTextColor, opacity);
       }
     });
     colorGroup.appendChild(opacityRow);
@@ -6350,11 +6817,6 @@ class TextSubpanel {
     fontSizeInput.addEventListener("input", () => {
       updateFontSizeLabel(Number(fontSizeInput.value));
     });
-    swatch.addEventListener("click", () => textColorInput.click());
-    textColorInput.addEventListener("change", e => {
-      swatch.style.background = e.target.value;
-      this.controller.handleColorChange(e.target.value, Number(opacityInput.value));
-    });
     opacityInput.addEventListener("change", () => {
       updateOpacityLabel(Number(opacityInput.value));
     });
@@ -6390,11 +6852,16 @@ class BackgroundSubpanel {
     
     const swatch = this.uiHelpers.makeSwatch(this.stylingData.backgroundColor.hex, 26);
     sub.appendChild(swatch);
-    const bgColorInput = document.createElement("input");
-    bgColorInput.type = "color";
-    bgColorInput.value = this.stylingData.backgroundColor.hex;
-    bgColorInput.style.cssText = "position:absolute; opacity:0; pointer-events:none;";
-    sub.appendChild(bgColorInput);
+    
+    // Use Vanilla Picker instead of native color input
+    let currentBgColor = this.stylingData.backgroundColor.hex;
+    if (window.WBE_attachColorPicker) {
+      window.WBE_attachColorPicker(swatch, currentBgColor, (hex) => {
+        currentBgColor = hex;
+        this.controller.handleBackgroundColorChange(hex, Number(opacityInput.value));
+      });
+    }
+    
     const {
       wrapper: opacityRow,
       input: opacityInput,
@@ -6406,15 +6873,10 @@ class BackgroundSubpanel {
       format: v => `${Math.round(v)}%`,
       presetValues: [0, 25, 50, 75, 100],
       onChange: (opacity) => {
-        this.controller.handleBackgroundColorChange(bgColorInput.value, opacity);
+        this.controller.handleBackgroundColorChange(currentBgColor, opacity);
       }
     });
     sub.appendChild(opacityRow);
-    swatch.addEventListener("click", () => bgColorInput.click());
-    bgColorInput.addEventListener("change", e => {
-      swatch.style.background = e.target.value;
-      this.controller.handleBackgroundColorChange(e.target.value, Number(opacityInput.value));
-    });
     opacityInput.addEventListener("change", () => {
       updateOpacityLabel(Number(opacityInput.value));
     });
@@ -6452,19 +6914,24 @@ class BorderSubpanel {
     const swatch = this.uiHelpers.makeSwatch(this.stylingData.borderColor.hex, 26);
     swatch.style.opacity = currentBorderWidth > 0 ? "1" : "0.45";
     sub.appendChild(swatch);
-    const borderColorInput = document.createElement("input");
-    borderColorInput.type = "color";
-    borderColorInput.value = this.stylingData.borderColor.hex;
-    borderColorInput.style.cssText = "position:absolute; opacity:0; pointer-events:none;";
-    sub.appendChild(borderColorInput);
+    
+    // Use Vanilla Picker instead of native color input
+    let currentBorderColor = this.stylingData.borderColor.hex;
     const sync = () => {
       const width = Number(borderWidthInput.value);
       const opacity = Number(borderOpacityInput.value);
       updateBorderOpacityLabel(opacity);
       updateBorderWidthLabel(width);
       swatch.style.opacity = width > 0 ? "1" : "0.45";
-      this.controller.handleBorderChange(borderColorInput.value, opacity, width);
+      this.controller.handleBorderChange(currentBorderColor, opacity, width);
     };
+    
+    if (window.WBE_attachColorPicker) {
+      window.WBE_attachColorPicker(swatch, currentBorderColor, (hex) => {
+        currentBorderColor = hex;
+        sync();
+      });
+    }
     const {
       wrapper: borderOpacityRow,
       input: borderOpacityInput,
@@ -6501,11 +6968,6 @@ class BorderSubpanel {
       onChange: sync
     });
     sub.appendChild(borderWidthRow);
-    swatch.addEventListener("click", () => borderColorInput.click());
-    borderColorInput.addEventListener("change", e => {
-      swatch.style.background = e.target.value;
-      sync();
-    });
     borderOpacityInput.addEventListener("input", () => {
       updateBorderOpacityLabel(Number(borderOpacityInput.value));
       updateBorderWidthLabel(Number(borderWidthInput.value));
@@ -6791,10 +7253,8 @@ class TextStylingPanel {
       if (clickedInsideText) return;
       this.hide();
     };
-    const onKey = ev => {
-      if (ev.key === "Escape") this.hide();
-    };
-    this.view.bindEvents(this.controller, onOutside, onKey);
+    // Note: Escape is captured by Foundry, panels close on deselect
+    this.view.bindEvents(this.controller, onOutside, null);
   }
   hide() {
     if (this.positionManager) {
@@ -6826,6 +7286,977 @@ class TextStylingPanel {
     } else if (this.view) {
       this.view.closeSubpanel();
     }
+  }
+}
+
+// ==========================================
+// BasePanelView - Base class for all WBE panels
+// Provides common UI helpers: buttons, subpanels, positioning
+// ==========================================
+class BasePanelView {
+  constructor() {
+    this.panel = null;
+    this.toolbar = null;
+    this.activeSubpanel = null;
+    this.activeButton = null;
+    this.onOutside = null;
+    this.onKey = null;
+  }
+
+  // Panel styles constant (same as TextStylingPanelView/ImageControlPanelView)
+  static get PANEL_STYLES() {
+    return `
+      position: fixed;
+      background: white;
+      border: 1px solid #d7d7d7;
+      border-radius: 14px;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+      padding: 6px;
+      z-index: 20100;
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      transform: translateX(-50%) scale(0.9);
+    `;
+  }
+
+  // Subpanel styles constant (horizontal layout like existing subpanels)
+  static get SUBPANEL_STYLES() {
+    return `
+      position: absolute;
+      background: white;
+      border: 1px solid #dcdcdc;
+      border-radius: 12px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      pointer-events: auto;
+    `;
+  }
+
+  /**
+   * Create the base panel element
+   * @returns {HTMLElement}
+   */
+  createPanel() {
+    const panel = document.createElement('div');
+    panel.className = 'wbe-panel';
+    panel.style.cssText = BasePanelView.PANEL_STYLES;
+
+    // Prevent clicks from propagating to canvas
+    panel.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    });
+
+    this.panel = panel;
+
+    // Create toolbar container (same gap as TextStylingPanelView/ImageControlPanelView)
+    this.toolbar = document.createElement('div');
+    this.toolbar.style.cssText = 'display: flex; gap: 12px; position: relative;';
+    panel.appendChild(this.toolbar);
+
+    return panel;
+  }
+
+  /**
+   * Create a toolbar button with icon
+   * @param {string} label - Button title/tooltip
+   * @param {string} iconClass - FontAwesome icon class
+   * @param {Function} onClick - Click handler
+   * @returns {HTMLElement}
+   */
+  makeToolbarButton(label, iconClass, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wbe-panel-btn';
+    btn.title = label;
+    btn.dataset.active = '0';
+    btn.style.cssText = `
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 40px;
+      padding: 0;
+      border-radius: 10px;
+      border: 1px solid #d2d2d8;
+      background: #f5f5f7;
+      font-size: 16px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+      color: #333;
+    `;
+
+    if (iconClass) {
+      const icon = document.createElement('i');
+      icon.className = iconClass;
+      // Universal solution: explicitly set icon color to inherit from button
+      icon.style.cssText = 'font-size: 18px; color: inherit;';
+      btn.appendChild(icon);
+    }
+
+    // Universal solution: automatically set initial inactive state
+    // This ensures the correct icon color from the start
+    this.setButtonActive(btn, false);
+
+    btn.addEventListener('mouseenter', () => {
+      if (btn.dataset.active === '1') return;
+      btn.style.background = '#ededf8';
+    });
+
+    btn.addEventListener('mouseleave', () => {
+      if (btn.dataset.active === '1') return;
+      this.setButtonActive(btn, false);
+    });
+
+    if (onClick) {
+      btn.addEventListener('click', onClick);
+    }
+
+    return btn;
+  }
+
+  /**
+   * Create a color picker button
+   * @param {string} label - Button title
+   * @param {string} color - Initial color hex
+   * @param {Function} onChange - Color change handler
+   * @returns {HTMLElement}
+   */
+  makeColorButton(label, color, onChange) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.title = label;
+    btn.style.cssText = `
+      width: 44px;
+      height: 40px;
+      border-radius: 10px;
+      border: 1px solid #d2d2d8;
+      cursor: pointer;
+      position: relative;
+      padding: 4px;
+      background: #f5f5f7;
+    `;
+
+    const swatch = document.createElement('div');
+    swatch.style.cssText = `
+      width: 100%;
+      height: 100%;
+      border-radius: 6px;
+      background: ${color};
+      border: 1px solid rgba(0,0,0,0.1);
+    `;
+    btn.appendChild(swatch);
+
+    // Use Vanilla Picker instead of native color input
+    if (window.WBE_attachColorPicker) {
+      window.WBE_attachColorPicker(swatch, color, onChange);
+    }
+
+    return btn;
+  }
+
+  /**
+   * Set button active/inactive state
+   * @param {HTMLElement} button
+   * @param {boolean} isActive
+   */
+  setButtonActive(button, isActive) {
+    if (!button) return;
+    if (isActive) {
+      button.dataset.active = '1';
+      button.style.background = '#e0ebff';
+      button.style.borderColor = '#4d8dff';
+      button.style.color = '#1a3f8b';
+    } else {
+      button.dataset.active = '0';
+      button.style.background = '#f5f5f7';
+      button.style.borderColor = '#d2d2d8';
+      button.style.color = '#333';
+    }
+  }
+
+  /**
+   * Create a subpanel container
+   * @returns {HTMLElement}
+   */
+  createSubpanel() {
+    const sub = document.createElement('div');
+    sub.className = 'wbe-subpanel';
+    sub.style.cssText = BasePanelView.SUBPANEL_STYLES;
+    return sub;
+  }
+
+  /**
+   * Create a slider row for subpanel (vertical layout: label + slider)
+   * @param {string} label - Label text
+   * @param {number} value - Initial value
+   * @param {number} min - Min value
+   * @param {number} max - Max value
+   * @param {string} unit - Unit suffix (e.g., 'px', '°')
+   * @param {Function} onChange - Change handler
+   * @returns {HTMLElement}
+   */
+  createSliderRow(label, value, min, max, unit, onChange) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display: flex; flex-direction: column; gap: 6px;';
+
+    const labelEl = document.createElement('div');
+    labelEl.style.cssText = 'font-size: 12px; color: #666; font-weight: 500;';
+    labelEl.textContent = `${label}: ${value}${unit}`;
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = min;
+    slider.max = max;
+    slider.value = value;
+    slider.style.cssText = 'width: 100%; accent-color: #4d8dff;';
+
+    slider.addEventListener('input', () => {
+      labelEl.textContent = `${label}: ${slider.value}${unit}`;
+      onChange(Number(slider.value));
+    });
+
+    row.appendChild(labelEl);
+    row.appendChild(slider);
+    row._label = labelEl;
+    row._slider = slider;
+    return row;
+  }
+
+  /**
+   * Create a dropdown input with presets (compact, horizontal)
+   * @param {number} value - Initial value
+   * @param {Object} options - { min, max, step, format, presetValues, onChange }
+   * @returns {Object} { wrapper, input, update }
+   */
+  createDropdownInput(value, { min, max, step = 1, format = v => `${Math.round(v)}%`, presetValues = null, onChange = null }) {
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'display: flex; align-items: center; gap: 6px;';
+
+    // Generate preset values if not provided
+    let presets = presetValues;
+    if (!presets) {
+      if (min === 0 && max === 100 && step === 1) {
+        presets = [0, 25, 50, 75, 100];
+      } else {
+        presets = [];
+        const stepCount = Math.min(5, Math.floor((max - min) / step) + 1);
+        for (let i = 0; i < stepCount; i++) {
+          const val = min + (max - min) * (i / (stepCount - 1));
+          presets.push(Math.round(val / step) * step);
+        }
+      }
+    }
+
+    // Dropdown
+    const dropdown = document.createElement('select');
+    dropdown.style.cssText = `
+      padding: 4px 8px; border: 1px solid #d0d0d0; border-radius: 6px;
+      background: white; font-size: 12px; color: #333; cursor: pointer; min-width: 70px;
+    `;
+    presets.forEach(preset => {
+      const option = document.createElement('option');
+      option.value = String(preset);
+      option.textContent = format(preset);
+      if (Math.abs(Number(value) - preset) < step / 2) option.selected = true;
+      dropdown.appendChild(option);
+    });
+
+    // Input for exact value
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
+    input.value = String(value);
+    input.style.cssText = `
+      width: 50px; padding: 4px 6px; border: 1px solid #d0d0d0;
+      border-radius: 6px; background: white; font-size: 12px; color: #333; text-align: center;
+    `;
+
+    wrapper.appendChild(dropdown);
+    wrapper.appendChild(input);
+
+    const updateValue = (v) => {
+      const numVal = Number(v);
+      input.value = String(numVal);
+      let closestPreset = presets[0];
+      let minDiff = Math.abs(numVal - closestPreset);
+      presets.forEach(preset => {
+        const diff = Math.abs(numVal - preset);
+        if (diff < minDiff) { minDiff = diff; closestPreset = preset; }
+      });
+      dropdown.value = String(closestPreset);
+    };
+
+    updateValue(value);
+
+    const triggerChange = (val) => { if (onChange) onChange(val); };
+
+    dropdown.addEventListener('change', (e) => {
+      const val = Number(e.target.value);
+      updateValue(val);
+      triggerChange(val);
+    });
+
+    input.addEventListener('change', (e) => {
+      let val = Math.max(min, Math.min(max, Number(e.target.value)));
+      val = Math.round(val / step) * step;
+      updateValue(val);
+      triggerChange(val);
+    });
+
+    return { wrapper, input, update: updateValue };
+  }
+
+  /**
+   * Create a compact horizontal slider with label (no number input)
+   * @param {string} label - Short label (e.g., 'X', 'Y')
+   * @param {number} value - Initial value
+   * @param {Object} options - { min, max, step, onChange }
+   * @returns {Object} { wrapper, slider }
+   */
+  createCompactSlider(label, value, { min, max, step = 1, onChange = null }) {
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'display: flex; align-items: center; gap: 4px;';
+
+    // Label
+    const labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    labelEl.style.cssText = 'font-size: 11px; color: #666; white-space: nowrap;';
+    wrapper.appendChild(labelEl);
+
+    // Slider
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = String(min);
+    slider.max = String(max);
+    slider.step = String(step);
+    slider.value = String(value);
+    slider.style.cssText = 'width: 60px; height: 4px; cursor: pointer;';
+    wrapper.appendChild(slider);
+
+    slider.addEventListener('input', () => {
+      if (onChange) onChange(Number(slider.value));
+    });
+
+    return { wrapper, slider, input: slider, setValue: (val) => { slider.value = String(val); } };
+  }
+
+  /**
+   * Open a subpanel attached to a button
+   * @param {HTMLElement} button - The button that triggered the subpanel
+   * @param {HTMLElement} content - Subpanel content
+   */
+  openSubpanel(button, content) {
+    this.closeSubpanel();
+
+    this.activeButton = button;
+    this.setButtonActive(button, true);
+
+    const sub = this.createSubpanel();
+    sub.appendChild(content);
+
+    // Append to panel (not toolbar) for correct positioning
+    this.panel.appendChild(sub);
+    this.activeSubpanel = sub;
+
+    // Position subpanel below panel, centered
+    requestAnimationFrame(() => {
+      if (!this.panel || !sub) return;
+      const panelWidth = this.panel.offsetWidth || 200;
+      const subpanelWidth = sub.offsetWidth || 200;
+      const left = (panelWidth - subpanelWidth) / 2;
+      sub.style.left = `${left}px`;
+
+      const panelHeight = this.panel.offsetHeight || 50;
+      sub.style.top = `${panelHeight + 8}px`;
+    });
+  }
+
+  /**
+   * Close active subpanel
+   */
+  closeSubpanel() {
+    if (this.activeSubpanel) {
+      this.activeSubpanel.remove();
+      this.activeSubpanel = null;
+    }
+    if (this.activeButton) {
+      this.setButtonActive(this.activeButton, false);
+      this.activeButton = null;
+    }
+  }
+
+  /**
+   * Position panel relative to an element (same as PanelPositionManager.update)
+   * @param {HTMLElement} targetElement - Element to position relative to
+   */
+  positionNear(targetElement) {
+    if (!this.panel || !targetElement) return;
+
+    const rect = targetElement.getBoundingClientRect();
+    const panelRect = this.panel.getBoundingClientRect();
+    const panelWidth = panelRect.width || 300;
+    const minMargin = 10;
+    const topThreshold = 150; // Same as PanelPositionManager
+    const subpanelSpace = 45; // Space for subpanel below main panel
+
+    // Center panel horizontally relative to object (same as PanelPositionManager)
+    let panelCenterX = rect.left + rect.width / 2;
+    const halfPanelWidth = panelWidth / 2;
+
+    // Check boundaries
+    if (panelCenterX - halfPanelWidth < minMargin) {
+      panelCenterX = minMargin + halfPanelWidth;
+    }
+    if (panelCenterX + halfPanelWidth > window.innerWidth - minMargin) {
+      panelCenterX = window.innerWidth - minMargin - halfPanelWidth;
+    }
+    this.panel.style.left = `${panelCenterX}px`;
+
+    // Vertical positioning (same as PanelPositionManager)
+    this.isPanelAbove = rect.top >= topThreshold;
+    if (this.isPanelAbove) {
+      // Position above object: rect.top - 110 - subpanelSpace (same as PanelPositionManager)
+      this.panel.style.top = `${rect.top - 110 - subpanelSpace}px`;
+    } else {
+      // Position below object
+      this.panel.style.top = `${rect.bottom + minMargin}px`;
+    }
+  }
+
+  /**
+   * Check if click is inside panel or subpanel
+   * @param {Event} ev
+   * @returns {boolean}
+   */
+  isClickInside(ev) {
+    if (!this.panel) return false;
+    const path = ev.composedPath();
+    const isInPanel = path.includes(this.panel) || (this.activeSubpanel && path.includes(this.activeSubpanel));
+    if (isInPanel) return true;
+    // Check if click is on color picker elements
+    const target = ev.target;
+    if (target?.closest?.('.wbe-color-swatches-popup') || target?.closest?.('.pcr-app')) {
+      return true;
+    }
+    return false;
+  }
+
+  // ==========================================
+  // Ready-to-use Subpanel Methods
+  // ==========================================
+
+  /**
+   * Open rotation subpanel with full controls
+   * @param {HTMLElement} button - Button that triggered the subpanel
+   * @param {number} currentRotation - Current rotation in degrees
+   * @param {Function} onChange - Callback (rotation) => void
+   */
+  openRotationSubpanel(button, currentRotation, onChange) {
+    if (this.activeButton === button) {
+      this.closeSubpanel();
+      return;
+    }
+
+    const content = document.createElement('div');
+    content.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+
+    let rotation = currentRotation || 0;
+
+    // Helper to create icon button
+    const makeIconBtn = (icon, title, onClick) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.title = title;
+      btn.style.cssText = `
+        width: 32px; height: 32px; border-radius: 8px;
+        border: 1px solid #d0d0d0; background: #f5f5f7;
+        cursor: pointer; display: flex; align-items: center;
+        justify-content: center; transition: all 0.15s ease;
+      `;
+      const i = document.createElement('i');
+      i.className = icon;
+      i.style.cssText = 'font-size: 14px; color: #333;';
+      btn.appendChild(i);
+      btn.addEventListener('click', onClick);
+      btn.addEventListener('mouseenter', () => { btn.style.background = '#e0ebff'; });
+      btn.addEventListener('mouseleave', () => { btn.style.background = '#f5f5f7'; });
+      return btn;
+    };
+
+    // Left button (-15°)
+    const leftBtn = makeIconBtn('fas fa-undo', 'Rotate left 15°', () => sync(rotation - 15));
+    content.appendChild(leftBtn);
+
+    // Slider
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = '-180';
+    slider.max = '180';
+    slider.step = '1';
+    slider.value = String(Math.max(-180, Math.min(180, rotation)));
+    slider.style.cssText = 'width: 140px; height: 6px;';
+    content.appendChild(slider);
+
+    // Number input
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '-360';
+    input.max = '360';
+    input.step = '1';
+    input.value = String(rotation);
+    input.style.cssText = `
+      width: 55px; padding: 5px 6px; border: 1px solid #d0d0d0;
+      border-radius: 6px; background: white; font-size: 12px;
+      color: #333; text-align: center;
+    `;
+    content.appendChild(input);
+
+    // Degree label
+    const degLabel = document.createElement('span');
+    degLabel.textContent = '°';
+    degLabel.style.cssText = 'font-size: 12px; color: #666; margin-left: -6px;';
+    content.appendChild(degLabel);
+
+    // Right button (+15°)
+    const rightBtn = makeIconBtn('fas fa-redo', 'Rotate right 15°', () => sync(rotation + 15));
+    content.appendChild(rightBtn);
+
+    // Reset button
+    const resetBtn = makeIconBtn('fas fa-refresh', 'Reset to 0°', () => sync(0));
+    resetBtn.style.marginLeft = '4px';
+    resetBtn.addEventListener('mouseenter', () => { resetBtn.style.background = '#ffe0e0'; });
+    resetBtn.addEventListener('mouseleave', () => { resetBtn.style.background = '#f5f5f7'; });
+    content.appendChild(resetBtn);
+
+    // Sync function
+    const sync = (newRotation) => {
+      rotation = Math.max(-360, Math.min(360, Number(newRotation) || 0));
+      input.value = String(rotation);
+      slider.value = String(Math.max(-180, Math.min(180, rotation)));
+      onChange(rotation);
+    };
+
+    slider.addEventListener('input', () => sync(Number(slider.value)));
+    input.addEventListener('change', () => sync(Number(input.value)));
+
+    this.openSubpanel(button, content);
+  }
+
+  /**
+   * Open stroke width subpanel (for shapes)
+   * @param {HTMLElement} button - Button that triggered the subpanel
+   * @param {number} currentWidth - Current stroke width
+   * @param {Function} onChange - Callback (width) => void
+   */
+  openStrokeWidthSubpanel(button, currentWidth, onChange) {
+    if (this.activeButton === button) {
+      this.closeSubpanel();
+      return;
+    }
+
+    const content = document.createElement('div');
+    const row = this.createSliderRow('Width', currentWidth || 2, 1, 20, 'px', onChange);
+    content.appendChild(row);
+
+    this.openSubpanel(button, content);
+  }
+
+  /**
+   * Open background color subpanel with color and opacity
+   * Same as BackgroundSubpanel class but as method
+   * @param {HTMLElement} button - Button that triggered the subpanel
+   * @param {Object} bgData - { color, opacity }
+   * @param {Function} onChange - Callback (color, opacity) => void
+   */
+  openBackgroundSubpanel(button, bgData, onChange) {
+    if (this.activeButton === button) {
+      this.closeSubpanel();
+      return;
+    }
+
+    const content = document.createElement('div');
+    content.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+
+    let { color = '#ffffff', opacity = 100 } = bgData || {};
+
+    // Color swatch with Vanilla Picker
+    const swatch = this.makeColorSwatchWithPicker(color, 26, (hex) => {
+      color = hex;
+      onChange(hex, opacity);
+    });
+    content.appendChild(swatch);
+
+    // Opacity dropdown
+    const { wrapper: opacityRow, input: opacityInput, update: updateOpacityLabel } = this.createDropdownInput(opacity, {
+      min: 0, max: 100, step: 1,
+      format: v => `${Math.round(v)}%`,
+      presetValues: [0, 25, 50, 75, 100],
+      onChange: (val) => {
+        opacity = val;
+        onChange(color, opacity);
+      }
+    });
+    content.appendChild(opacityRow);
+
+    this.openSubpanel(button, content);
+  }
+
+  /**
+   * Open border subpanel with color, opacity, width
+   * Same as BorderSubpanel class but as method
+   * @param {HTMLElement} button - Button that triggered the subpanel
+   * @param {Object} borderData - { color, opacity, width }
+   * @param {Function} onChange - Callback (color, opacity, width) => void
+   */
+  openBorderSubpanel(button, borderData, onChange) {
+    if (this.activeButton === button) {
+      this.closeSubpanel();
+      return;
+    }
+
+    const content = document.createElement('div');
+    content.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+
+    let { color = '#000000', opacity = 100, width = 0 } = borderData || {};
+
+    // Color swatch with Vanilla Picker
+    const swatch = this.makeColorSwatchWithPicker(color, 26, (hex) => {
+      color = hex;
+      sync();
+    });
+    swatch.style.opacity = width > 0 ? '1' : '0.45';
+    content.appendChild(swatch);
+
+    const sync = () => {
+      const w = Number(borderWidthInput.value);
+      const o = Number(borderOpacityInput.value);
+      updateBorderOpacityLabel(o);
+      updateBorderWidthLabel(w);
+      swatch.style.opacity = w > 0 ? '1' : '0.45';
+      onChange(color, o, w);
+    };
+
+    // Opacity dropdown
+    const { wrapper: borderOpacityRow, input: borderOpacityInput, update: updateBorderOpacityLabel } = this.createDropdownInput(opacity, {
+      min: 0, max: 100, step: 1,
+      format: v => `${Math.round(v)}%`,
+      presetValues: [0, 25, 50, 75, 100],
+      onChange: sync
+    });
+    content.appendChild(borderOpacityRow);
+
+    // Width label
+    const widthLabel = document.createElement('span');
+    widthLabel.textContent = 'Width:';
+    widthLabel.style.cssText = 'font-size: 11px; color: #666; white-space: nowrap;';
+    content.appendChild(widthLabel);
+
+    // Width dropdown
+    const { wrapper: borderWidthRow, input: borderWidthInput, update: updateBorderWidthLabel } = this.createDropdownInput(width, {
+      min: 0, max: 12, step: 1,
+      format: v => `${Math.round(Number(v) || 0)}px`,
+      presetValues: [0, 1, 2, 4, 6, 8, 12],
+      onChange: sync
+    });
+    content.appendChild(borderWidthRow);
+
+    this.openSubpanel(button, content);
+  }
+
+  /**
+   * Open border subpanel with shadow controls (like ImageControlPanelView.buildBorderSubpanel)
+   * Border: color, opacity, width + Shadow: color, opacity
+   * @param {HTMLElement} button - Button that triggered the subpanel
+   * @param {Object} data - { borderColor, borderOpacity, borderWidth, shadowColor, shadowOpacity }
+   * @param {Function} onChange - Callback (borderColor, borderOpacity, borderWidth, shadowColor, shadowOpacity) => void
+   */
+  openBorderWithShadowSubpanel(button, data, onChange) {
+    if (this.activeButton === button) {
+      this.closeSubpanel();
+      return;
+    }
+
+    const content = document.createElement('div');
+    content.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+
+    let {
+      borderColor = '#000000',
+      borderOpacity = 100,
+      borderWidth = 0,
+      shadowColor = '#000000',
+      shadowOpacity = 0,
+      shadowOffsetX = 4,
+      shadowOffsetY = 4
+    } = data || {};
+
+    // Border color swatch
+    const borderSwatch = this.makeColorSwatchWithPicker(borderColor, 26, (hex) => {
+      borderColor = hex;
+      sync();
+    });
+    borderSwatch.style.opacity = borderWidth > 0 ? '1' : '0.45';
+    content.appendChild(borderSwatch);
+
+    const sync = () => {
+      const bw = Number(borderWidthInput.value);
+      const bo = Number(borderOpacityInput.value);
+      const so = Number(shadowOpacityInput.value);
+      const sox = Number(shadowOffsetXInput.value);
+      const soy = Number(shadowOffsetYInput.value);
+      borderSwatch.style.opacity = bw > 0 ? '1' : '0.45';
+      shadowSwatch.style.opacity = so > 0 ? '1' : '0.45';
+      onChange(borderColor, bo, bw, shadowColor, so, sox, soy);
+    };
+
+    // Border opacity dropdown
+    const { wrapper: borderOpacityRow, input: borderOpacityInput } = this.createDropdownInput(borderOpacity, {
+      min: 0, max: 100, step: 1,
+      format: v => `${Math.round(v)}%`,
+      presetValues: [0, 25, 50, 75, 100],
+      onChange: sync
+    });
+    content.appendChild(borderOpacityRow);
+
+    // Width label
+    const widthLabel = document.createElement('span');
+    widthLabel.textContent = 'Width:';
+    widthLabel.style.cssText = 'font-size: 11px; color: #666; white-space: nowrap;';
+    content.appendChild(widthLabel);
+
+    // Border width dropdown
+    const { wrapper: borderWidthRow, input: borderWidthInput } = this.createDropdownInput(borderWidth, {
+      min: 0, max: 12, step: 1,
+      format: v => `${Math.round(Number(v) || 0)}px`,
+      presetValues: [0, 1, 2, 4, 6, 8, 12],
+      onChange: sync
+    });
+    content.appendChild(borderWidthRow);
+
+    // Separator
+    const sep = document.createElement('div');
+    sep.style.cssText = 'width: 1px; height: 20px; background: #e0e0e0;';
+    content.appendChild(sep);
+
+    // Shadow label
+    const shadowLabel = document.createElement('span');
+    shadowLabel.textContent = 'Shadow';
+    shadowLabel.style.cssText = 'font-size: 11px; font-weight: 600; color: #444; white-space: nowrap;';
+    content.appendChild(shadowLabel);
+
+    // Shadow color swatch
+    const shadowSwatch = this.makeColorSwatchWithPicker(shadowColor, 26, (hex) => {
+      shadowColor = hex;
+      sync();
+    });
+    shadowSwatch.style.opacity = shadowOpacity > 0 ? '1' : '0.45';
+    content.appendChild(shadowSwatch);
+
+    // Shadow opacity slider
+    const { wrapper: shadowOpacityRow, input: shadowOpacityInput } = this.createCompactSlider('%:', shadowOpacity, {
+      min: 0, max: 100, step: 5,
+      onChange: (val) => {
+        shadowSwatch.style.opacity = val > 0 ? '1' : '0.45';
+        sync();
+      }
+    });
+    content.appendChild(shadowOpacityRow);
+
+    // Shadow offset X slider
+    const { wrapper: shadowOffsetXRow, input: shadowOffsetXInput } = this.createCompactSlider('X:', shadowOffsetX, {
+      min: -20, max: 20, step: 1,
+      onChange: sync
+    });
+    content.appendChild(shadowOffsetXRow);
+
+    // Shadow offset Y slider
+    const { wrapper: shadowOffsetYRow, input: shadowOffsetYInput } = this.createCompactSlider('Y:', shadowOffsetY, {
+      min: -20, max: 20, step: 1,
+      onChange: sync
+    });
+    content.appendChild(shadowOffsetYRow);
+
+    this.openSubpanel(button, content);
+  }
+
+  /**
+   * Open text formatting subpanel (color, size, align, bold/italic)
+   * Same as TextSubpanel but as method for shapes
+   * @param {HTMLElement} button - Button that triggered the subpanel
+   * @param {Object} textData - { textColor, textSize, textAlign, fontWeight, fontStyle }
+   * @param {Function} onChange - Callback (changes) => void
+   */
+  openTextSubpanel(button, textData, onChange) {
+    if (this.activeButton === button) {
+      this.closeSubpanel();
+      return;
+    }
+
+    const content = document.createElement('div');
+    content.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+
+    let {
+      textColor = '#ffffff',
+      textSize = 16,
+      textAlign = 'center',
+      fontWeight = 'normal',
+      fontStyle = 'normal'
+    } = textData || {};
+
+    // Color swatch with Vanilla Picker
+    const swatch = this.makeColorSwatchWithPicker(textColor, 26, (hex) => {
+      textColor = hex;
+      onChange({ textColor: hex });
+    });
+    content.appendChild(swatch);
+
+    // Font size dropdown
+    const sizeLabel = document.createElement('span');
+    sizeLabel.textContent = 'Size:';
+    sizeLabel.style.cssText = 'font-size: 11px; color: #666; white-space: nowrap;';
+    content.appendChild(sizeLabel);
+
+    const { wrapper: sizeRow, input: sizeInput } = this.createDropdownInput(textSize, {
+      min: 8, max: 72, step: 1,
+      format: v => `${Math.round(v)}px`,
+      presetValues: [8, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72],
+      onChange: (val) => {
+        textSize = val;
+        onChange({ textSize: val });
+      }
+    });
+    content.appendChild(sizeRow);
+
+    // Bold/Italic buttons
+    const styleGroup = document.createElement('div');
+    styleGroup.style.cssText = 'display: flex; gap: 2px;';
+    content.appendChild(styleGroup);
+
+    const makeMiniBtn = (icon, isActive, onClick) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.innerHTML = `<i class="${icon}" style="font-size: 12px; color: #333;"></i>`;
+      btn.style.cssText = `
+        all: unset;
+        width: 26px; height: 26px; border: 1px solid #ccc; border-radius: 4px;
+        background: ${isActive ? '#e0ebff' : '#fff'}; cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        box-sizing: border-box;
+      `;
+      btn.addEventListener('click', onClick);
+      return btn;
+    };
+
+    const boldBtn = makeMiniBtn('fas fa-bold', fontWeight === 'bold', () => {
+      fontWeight = fontWeight === 'bold' ? 'normal' : 'bold';
+      boldBtn.style.background = fontWeight === 'bold' ? '#e0ebff' : '#fff';
+      onChange({ fontWeight });
+    });
+    styleGroup.appendChild(boldBtn);
+
+    const italicBtn = makeMiniBtn('fas fa-italic', fontStyle === 'italic', () => {
+      fontStyle = fontStyle === 'italic' ? 'normal' : 'italic';
+      italicBtn.style.background = fontStyle === 'italic' ? '#e0ebff' : '#fff';
+      onChange({ fontStyle });
+    });
+    styleGroup.appendChild(italicBtn);
+
+    // Alignment buttons
+    const alignGroup = document.createElement('div');
+    alignGroup.style.cssText = 'display: flex; gap: 2px;';
+    content.appendChild(alignGroup);
+
+    const alignBtns = {};
+    ['left', 'center', 'right'].forEach(align => {
+      const btn = makeMiniBtn(`fas fa-align-${align}`, textAlign === align, () => {
+        textAlign = align;
+        Object.entries(alignBtns).forEach(([a, b]) => {
+          b.style.background = a === align ? '#e0ebff' : '#fff';
+        });
+        onChange({ textAlign: align });
+      });
+      alignBtns[align] = btn;
+      alignGroup.appendChild(btn);
+    });
+
+    this.openSubpanel(button, content);
+  }
+
+  /**
+   * Helper: create color swatch element (same as TextStylingPanelView.makeSwatch)
+   * @private
+   */
+  _makeColorSwatch(color, size = 26) {
+    const swatch = document.createElement('div');
+    swatch.style.cssText = `
+      width: ${size}px;
+      height: ${size}px;
+      border-radius: 8px;
+      border: 1px solid #d0d0d0;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+      cursor: pointer;
+      background: ${color};
+      position: relative;
+      overflow: hidden;
+    `;
+    return swatch;
+  }
+
+  /**
+   * Create a color swatch with Vanilla Picker attached
+   * @param {string} color - Initial color hex
+   * @param {number} size - Swatch size in px
+   * @param {Function} onChange - Callback (hexColor) => void
+   * @returns {HTMLElement} Swatch element with picker attached
+   */
+  makeColorSwatchWithPicker(color, size, onChange) {
+    const swatch = this._makeColorSwatch(color, size);
+    
+    // Use global attachColorPicker (two-level picker with swatches)
+    if (window.WBE_attachColorPicker) {
+      const pickerApi = window.WBE_attachColorPicker(swatch, color, onChange);
+      swatch._updateColor = pickerApi.setColor;
+    }
+    
+    return swatch;
+  }
+
+  /**
+   * Create a lock/freeze toggle button (same icon as ImageControlPanelView)
+   * @param {boolean} isFrozen - Current frozen state
+   * @param {Function} onToggle - Callback (newFrozenState) => void
+   * @returns {HTMLElement} Button element
+   */
+  makeLockButton(isFrozen, onToggle) {
+    const btn = this.makeToolbarButton('Lock', 'fas fa-lock', () => {
+      const newState = !isFrozen;
+      onToggle(newState);
+    });
+    if (isFrozen) {
+      this.setButtonActive(btn, true);
+    }
+    return btn;
+  }
+
+  /**
+   * Destroy panel and cleanup
+   */
+  destroy() {
+    this.closeSubpanel();
+    if (this.panel) {
+      this.panel.remove();
+      this.panel = null;
+    }
+    this.toolbar = null;
   }
 }
 
@@ -7034,6 +8465,35 @@ class ImageControlPanelView {
       getValue: () => Number(input.value)
     };
   }
+  
+  /**
+   * Create a compact horizontal slider with label (no number input)
+   */
+  createCompactSlider(label, value, { min, max, step = 1, onChange = null }) {
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'display: flex; align-items: center; gap: 4px;';
+
+    const labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    labelEl.style.cssText = 'font-size: 11px; color: #666; white-space: nowrap;';
+    wrapper.appendChild(labelEl);
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = String(min);
+    slider.max = String(max);
+    slider.step = String(step);
+    slider.value = String(value);
+    slider.style.cssText = 'width: 60px; height: 4px; cursor: pointer;';
+    wrapper.appendChild(slider);
+
+    slider.addEventListener('input', () => {
+      if (onChange) onChange(Number(slider.value));
+    });
+
+    return { wrapper, slider, input: slider, setValue: (val) => { slider.value = String(val); } };
+  }
+  
   setButtonActive(button, isActive) {
     if (!button) return;
     if (isActive) {
@@ -7048,6 +8508,7 @@ class ImageControlPanelView {
       button.style.color = "#333";
     }
   }
+  
   makeToolbarButton(label, iconClass, onButtonClick) {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -7116,11 +8577,9 @@ class ImageControlPanelView {
     const swatch = uiHelpers.makeSwatch(stylingData.borderColor.hex, 26);
     swatch.style.opacity = currentBorderWidth > 0 ? "1" : "0.45";
     sub.appendChild(swatch);
-    const borderColorInput = document.createElement("input");
-    borderColorInput.type = "color";
-    borderColorInput.value = stylingData.borderColor.hex;
-    borderColorInput.style.cssText = "position:absolute; opacity:0; pointer-events:none;";
-    sub.appendChild(borderColorInput);
+    
+    // Use Vanilla Picker instead of native color input
+    let currentBorderColor = stylingData.borderColor.hex;
     
     // Border Opacity
     const {
@@ -7198,25 +8657,42 @@ class ImageControlPanelView {
     const shadowSwatch = uiHelpers.makeSwatch(stylingData.shadowColor.hex, 26);
     shadowSwatch.style.opacity = stylingData.shadowColor.opacity > 0 ? "1" : "0.45";
     sub.appendChild(shadowSwatch);
-    const shadowColorInput = document.createElement("input");
-    shadowColorInput.type = "color";
-    shadowColorInput.value = stylingData.shadowColor.hex;
-    shadowColorInput.style.cssText = "position:absolute; opacity:0; pointer-events:none;";
-    sub.appendChild(shadowColorInput);
     
-    // Shadow Opacity
+    // Use Vanilla Picker instead of native color input
+    let currentShadowColor = stylingData.shadowColor.hex;
+    
+    // Shadow Opacity slider
     const {
       wrapper: shadowOpacityRow,
-      input: shadowOpacityInput,
-      update: updateShadowOpacityLabel
-    } = uiHelpers.createDropdownInput(stylingData.shadowColor.opacity, {
+      input: shadowOpacityInput
+    } = uiHelpers.createCompactSlider('%:', stylingData.shadowColor.opacity, {
       min: 0,
       max: 100,
-      step: 1,
-      format: v => `${Math.round(v)}%`,
-      presetValues: [0, 25, 50, 75, 100]
+      step: 5
     });
     sub.appendChild(shadowOpacityRow);
+
+    // Shadow offset X slider
+    const {
+      wrapper: shadowOffsetXRow,
+      input: shadowOffsetXInput
+    } = uiHelpers.createCompactSlider('X:', stylingData.shadowOffsetX ?? 4, {
+      min: -20,
+      max: 20,
+      step: 1
+    });
+    sub.appendChild(shadowOffsetXRow);
+
+    // Shadow offset Y slider
+    const {
+      wrapper: shadowOffsetYRow,
+      input: shadowOffsetYInput
+    } = uiHelpers.createCompactSlider('Y:', stylingData.shadowOffsetY ?? 4, {
+      min: -20,
+      max: 20,
+      step: 1
+    });
+    sub.appendChild(shadowOffsetYRow);
 
     // Sync function
     const sync = () => {
@@ -7224,27 +8700,37 @@ class ImageControlPanelView {
       const borderOpacity = Number(borderOpacityInput.value);
       const borderRadius = Number(borderRadiusInput.value);
       const shadowOpacity = Number(shadowOpacityInput.value);
+      const shadowOffsetX = Number(shadowOffsetXInput.value);
+      const shadowOffsetY = Number(shadowOffsetYInput.value);
       updateBorderOpacityLabel(borderOpacity);
       updateBorderWidthLabel(borderWidth);
       updateBorderRadiusLabel(borderRadius);
-      updateShadowOpacityLabel(shadowOpacity);
       swatch.style.opacity = borderWidth > 0 ? "1" : "0.45";
       shadowSwatch.style.opacity = shadowOpacity > 0 ? "1" : "0.45";
       controller.handleBorderChange(
-        borderColorInput.value,
+        currentBorderColor,
         borderOpacity,
         borderWidth,
         borderRadius,
-        shadowColorInput.value,
-        shadowOpacity
+        currentShadowColor,
+        shadowOpacity,
+        shadowOffsetX,
+        shadowOffsetY
       );
     };
 
-    swatch.addEventListener("click", () => borderColorInput.click());
-    borderColorInput.addEventListener("change", e => {
-      swatch.style.background = e.target.value;
-      sync();
-    });
+    // Attach Vanilla Picker to swatches
+    if (window.WBE_attachColorPicker) {
+      window.WBE_attachColorPicker(swatch, currentBorderColor, (hex) => {
+        currentBorderColor = hex;
+        sync();
+      });
+      window.WBE_attachColorPicker(shadowSwatch, currentShadowColor, (hex) => {
+        currentShadowColor = hex;
+        sync();
+      });
+    }
+    
     borderOpacityInput.addEventListener("input", () => {
       updateBorderOpacityLabel(Number(borderOpacityInput.value));
       updateBorderWidthLabel(Number(borderWidthInput.value));
@@ -7257,29 +8743,28 @@ class ImageControlPanelView {
     borderRadiusInput.addEventListener("input", () => {
       updateBorderRadiusLabel(Number(borderRadiusInput.value));
     });
-    shadowSwatch.addEventListener("click", () => shadowColorInput.click());
-    shadowColorInput.addEventListener("change", e => {
-      shadowSwatch.style.background = e.target.value;
-      sync();
-    });
-    shadowOpacityInput.addEventListener("input", () => {
-      updateShadowOpacityLabel(Number(shadowOpacityInput.value));
-      shadowSwatch.style.opacity = Number(shadowOpacityInput.value) > 0 ? "1" : "0.45";
-    });
     borderOpacityInput.addEventListener("change", sync);
     borderWidthInput.addEventListener("change", sync);
     borderRadiusInput.addEventListener("change", sync);
-    shadowOpacityInput.addEventListener("change", sync);
     
     // Also sync on dropdown change (dropdown is sibling of input in wrapper)
     const borderOpacityDropdown = borderOpacityRow.querySelector("select");
     const borderWidthDropdown = borderWidthRow.querySelector("select");
     const borderRadiusDropdown = borderRadiusRow.querySelector("select");
-    const shadowOpacityDropdown = shadowOpacityRow.querySelector("select");
     if (borderOpacityDropdown) borderOpacityDropdown.addEventListener("change", sync);
     if (borderWidthDropdown) borderWidthDropdown.addEventListener("change", sync);
     if (borderRadiusDropdown) borderRadiusDropdown.addEventListener("change", sync);
-    if (shadowOpacityDropdown) shadowOpacityDropdown.addEventListener("change", sync);
+    
+    // Sync on slider input for shadow controls
+    const shadowOpacitySlider = shadowOpacityRow.querySelector('input[type="range"]');
+    const shadowOffsetXSlider = shadowOffsetXRow.querySelector('input[type="range"]');
+    const shadowOffsetYSlider = shadowOffsetYRow.querySelector('input[type="range"]');
+    if (shadowOpacitySlider) shadowOpacitySlider.addEventListener("input", () => {
+      shadowSwatch.style.opacity = Number(shadowOpacityInput.value) > 0 ? "1" : "0.45";
+      sync();
+    });
+    if (shadowOffsetXSlider) shadowOffsetXSlider.addEventListener("input", sync);
+    if (shadowOffsetYSlider) shadowOffsetYSlider.addEventListener("input", sync);
 
     return sub;
   }
@@ -7514,7 +8999,14 @@ class ImageControlPanelView {
   isClickInside(ev) {
     if (!this.panel) return false;
     const path = ev.composedPath();
-    return path.includes(this.panel) || (this.activeSubpanel && path.includes(this.activeSubpanel));
+    const isInPanel = path.includes(this.panel) || (this.activeSubpanel && path.includes(this.activeSubpanel));
+    if (isInPanel) return true;
+    // Check if click is on color picker elements
+    const target = ev.target;
+    if (target?.closest?.('.wbe-color-swatches-popup') || target?.closest?.('.pcr-app')) {
+      return true;
+    }
+    return false;
   }
 
   bindEvents(controller, onOutside, onKey) {
@@ -7546,6 +9038,7 @@ class ImageControlPanelView {
       makeSwatch: this.makeSwatch.bind(this),
       createSlider: this.createSlider.bind(this),
       createDropdownInput: this.createDropdownInput.bind(this),
+      createCompactSlider: this.createCompactSlider.bind(this),
       setButtonActive: this.setButtonActive.bind(this)
     };
   }
@@ -7557,14 +9050,16 @@ class ImageControlController {
     this.registry = registry;
     this.imageId = imageId;
   }
-  handleBorderChange(borderHex, borderOpacity, borderWidth, borderRadius, shadowHex, shadowOpacity) {
+  handleBorderChange(borderHex, borderOpacity, borderWidth, borderRadius, shadowHex, shadowOpacity, shadowOffsetX, shadowOffsetY) {
     this.registry.update(this.imageId, {
       borderHex,
       borderOpacity,
       borderWidth,
       borderRadius,
       shadowHex,
-      shadowOpacity
+      shadowOpacity,
+      shadowOffsetX: shadowOffsetX ?? 4,
+      shadowOffsetY: shadowOffsetY ?? 4
     }, 'local');
   }
   handleLockChange(frozen) {
@@ -7683,6 +9178,37 @@ class ImageControlController {
       // Restore imageElement opacity
       imageElement.style.opacity = '1';
     }
+    
+    // CRITICAL: Reset crop when switching mask type
+    // Don't try to preserve two different crop formats - just reset to defaults
+    const scale = obj.scale || 1;
+    const baseWidth = obj.baseWidth || 200;
+    const baseHeight = obj.baseHeight || 200;
+    const fullWidth = Math.round(baseWidth * scale);
+    const fullHeight = Math.round(baseHeight * scale);
+    
+    // Reset crop data in registry
+    this.registry.update(this.imageId, {
+      crop: { top: 0, right: 0, bottom: 0, left: 0 },
+      circleOffset: { x: 0, y: 0 },
+      circleRadius: null // auto = min(width, height) / 2
+    }, 'local');
+    
+    // Reset container to full size (crop mode shows full image)
+    container.style.width = `${fullWidth}px`;
+    container.style.height = `${fullHeight}px`;
+    
+    const imageWrapper = container.querySelector('.wbe-image-wrapper');
+    if (imageWrapper) {
+      imageWrapper.style.width = `${fullWidth}px`;
+      imageWrapper.style.height = `${fullHeight}px`;
+    }
+    
+    // Reset imageElement to origin
+    imageElement.style.width = `${fullWidth}px`;
+    imageElement.style.height = `${fullHeight}px`;
+    imageElement.style.left = '0px';
+    imageElement.style.top = '0px';
     
     // 3. Recreate gizmos for new mask type
     layer.removeCropHandles(this.imageId);
@@ -7810,7 +9336,9 @@ class ImageControlPanel {
           borderColor: borderColorInfo,
           borderWidth: obj.borderWidth || DEFAULT_BORDER_WIDTH,
           borderRadius: obj.borderRadius || DEFAULT_BORDER_RADIUS,
-          shadowColor: shadowColorInfo
+          shadowColor: shadowColorInfo,
+          shadowOffsetX: obj.shadowOffsetX ?? 4,
+          shadowOffsetY: obj.shadowOffsetY ?? 4
         }, uiHelpers);
         subpanelElement = borderSubpanel;
       } else if (type === "lock") {
@@ -7930,16 +9458,8 @@ class ImageControlPanel {
       if (clickedInsideImage) return;
       this.hide();
     };
-    const onKey = ev => {
-      if (ev.key === "Escape") {
-        if (this.view.activeSubpanel) {
-          this.view.closeSubpanel(this.view.setButtonActive.bind(this.view));
-        } else {
-          this.hide();
-        }
-      }
-    };
-    this.view.bindEvents(this.controller, onOutside, onKey);
+    // Note: Escape is captured by Foundry, panels close on deselect
+    this.view.bindEvents(this.controller, onOutside, null);
   }
   hide() {
     if (this.positionManager) {
@@ -8029,7 +9549,8 @@ const MASS_SELECTION_CSS = `
   /* Bounding box - around all selected objects (dark blue like old code) */
   .wbe-mass-bounding-box {
     position: absolute;
-    border: 3px solid #1a237e;
+    border: none;
+    box-shadow: inset 0 0 0 1px #1a237e;
     background: rgba(26, 35, 126, 0.05);
     pointer-events: auto;
     z-index: 1000;
@@ -8573,12 +10094,12 @@ class MassSelectionController {
    * Convert screen delta to world delta (accounting for zoom/pan)
    */
   _screenToWorldDelta(screenDx, screenDy) {
-    // Get current transform from layer
-    const transform = this.layer?.currentTransform || { scale: 1 };
+    // Get canvas zoom for coordinate conversion
+    const canvasScale = getCanvasScale();
     const sensitivity = InteractionManager.MASS_DRAG_SENSITIVITY;
     return {
-      x: (screenDx / transform.scale) * sensitivity,
-      y: (screenDy / transform.scale) * sensitivity
+      x: (screenDx / canvasScale) * sensitivity,
+      y: (screenDy / canvasScale) * sensitivity
     };
   }
 
@@ -9751,29 +11272,39 @@ class InteractionManager {
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    // Find container and image ID from icon element
-    const container = iconElement.closest('.wbe-image-container');
-    if (!container) return;
+    // Find container - support any object type via getContainerSelector() or data-objectId
+    let container = null;
+    let objectId = iconElement.dataset.objectId; // Shapes store id in data attribute
+    
+    if (objectId) {
+      // Object ID from data attribute (shapes, etc.)
+      container = iconElement.closest('.wbe-shape-container') || iconElement.parentElement;
+    } else {
+      // Legacy: find image container
+      container = iconElement.closest('.wbe-image-container');
+      objectId = container?.id;
+    }
+    
+    if (!container || !objectId) return;
 
-    const imageId = container.id;
-    const obj = this.registry.get(imageId);
+    const obj = this.registry.get(objectId);
     if (!obj || !obj.frozen) return;
 
     // Start hold-to-activate
     const HOLD_DURATION = 1000; // 1 second
     const holdTimer = setTimeout(() => {
       // Check current frozen state from Registry
-      const currentObj = this.registry.get(imageId);
+      const currentObj = this.registry.get(objectId);
       if (this.unfreezeHoldState && currentObj && currentObj.frozen) {
         // Hold completed - unfreeze
-        this._completeUnfreezeHold(imageId);
+        this._completeUnfreezeHold(objectId);
       }
     }, HOLD_DURATION);
 
     this.unfreezeHoldState = {
       iconElement,
-      containerId: imageId,
-      imageId,
+      containerId: objectId,
+      objectId,
       holdTimer,
       startTime: Date.now()
     };
@@ -9849,9 +11380,9 @@ class InteractionManager {
   }
 
   /**
-   * Complete hold-to-activate and unlock image hold-to-activate and unlock image
+   * Complete hold-to-activate and unlock object (any type)
    */
-  _completeUnfreezeHold(imageId) {
+  _completeUnfreezeHold(objectId) {
     if (!this.unfreezeHoldState) return;
 
     const { containerId } = this.unfreezeHoldState;
@@ -9863,7 +11394,7 @@ class InteractionManager {
     if (this.layer) {
       this.layer._handleUnfreezeAction(
         this.layer.getObjectContainer(containerId),
-        imageId
+        objectId
       );
     }
   }
@@ -9923,13 +11454,18 @@ class InteractionManager {
     }
   }
   _handleDblClick(e) {
-    // Handle Text Editing (double click on text object)
+    // Handle Text Editing (double click on editable object)
     const target = this._hitTest(e.clientX, e.clientY);
     if (target.type === 'object' && target.object) {
       const obj = target.object;
       // Polymorphic call: check if object is editable
       if (obj.canEdit && obj.canEdit()) {
-        this._startEditText(obj.id);
+        // Shapes have their own startEditing method
+        if (obj.type === 'shape' && obj.startEditing) {
+          obj.startEditing();
+        } else {
+          this._startEditText(obj.id);
+        }
       }
     }
   }
@@ -9969,13 +11505,19 @@ class InteractionManager {
       imageStyle: imageElement ? { left: imageElement.style.left, top: imageElement.style.top, width: imageElement.style.width, height: imageElement.style.height } : null
     });
 
+    // CRITICAL: Need both object scale AND canvas zoom for correct delta conversion
+    // Screen pixels → world pixels: divide by canvasScale
+    // World pixels → object pixels: divide by objectScale
+    const objectScale = obj.scale !== undefined ? obj.scale : 1;
+    const canvasScale = getCanvasScale();
+    
     this.cropDragState = {
       id,
       type: 'rect',
       direction,
       startPos,
       startCrop,
-      startScale: obj.scale !== undefined ? obj.scale : 1
+      startScale: objectScale * canvasScale
     };
   }
 
@@ -9997,18 +11539,24 @@ class InteractionManager {
     const imageElement = this.layer?.getImageElement(id);
     if (!imageElement) return;
 
-    const width = imageElement.offsetWidth || obj.baseWidth || 200;
-    const height = imageElement.offsetHeight || obj.baseHeight || 200;
+    // CRITICAL: Use BASE dimensions, not scaled offsetWidth/offsetHeight
+    // circleRadius is stored in base coordinates
+    const width = obj.baseWidth || imageElement.naturalWidth || 200;
+    const height = obj.baseHeight || imageElement.naturalHeight || 200;
     const fallback = Math.min(width, height) / 2;
     const startRadius = obj.circleRadius !== null ? obj.circleRadius : fallback;
 
+    // CRITICAL: Need both object scale AND canvas zoom for correct delta conversion
+    const objectScale = obj.scale !== undefined ? obj.scale : 1;
+    const canvasScale = getCanvasScale();
+    
     this.cropDragState = {
       id,
       type: 'circle-resize',
       startX: e.clientX,
       startY: e.clientY,
       startRadius,
-      startScale: obj.scale !== undefined ? obj.scale : 1
+      startScale: objectScale * canvasScale
     };
   }
 
@@ -10027,13 +11575,17 @@ class InteractionManager {
     // Disable Foundry mass-select controls during crop drag
     FoundryAPIAdapter.disableMassSelect();
 
+    // CRITICAL: Need both object scale AND canvas zoom for correct delta conversion
+    const objectScale = obj.scale !== undefined ? obj.scale : 1;
+    const canvasScale = getCanvasScale();
+    
     this.cropDragState = {
       id,
       type: 'circle-drag',
       startX: e.clientX,
       startY: e.clientY,
       startOffset: { ...obj.circleOffset },
-      startScale: obj.scale !== undefined ? obj.scale : 1
+      startScale: objectScale * canvasScale
     };
   }
 
@@ -10085,8 +11637,10 @@ class InteractionManager {
       const imageElement = this.layer?.getImageElement(state.id);
       if (!imageElement) return;
 
-      const width = imageElement.offsetWidth || obj.baseWidth || 200;
-      const height = imageElement.offsetHeight || obj.baseHeight || 200;
+      // CRITICAL: Use BASE dimensions, not scaled offsetWidth/offsetHeight
+      // circleRadius is stored in base coordinates
+      const width = obj.baseWidth || imageElement.naturalWidth || 200;
+      const height = obj.baseHeight || imageElement.naturalHeight || 200;
       const maxRadius = Math.min(width, height) / 2;
       const newRadius = Math.max(10, Math.min(maxRadius, state.startRadius + deltaRadius));
 
@@ -10182,7 +11736,18 @@ class InteractionManager {
     }
 
     // Update crop handles position and clip-path one final time
-    this.layer?.updateCropHandlesPosition(state.id);
+    // NOTE: After crop drag, container is already shrunk to visible area,
+    // so we need to update handles with left: 0, top: 0 (not dims.left/top)
+    const handles = this.layer?._cropHandles?.get(state.id);
+    if (handles && (handles.top || handles.right || handles.bottom || handles.left)) {
+      const container = this.layer?.getObjectContainer(state.id);
+      if (container) {
+        const canvasScale = getCanvasScale();
+        const width = parseFloat(container.style.width) || 0;
+        const height = parseFloat(container.style.height) || 0;
+        CropGizmoManager.updateRectHandlesPosition(handles, { width, height, left: 0, top: 0 }, canvasScale);
+      }
+    }
     this.layer?.updateImageClipPath(state.id);
     
     // Show panel again after crop drag ends (was hidden during drag)
@@ -10340,7 +11905,7 @@ class InteractionManager {
   _isUIElement(element) {
     if (!element) return false;
     
-    // Check for UI panels and controls
+    // Check for UI panels and controls (built-in)
     if (element.closest('#ui-left') || 
         element.closest('#ui-right') || 
         element.closest('#ui-top') || 
@@ -10351,6 +11916,13 @@ class InteractionManager {
         element.closest('.wbe-image-resize-handle') || 
         element.closest('.wbe-mass-selection-box')) {
       return true;
+    }
+    
+    // Check for registered UI selectors (extensibility API)
+    for (const selector of Whiteboard.getUISelectors()) {
+      if (element.closest(selector)) {
+        return true;
+      }
     }
     
     // Check for editable elements (contentEditable, inputs)
@@ -10632,7 +12204,7 @@ class InteractionManager {
       // Disable Foundry mass-select controls during drag
       FoundryAPIAdapter.disableMassSelect();
 
-      const scale = canvas.stage.scale.x;
+      const scale = getCanvasScale();
 
       // Save current text width from DOM to prevent browser from auto-changing it during drag
       // Polymorphic approach: only texts have textWidth, so check via canEdit
@@ -10786,13 +12358,14 @@ class InteractionManager {
     this._setPointerEvents(false);
 
     // Track Pan Start
+    const canvasScale = getCanvasScale();
     this.panState = {
       startX: e.clientX,
       startY: e.clientY,
       pivotX: canvas.stage.pivot.x,
       pivotY: canvas.stage.pivot.y,
-      scaleX: canvas.stage.scale.x,
-      scaleY: canvas.stage.scale.y
+      scaleX: canvasScale,
+      scaleY: canvasScale
     };
   }
   _updatePan(e) {
@@ -10844,10 +12417,15 @@ class InteractionManager {
 
     // Disable Foundry mass-select controls during resize
     FoundryAPIAdapter.disableMassSelect();
+    
+    // Save canvas zoom for delta normalization
+    const canvasZoom = getCanvasScale();
+    
     this.widthResizeState = {
       id,
       startX: e.clientX,
-      startWidth: textElement.offsetWidth
+      startWidth: textElement.offsetWidth,
+      canvasZoom
     };
 
     // Change cursor (on board to override any other cursor logic)
@@ -10858,7 +12436,8 @@ class InteractionManager {
     const {
       id,
       startX,
-      startWidth
+      startWidth,
+      canvasZoom
     } = this.widthResizeState;
     if (!this.layer) return;
     const textElement = this.layer.getTextElement(id);
@@ -10866,7 +12445,8 @@ class InteractionManager {
 
     // Keep cursor as ew-resize during resize (on board to override any other cursor logic)
     this.layer.applyBoardCursor('ew-resize');
-    const deltaX = e.clientX - startX;
+    // CRITICAL: Normalize deltaX by canvas zoom for consistent behavior at any zoom level
+    const deltaX = (e.clientX - startX) / canvasZoom;
     const newWidth = Math.max(50, startWidth + deltaX);
 
     // Update Registry (Single Source of Truth) - Layer will update DOM automatically
@@ -10942,10 +12522,14 @@ class InteractionManager {
     const startScale = obj.scale !== undefined ? obj.scale : 1;
     const crop = obj.crop || { top: 0, right: 0, bottom: 0, left: 0 };
     
+    // CRITICAL: Save canvas zoom to normalize delta during resize
+    const canvasZoom = getCanvasScale();
+    
     this.scaleResizeState = {
       id,
       startX: e.clientX,
       startScale,
+      canvasZoom,
       // Save starting crop offsets to keep container position stable during resize
       startDimsLeft: crop.left * startScale,
       startDimsTop: crop.top * startScale
@@ -10959,7 +12543,8 @@ class InteractionManager {
     const {
       id,
       startX,
-      startScale
+      startScale,
+      canvasZoom
     } = this.scaleResizeState;
     // Use different constants for texts and images due to different scaling mechanisms
     const obj = this.registry.get(id);
@@ -10969,7 +12554,8 @@ class InteractionManager {
     const sensitivity = obj.type === 'text' 
       ? InteractionManager.SCALE_SENSITIVITY_TEXT 
       : InteractionManager.SCALE_SENSITIVITY_IMAGE;
-    const deltaX = e.clientX - startX;
+    // CRITICAL: Normalize deltaX by canvas zoom for consistent behavior at any zoom level
+    const deltaX = (e.clientX - startX) / canvasZoom;
     const newScale = startScale + deltaX * sensitivity;
     const clampedScale = Math.max(InteractionManager.MIN_SCALE, Math.min(InteractionManager.MAX_SCALE, newScale));
 
@@ -11151,6 +12737,12 @@ class InteractionManager {
     // Clear mass selection
     if (this.massSelection) {
       this.massSelection.clear();
+    }
+    
+    // Finish shape editing if any (polymorphic - shapes register themselves)
+    if (this._editingObject?.finishEditing) {
+      this._editingObject.finishEditing();
+      this._editingObject = null;
     }
     
     // // Finish editing if any
@@ -13476,6 +15068,9 @@ function _initGMWarningIndicator() {
 class Whiteboard {
   // Registry for custom object types (extensibility API)
   static _customTypes = new Map();
+  
+  // Registry for UI selectors to ignore in hit-test (extensibility API)
+  static _uiSelectors = new Set();
 
   /**
    * Register a custom object type (extensibility API for other modules)
@@ -13562,6 +15157,38 @@ class Whiteboard {
   }
 
   /**
+   * Register a UI selector to ignore in hit-test (extensibility API)
+   * Use this for custom panels that should not trigger object deselection
+   * 
+   * @param {string} selector - CSS selector (e.g., '.my-panel', '#my-ui')
+   * 
+   * @example
+   * window.Whiteboard.registerUISelector('.my-custom-panel');
+   */
+  static registerUISelector(selector) {
+    if (!selector || typeof selector !== 'string') return;
+    this._uiSelectors.add(selector);
+    console.log(`${MODULE_ID} | Registered UI selector: ${selector}`);
+  }
+
+  /**
+   * Check if selector is registered as UI element
+   * @param {string} selector
+   * @returns {boolean}
+   */
+  static isRegisteredUISelector(selector) {
+    return this._uiSelectors.has(selector);
+  }
+
+  /**
+   * Get all registered UI selectors
+   * @returns {Set<string>}
+   */
+  static getUISelectors() {
+    return this._uiSelectors;
+  }
+
+  /**
    * Get all container selectors (built-in + custom types)
    * Used for hit-testing and DOM queries
    * @returns {string} CSS selector string
@@ -13645,8 +15272,38 @@ class Whiteboard {
       // Initialize GM warning indicator
       _initGMWarningIndicator();
 
-      // Register mass selection tool in Foundry UI (uses getSceneControlButtons hook)
-      MassSelectionToolInjector.register(this.interaction.massSelection);
+      // Initialize WBE Floating Toolbar (независимый от Foundry)
+      initToolbar();
+      
+      // Register mass selection in WBE Toolbar
+      const massSelCtrl = this.interaction.massSelection;
+      const MASS_SEL_STORAGE_KEY = 'wbe-mass-selection-toggle';
+      const savedToggleState = localStorage.getItem(MASS_SEL_STORAGE_KEY) === 'true';
+      massSelCtrl.toggleMode = savedToggleState;
+      
+      registerTool({
+        id: 'wbe-mass-selection',
+        title: 'Mass Selection (toggle mode)',
+        icon: 'fa-solid fa-vector-square',
+        group: 'selection',
+        type: 'toggle',
+        onToggle: (isActive) => {
+          localStorage.setItem(MASS_SEL_STORAGE_KEY, isActive);
+          massSelCtrl.setToggleMode(isActive);
+          massSelCtrl.clear();
+          ui?.notifications?.info?.(isActive 
+            ? 'WBE Mass Selection: ON (drag to select)' 
+            : 'WBE Mass Selection: OFF (Shift+drag)');
+        }
+      });
+      
+      // Set initial toggle state in toolbar
+      if (savedToggleState) {
+        window.WBEToolbar?.setToggleState('wbe-mass-selection', true);
+      }
+      
+      // LEGACY: Keep old injector for backwards compatibility (can be removed later)
+      // MassSelectionToolInjector.register(this.interaction.massSelection);
       
       // Register panels for custom types (if any were registered before init)
       for (const [type, config] of this._customTypes) {
@@ -13844,6 +15501,7 @@ window.Whiteboard = Whiteboard;
 window.WhiteboardObject = WhiteboardObject;
 window.WhiteboardText = WhiteboardText;
 window.WhiteboardImage = WhiteboardImage;
+window.WBE_BasePanelView = BasePanelView;
 
 // Export settings functions for initialization from scripts/main.mjs
 window.WBE_registerSettings = registerModuleSettings;

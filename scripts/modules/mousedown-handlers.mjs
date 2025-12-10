@@ -15,6 +15,7 @@
  * MEDIUM PRIORITY (700-550):
  * - 700: MassSelectionDragHandler - Drag inside mass selection bounding box
  * - 695: MassSelectionClearHandler - Click outside mass selection bounding box
+ * - 660: ShapeDrawHandler - Shape drawing tool active
  * - 650: MassSelectionStartHandler - Start mass selection (Shift+drag or toggle mode)
  * - 600: TextModeCreateHandler - Create text in text mode
  * - 550: UnfreezeIconHandler - Click on unfreeze icon
@@ -126,6 +127,7 @@ export const EditImmunityHandler = {
  * 
  * Handles right mouse button clicks:
  * - In text mode: exits text mode
+ * - With shape tool active: exits shape tool
  * - Otherwise: starts canvas pan
  * 
  * Requirements: 3.3, 6.3
@@ -144,7 +146,7 @@ export const RightClickHandler = {
   },
 
   /**
-   * Handle right click - exit text mode or start pan
+   * Handle right click - exit text mode, exit shape tool, or start pan
    * @param {EventContext} ctx - Event context
    * @returns {boolean} True if handled
    */
@@ -154,6 +156,13 @@ export const RightClickHandler = {
     // In text mode, right click exits text mode instead of panning
     if (ctx.isTextMode) {
       im._exitTextMode();
+      return true;
+    }
+    
+    // If shape tool is active, right click exits shape tool
+    const activeTool = window.WBEToolbar?.getActiveTool?.();
+    if (activeTool?.startsWith('wbe-shape-')) {
+      window.WBEToolbar.deactivateAllTools();
       return true;
     }
     
@@ -406,6 +415,49 @@ export const TextModeCreateHandler = {
 };
 
 /**
+ * ShapeDrawHandler (priority 660)
+ * 
+ * Handles shape drawing when a shape tool is active in WBE Toolbar.
+ * Priority above MassSelectionStartHandler (650) so drawing works even with toggle mode on.
+ */
+export const ShapeDrawHandler = {
+  name: 'shapeDraw',
+  priority: 660,
+
+  /**
+   * Check if a shape drawing tool is active
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if shape tool is active
+   */
+  canHandle(ctx) {
+    // Only left click
+    if (ctx.button !== 0) return false;
+    
+    // Check if a shape tool is active
+    const activeTool = window.WBEToolbar?.getActiveTool?.();
+    if (!activeTool) return false;
+    
+    // Only handle shape tools (wbe-shape-*)
+    return activeTool.startsWith('wbe-shape-');
+  },
+
+  /**
+   * Start shape drawing
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if handled
+   */
+  handle(ctx) {
+    // Delegate to ShapesManager
+    const shapesManager = window.WBE_Shapes;
+    if (!shapesManager) return false;
+    
+    shapesManager._onMouseDown(ctx.event);
+    ctx.consume();
+    return true;
+  }
+};
+
+/**
  * UnfreezeIconHandler (priority 550)
  * 
  * Handles click on unfreeze icon to start hold-to-activate unfreeze.
@@ -455,6 +507,7 @@ export function getMediumPriorityMouseDownHandlers() {
   return [
     MassSelectionDragHandler,
     MassSelectionClearHandler,
+    ShapeDrawHandler,
     MassSelectionStartHandler,
     TextModeCreateHandler,
     UnfreezeIconHandler
@@ -775,6 +828,13 @@ export const ObjectDragHandler = {
   handle(ctx) {
     ctx.consume();
     const id = ctx.hitResult.object.id;
+    
+    // Finish any active editing (shapes, etc.) before selecting new object
+    if (ctx.im._editingObject?.finishEditing) {
+      ctx.im._editingObject.finishEditing();
+      ctx.im._editingObject = null;
+    }
+    
     ctx.im._select(id);
     ctx.im._startDrag(id, ctx.event);
     return true;
