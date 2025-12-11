@@ -61,8 +61,32 @@ class ShapesManager {
     this._registerObjectType();
     this._setupEventListeners();
     this._addToolbarButtons();
+    
+    // Re-attach to new layer on scene change
+    Hooks.on('canvasReady', () => this._onCanvasReady());
 
     console.log(`[${MODULE_NAME}] Initialized`);
+  }
+  
+  /**
+   * Handle scene change - update layer reference and recreate SVG overlay
+   */
+  _onCanvasReady() {
+    const newLayer = window.Whiteboard?.layer?.element;
+    if (!newLayer || newLayer === this.layer) return;
+    
+    // Remove old SVG if it exists
+    if (this.svg?.parentNode) {
+      this.svg.parentNode.removeChild(this.svg);
+    }
+    
+    // Update layer reference
+    this.layer = newLayer;
+    
+    // Recreate SVG overlay in new layer
+    this._createSvgOverlay();
+    
+    console.log(`[${MODULE_NAME}] Reattached to new layer after scene change`);
   }
 
   _createSvgOverlay() {
@@ -190,12 +214,25 @@ class ShapesManager {
   }
 
   _getWorldCoords(e) {
-    const layerRect = this.layer.getBoundingClientRect();
-    const canvasScale = canvas?.stage?.worldTransform?.a || 1;
-
+    // Use full transform matrix inversion (same as _createObjectAt in main.mjs)
+    const t = canvas.stage.worldTransform;
+    const det = t.a * t.d - t.b * t.c;
+    
     return {
-      x: (e.clientX - layerRect.left) / canvasScale,
-      y: (e.clientY - layerRect.top) / canvasScale
+      x: (t.d * (e.clientX - t.tx) - t.c * (e.clientY - t.ty)) / det,
+      y: (t.a * (e.clientY - t.ty) - t.b * (e.clientX - t.tx)) / det
+    };
+  }
+  
+  /**
+   * Get screen-space coordinates relative to layer (for preview SVG)
+   * SVG overlay is inside layer which has transform, so we need layer-relative coords
+   */
+  _getScreenCoords(e) {
+    const layerRect = this.layer.getBoundingClientRect();
+    return {
+      x: e.clientX - layerRect.left,
+      y: e.clientY - layerRect.top
     };
   }
 
@@ -248,6 +285,7 @@ class ShapesManager {
     }
 
     this.isDrawing = true;
+    // Use world coords - SVG is inside layer which has transform applied
     this.startPoint = this._getWorldCoords(e);
     this.freehandPoints = [this.startPoint];
 
@@ -292,6 +330,7 @@ class ShapesManager {
   }
 
   _createTempElement() {
+    // Use world coords - SVG is inside layer which has transform applied
     const { x, y } = this.startPoint;
 
     switch (this.currentTool) {
@@ -333,6 +372,7 @@ class ShapesManager {
   _updateTempElement(current, shiftKey = false) {
     if (!this.currentElement) return;
 
+    // Use world coords - SVG is inside layer which has transform applied
     const { x: sx, y: sy } = this.startPoint;
     let { x: cx, y: cy } = current;
 
@@ -369,12 +409,14 @@ class ShapesManager {
         break;
 
       case SHAPE_TYPES.FREEHAND:
-        // Only add point if far enough from last point (reduces jitter)
+        // Add point if far enough from last point (reduces jitter)
+        // Adjust threshold by canvas scale so smoothing is consistent regardless of zoom
         const lastPoint = this.freehandPoints[this.freehandPoints.length - 1];
         const dist = Math.hypot(current.x - lastPoint.x, current.y - lastPoint.y);
-        if (dist > 6) { // Minimum distance between points - higher = smoother
+        const canvasScale = canvas?.stage?.worldTransform?.a || 1;
+        const threshold = 6 / canvasScale; // ~6 screen pixels
+        if (dist > threshold) {
           this.freehandPoints.push(current);
-          // Use cubic Bezier curves for smooth lines
           const d = this._buildSmoothPath(this.freehandPoints);
           this.currentElement.setAttribute('d', d);
         }
@@ -440,16 +482,23 @@ class ShapesManager {
           x: p.x - minX,
           y: p.y - minY
         }));
+        // Override worldX/worldY for freehand
+        shapeData._worldX = minX;
+        shapeData._worldY = minY;
         break;
     }
 
-    // Конвертируем world coords в screen coords для _createObjectAt
-    const t = canvas.stage.worldTransform;
-    const screenX = worldX * t.a + t.tx;
-    const screenY = worldY * t.d + t.ty;
+    // Use world coords directly - pass them via options to skip _createObjectAt's conversion
+    const finalWorldX = shapeData._worldX ?? worldX;
+    const finalWorldY = shapeData._worldY ?? worldY;
+    
+    // Pass x/y directly in options - _createObjectAt will use these instead of converting screenX/screenY
+    shapeData.x = finalWorldX;
+    shapeData.y = finalWorldY;
 
-    // Создаём объект через WBE API (как fate-card)
-    const obj = im._createObjectAt('shape', screenX, screenY, shapeData);
+    // Создаём объект через WBE API
+    // screenX/screenY are ignored when x/y are in options
+    const obj = im._createObjectAt('shape', 0, 0, shapeData);
 
     if (obj) {
       console.log(`[${MODULE_NAME}] Shape created:`, obj.id);

@@ -1,8 +1,12 @@
-# Whiteboard Experience
+# Whiteboard Experience, Foundry11+
 
 FoundryVTT module that provides whiteboard-style tools for images, text, shapes, and freehand drawing.
 
 **Important:** WBE objects live in a layer ABOVE the standard Foundry canvas. They will overlay tokens, tiles, drawings, and other native VTT objects.
+
+**Important:** Alpha version works is tested MOSTLY for a single Foundry scene, if you have more then ONE scene on the table some issues may occur.
+
+**Important:** Make it available for your players to add tokens / pictures in Foundry game settings, to make it really collaborative!
 
 ## Why This Plugin Exists
 

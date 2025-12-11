@@ -1679,6 +1679,9 @@ class WhiteboardLayer {
       canvasReady: null,
       canvasTearDown: null
     };
+    
+    // Flag to track if initial scene was loaded (to avoid double-loading on first canvasReady)
+    this._hasLoadedInitialScene = false;
 
     // Store crop handles for each image (Map<imageId, {top, right, bottom, left, circleResize}>)
     this._cropHandles = new Map();
@@ -2496,12 +2499,23 @@ class WhiteboardLayer {
 
   init() {
     // Store bound callbacks for cleanup
-    this._hookCallbacks.canvasReady = () => {
+    this._hookCallbacks.canvasReady = async () => {
       this._createLayer();
       this._startContinuousSync();
+      
+      // Load objects for the new scene (only if not first load - that's handled by Whiteboard.init)
+      if (this._hasLoadedInitialScene && window.Whiteboard?.persistence) {
+        await window.Whiteboard.persistence.loadAll();
+      }
+      this._hasLoadedInitialScene = true;
     };
     this._hookCallbacks.canvasTearDown = () => {
       this._stopContinuousSync();
+      
+      // Clear registry WITHOUT socket events (data is already saved in scene flags)
+      // This prevents old scene objects from appearing on new scene
+      this._clearRegistryForSceneChange();
+      
       this._destroyLayer();
     };
     Hooks.on("canvasReady", this._hookCallbacks.canvasReady);
@@ -2509,7 +2523,35 @@ class WhiteboardLayer {
     if (canvas.ready) {
       this._createLayer();
       this._startContinuousSync();
+      // Mark initial scene as loaded (Whiteboard.init will call persistence.loadAll)
+      this._hasLoadedInitialScene = true;
     }
+  }
+  
+  /**
+   * Clear registry when switching scenes
+   * Does NOT emit socket events - just clears local state
+   * Data is already persisted in scene flags
+   */
+  _clearRegistryForSceneChange() {
+    if (!this.registry) return;
+    
+    const count = this.registry.objects.size;
+    if (count === 0) return;
+    
+    // Clear all objects from registry without triggering socket events
+    // Use 'sceneChange' source to distinguish from normal deletions
+    const allIds = this.registry.getAllIds();
+    allIds.forEach(id => {
+      // Remove from registry map directly to avoid socket notifications
+      this.registry.objects.delete(id);
+      this.registry.zIndexModel.remove(id);
+    });
+    
+    // Clear z-index model
+    this.registry.zIndexModel.clear();
+    
+    console.log(`[WBE Layer] Cleared ${count} objects for scene change`);
   }
   _createLayer() {
     if (document.getElementById(LAYER_ID)) return;
@@ -2581,6 +2623,28 @@ class WhiteboardLayer {
     document.head.appendChild(style);
   }
   _destroyLayer() {
+    // NOTE: Do NOT remove hooks here - they are needed for scene changes
+    // Hooks are only removed in full cleanup (Whiteboard.destroy)
+
+    // Stop continuous sync
+    this._stopContinuousSync();
+
+    // Remove DOM element (this also removes all child object elements)
+    if (this.element) {
+      this.element.remove();
+      this.element = null;
+    }
+    
+    // Clear selection overlay reference
+    this._selectionOverlay = null;
+    this._selectionOverlayRect = null;
+    this._selectionOverlaySelectedId = null;
+  }
+  
+  /**
+   * Full cleanup - removes hooks too (called from Whiteboard.destroy)
+   */
+  _fullCleanup() {
     // Remove hooks
     if (this._hookCallbacks.canvasReady) {
       Hooks.off("canvasReady", this._hookCallbacks.canvasReady);
@@ -2590,15 +2654,8 @@ class WhiteboardLayer {
       Hooks.off("canvasTearDown", this._hookCallbacks.canvasTearDown);
       this._hookCallbacks.canvasTearDown = null;
     }
-
-    // Stop continuous sync
-    this._stopContinuousSync();
-
-    // Remove DOM element
-    if (this.element) {
-      this.element.remove();
-      this.element = null;
-    }
+    
+    this._destroyLayer();
   }
   _sync() {
     if (!this.element || !canvas.ready || !canvas.stage) return;
@@ -10543,8 +10600,8 @@ class MassSelectionToolInjector {
 // ==========================================
 class InteractionManager {
   // Constants for scale (different speeds for text and images due to different scaling mechanisms)
-  static SCALE_SENSITIVITY_TEXT = 0.015; // Scale change speed for texts (transform: scale())
-  static SCALE_SENSITIVITY_IMAGE = 0.015; // Scale change speed for images (width/height)
+  static SCALE_SENSITIVITY_TEXT = 0.01; // Scale change speed for texts (transform: scale())
+  static SCALE_SENSITIVITY_IMAGE = 0.003; // Scale change speed for images (width/height)
   static MIN_SCALE = 0.1; // Minimum scale
   static MAX_SCALE = 20.0; // Maximum scale
 
@@ -10940,6 +10997,35 @@ class InteractionManager {
       
       // Direct copy (execCommand for text, Clipboard API for images)
       this._copyToClipboardDirect();
+      return;
+    }
+
+    // V key to reset all tools (exit text mode, deactivate shape tools, etc.)
+    if (e.code === 'KeyV' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Ignore when user is editing text
+      const target = e.target;
+      const isEditable = target.isContentEditable || target.getAttribute('contenteditable') === 'true' || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+      if (isEditable) {
+        return;
+      }
+      
+      e.preventDefault();
+      
+      // Exit text mode if active
+      if (this.mode === 'text') {
+        this._exitTextMode();
+      }
+      
+      // Deactivate all WBE toolbar tools (shapes, etc.)
+      if (window.WBEToolbar?.deactivateAllTools) {
+        window.WBEToolbar.deactivateAllTools();
+      }
+      
+      // Also disable shapes module directly (in case toolbar is not synced)
+      if (window.WBE_Shapes?.disableTool) {
+        window.WBE_Shapes.disableTool();
+      }
+      
       return;
     }
 
@@ -12551,12 +12637,23 @@ class InteractionManager {
     if (!obj) return;
     
     // Use text sensitivity for text, image sensitivity for everything else (images, cards, etc.)
-    const sensitivity = obj.type === 'text' 
+    const baseSensitivity = obj.type === 'text' 
       ? InteractionManager.SCALE_SENSITIVITY_TEXT 
       : InteractionManager.SCALE_SENSITIVITY_IMAGE;
+    
+    // Adjust sensitivity by object size - smaller objects need higher sensitivity
+    // to feel like they scale at the same visual speed as larger objects
+    // Reference size: 500px (objects this size use base sensitivity)
+    const objSize = Math.max(obj.width || 100, obj.height || 100) * startScale;
+    const sizeAdjustment = 500 / Math.max(objSize, 50); // Clamp to avoid extreme values
+    const sensitivity = baseSensitivity * Math.sqrt(sizeAdjustment); // sqrt for gentler adjustment
+    
     // CRITICAL: Normalize deltaX by canvas zoom for consistent behavior at any zoom level
     const deltaX = (e.clientX - startX) / canvasZoom;
-    const newScale = startScale + deltaX * sensitivity;
+    // Multiplicative scaling: change is proportional to current scale
+    // This makes scaling feel consistent regardless of object size
+    const scaleFactor = 1 + deltaX * sensitivity;
+    const newScale = startScale * scaleFactor;
     const clampedScale = Math.max(InteractionManager.MIN_SCALE, Math.min(InteractionManager.MAX_SCALE, newScale));
 
     // OPTIMIZATION: Update DOM directly during scale resize (no Registry update)
@@ -15345,7 +15442,7 @@ class Whiteboard {
       this.interaction = null;
     }
     if (this.layer) {
-      this.layer._destroyLayer();
+      this.layer._fullCleanup(); // Use full cleanup to remove hooks
       this.layer = null;
     }
     if (this.socket) {
