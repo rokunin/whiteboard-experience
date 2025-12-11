@@ -57,6 +57,7 @@ class ShapesManager {
     }
 
     this.layer = window.Whiteboard.layer.element;
+    this._initCursorStyles();
     this._createSvgOverlay();
     this._registerObjectType();
     this._setupEventListeners();
@@ -66,6 +67,34 @@ class ShapesManager {
     Hooks.on('canvasReady', () => this._onCanvasReady());
 
     console.log(`[${MODULE_NAME}] Initialized`);
+  }
+  
+  /**
+   * Initialize CSS styles for shape tool cursors
+   * Fully autonomous - no dependencies on main.mjs
+   */
+  _initCursorStyles() {
+    if (document.getElementById('wbe-shapes-cursor-styles')) return;
+    
+    const style = document.createElement('style');
+    style.id = 'wbe-shapes-cursor-styles';
+    style.textContent = `
+      /* Shape drawing tool cursors */
+      #board.wbe-shape-crosshair,
+      #board.wbe-shape-crosshair *,
+      #whiteboard-experience-layer.wbe-shape-crosshair,
+      #whiteboard-experience-layer.wbe-shape-crosshair * {
+        cursor: crosshair !important;
+      }
+      
+      #board.wbe-shape-freehand,
+      #board.wbe-shape-freehand *,
+      #whiteboard-experience-layer.wbe-shape-freehand,
+      #whiteboard-experience-layer.wbe-shape-freehand * {
+        cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath fill='white' stroke='black' stroke-width='1' d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z'/%3E%3C/svg%3E") 2 22, crosshair !important;
+      }
+    `;
+    document.head.appendChild(style);
   }
   
   /**
@@ -85,6 +114,11 @@ class ShapesManager {
     
     // Recreate SVG overlay in new layer
     this._createSvgOverlay();
+    
+    // Re-apply cursor if tool is active (CSS class on new layer)
+    if (this.enabled && this.currentTool) {
+      this._setCursorClass(this.currentTool);
+    }
     
     console.log(`[${MODULE_NAME}] Reattached to new layer after scene change`);
   }
@@ -181,9 +215,9 @@ class ShapesManager {
     this.currentTool = toolType;
     this.enabled = true;
     
-    // Set cursor on layer (SVG overlay stays pointer-events: none)
-    // mousedown is handled by ShapeDrawHandler in centralized handler system
-    this.layer.style.cursor = 'crosshair';
+    // Set cursor via CSS class on #board (layer has pointer-events: none)
+    // CSS classes are defined in main.mjs _initializeGlobalStyles
+    this._setCursorClass(toolType);
 
     // mousemove/mouseup still needed for drag tracking
     window.addEventListener('mousemove', this._onMouseMove);
@@ -191,16 +225,44 @@ class ShapesManager {
 
     console.log(`[${MODULE_NAME}] Tool enabled: ${toolType}`);
   }
+  
+  /**
+   * Set cursor CSS class on #board and layer
+   * @param {string|null} toolType - Tool type or null to clear
+   */
+  _setCursorClass(toolType) {
+    const board = document.getElementById('board');
+    const layer = this.layer;
+    
+    // Remove all shape cursor classes
+    const cursorClasses = ['wbe-shape-crosshair', 'wbe-shape-freehand'];
+    cursorClasses.forEach(cls => {
+      board?.classList.remove(cls);
+      layer?.classList.remove(cls);
+    });
+    
+    if (!toolType) return;
+    
+    // Add appropriate cursor class
+    const classMap = {
+      [SHAPE_TYPES.RECT]: 'wbe-shape-crosshair',
+      [SHAPE_TYPES.CIRCLE]: 'wbe-shape-crosshair',
+      [SHAPE_TYPES.FREEHAND]: 'wbe-shape-freehand'
+    };
+    const cursorClass = classMap[toolType];
+    if (cursorClass) {
+      board?.classList.add(cursorClass);
+      layer?.classList.add(cursorClass);
+    }
+  }
 
   disableTool() {
     this.currentTool = null;
     this.enabled = false;
     this.isDrawing = false;
     
-    // Reset cursor
-    if (this.layer) {
-      this.layer.style.cursor = '';
-    }
+    // Reset cursor via CSS class
+    this._setCursorClass(null);
 
     window.removeEventListener('mousemove', this._onMouseMove);
     window.removeEventListener('mouseup', this._onMouseUp);
@@ -1136,6 +1198,9 @@ class ShapeView {
    * Enter text editing mode (double-click)
    */
   startEditing() {
+    // Block editing when shape drawing tool is active
+    if (window.WBE_Shapes?.enabled) return;
+    
     if (this.shapeType === SHAPE_TYPES.FREEHAND || this.isEditing) return;
     
     const textEl = this.element?.querySelector('.wbe-shape-text');

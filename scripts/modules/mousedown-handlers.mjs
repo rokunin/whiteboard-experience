@@ -7,10 +7,11 @@
  * - Higher priority = processed first
  * 
  * Priority Map (MouseDown):
- * HIGH PRIORITY (1000-800):
+ * HIGH PRIORITY (1000-750):
  * - 1000: PanelImmunityHandler - Clicks on styling panels
  * - 900: EditImmunityHandler - Clicks on contenteditable elements
  * - 800: RightClickHandler - Right mouse button - pan or exit text mode
+ * - 750: UnfreezeIconHandler - Click on unfreeze icon (must be above MassSelection)
  * 
  * MEDIUM PRIORITY (700-550):
  * - 700: MassSelectionDragHandler - Drag inside mass selection bounding box
@@ -18,7 +19,6 @@
  * - 660: ShapeDrawHandler - Shape drawing tool active
  * - 650: MassSelectionStartHandler - Start mass selection (Shift+drag or toggle mode)
  * - 600: TextModeCreateHandler - Create text in text mode
- * - 550: UnfreezeIconHandler - Click on unfreeze icon
  * 
  * LOW PRIORITY (500-100):
  * - 500: WidthResizeHandler - Text width resize handle
@@ -45,6 +45,7 @@ export const PanelImmunityHandler = {
 
   /**
    * Check if click is on a panel element
+   * Uses Whiteboard.getUISelectors() for extensibility - modules can register their own UI selectors
    * @param {EventContext} ctx - Event context
    * @returns {boolean} True if click is on panel
    */
@@ -54,6 +55,15 @@ export const PanelImmunityHandler = {
       return false;
     }
     
+    // Check registered UI selectors (extensible - modules register via Whiteboard.registerUISelector)
+    const uiSelectors = window.Whiteboard?.getUISelectors?.();
+    if (uiSelectors) {
+      for (const selector of uiSelectors) {
+        if (target.closest(selector)) return true;
+      }
+    }
+    
+    // Fallback: built-in panel selectors (for backwards compatibility)
     return !!(
       target.closest('.wbe-color-picker-panel') ||
       target.closest('.wbe-text-styling-panel') ||
@@ -180,7 +190,8 @@ export function getHighPriorityMouseDownHandlers() {
   return [
     PanelImmunityHandler,
     EditImmunityHandler,
-    RightClickHandler
+    RightClickHandler,
+    UnfreezeIconHandler
   ];
 }
 
@@ -433,6 +444,9 @@ export const ShapeDrawHandler = {
     // Only left click
     if (ctx.button !== 0) return false;
     
+    // Don't intercept clicks on unfreeze icon - let UnfreezeIconHandler handle it
+    if (ctx.target?.closest?.('.wbe-unfreeze-icon')) return false;
+    
     // Check if a shape tool is active
     const activeTool = window.WBEToolbar?.getActiveTool?.();
     if (!activeTool) return false;
@@ -466,7 +480,7 @@ export const ShapeDrawHandler = {
  */
 export const UnfreezeIconHandler = {
   name: 'unfreezeIcon',
-  priority: 550,
+  priority: 750, // Higher than MassSelection handlers (700) to intercept clicks on unfreeze icon
 
   /**
    * Check if clicking on unfreeze icon
@@ -509,8 +523,7 @@ export function getMediumPriorityMouseDownHandlers() {
     MassSelectionClearHandler,
     ShapeDrawHandler,
     MassSelectionStartHandler,
-    TextModeCreateHandler,
-    UnfreezeIconHandler
+    TextModeCreateHandler
   ];
 }
 
