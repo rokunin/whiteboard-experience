@@ -4,7 +4,7 @@ FoundryVTT module that provides whiteboard-style tools for images, text, shapes,
 
 **Important:** WBE objects live in a layer ABOVE the standard Foundry canvas. They will overlay tokens, tiles, drawings, and other native VTT objects.
 
-**Important:** Alpha version works is tested MOSTLY for a single Foundry scene, if you have more then ONE scene on the table some issues may occur.
+**Important:** Alpha version is tested MOSTLY for a single Foundry scene, if you have more then ONE scene on the table some issues may occur.
 
 **Important:** Make it available for your players to add tokens / pictures in Foundry game settings, to make it really collaborative!
 
@@ -15,6 +15,36 @@ I love narrative games like Fate — light, collaborative, fast-paced. All I nee
 Foundry is powerful but heavyweight, built for tactical grid combat and beautiful but cumbersome scenes. Simple collaborative layouts are trivially easy in whiteboard tools, but overkill in Foundry's UI.
 
 So I built this: whiteboard vibes inside Foundry. Fast, lightweight, collaborative. Beautiful game tables in minutes.
+
+
+## Scene Setup for Best Experience
+
+For optimal zoom range and image quality, set your scene dimensions to large values (e.g., 10000x10000 or more). This allows to have online whiteboards "infinite table" experience with plenty of space to keep your game-scenes content.
+
+![Scene Size Settings](scene_size.png)
+
+**Important** Set up Foundry player settings to permit your players pasting images in the scene, if you want full collaboration
+
+
+## Create Your First Table
+
+The WBE toolbar can be placed anywhere you like — just drag it by the header.
+
+![Toolbar Position](toolbar_position.gif)
+
+I usually start with my table main background picture, place it and FREEZE it, so it won't move unnecessarily:
+
+![Background Setup](freeze_your_table_background.gif)
+
+Then we can have a character for the mecha game there. I don't own the art, just took firts one I liked from Google, and then deleted it, used just for the example.
+
+![Create a character and give him some Fate Points](create_character.gif)
+
+So basically that's the whole idea: quick and somewhat "dirty" and you can do it together with your players. 
+Create tables, write down your characters, notes, Fate Aspects, make tokens, draw freehand lines, shapes etc. Have fun!
+
+
+
 
 ## Features
 
@@ -48,11 +78,15 @@ So I built this: whiteboard vibes inside Foundry. Fast, lightweight, collaborati
 - Border and shadow styling (with X/Y offset)
 
 ### Mass Selection
-- Select multiple objects at once (toggle in toolbar or `Shift+drag`)
-- Move, copy, delete selected objects together
+- Select multiple objects at once (toggle in toolbar or `Shift+drag` on empty space)
+- `Shift+Click` on object — add/remove from group
+- Move, scale, rotate selected objects together
+- Panel with rotation controls (slider, ±15° buttons, reset)
+- Copy/paste and delete work on entire group
 
 ### Smart Alignment
-- Hold `Shift` while dragging to see alignment guides
+- Hold `Ctrl` while dragging to see alignment guides
+- Works for single objects and mass selection groups
 - Snap to edges and centers of other objects
 - Visual guides show matching boundaries
 - Toggle on/off from WBE toolbar
@@ -76,7 +110,12 @@ So I built this: whiteboard vibes inside Foundry. Fast, lightweight, collaborati
 - `T` — Text tool
 - `Delete` — delete selected
 - `PageUp/PageDown` — z-index control
+- `Shift+PageUp/PageDown` — z-index jump (move to top/bottom)
 - `Ctrl+C/V` — copy/paste
+- `Ctrl+D` — duplicate selected
+- `Shift+Click` — add/remove object from group
+- `Shift+Drag` (empty space) — select multiple objects with box
+- `Ctrl+Drag` — show alignment guides while dragging
 
 ### Other
 - Z-index control (`PageUp`/`PageDown`)

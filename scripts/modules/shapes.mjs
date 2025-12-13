@@ -43,7 +43,7 @@ class ShapesManager {
     this._onKeyDown = this._onKeyDown.bind(this);
   }
 
-  init() {
+  init(retryCount = 0) {
     // Check if shapes are enabled in settings
     if (window.WBE_isFeatureEnabled && !window.WBE_isFeatureEnabled('shapes')) {
       console.log(`[${MODULE_NAME}] Disabled in settings`);
@@ -51,8 +51,17 @@ class ShapesManager {
     }
 
     if (!window.Whiteboard?.layer?.element) {
-      console.log(`[${MODULE_NAME}] Waiting for Whiteboard...`);
-      setTimeout(() => this.init(), 500);
+      // Limit retries to avoid console spam when no scene is active
+      if (retryCount < 10) {
+        if (retryCount === 0) {
+          console.log(`[${MODULE_NAME}] Waiting for Whiteboard...`);
+        }
+        setTimeout(() => this.init(retryCount + 1), 500);
+      } else {
+        console.log(`[${MODULE_NAME}] Whiteboard not available (no active scene?). Will init on canvasReady.`);
+        // Register canvasReady hook to init when scene becomes active
+        Hooks.once('canvasReady', () => this.init(0));
+      }
       return;
     }
 
@@ -340,6 +349,11 @@ class ShapesManager {
 
     // Note: stopPropagation not needed - ShapeDrawHandler in centralized system
     // handles priority over mass-select
+
+    // Deselect any selected object when starting to draw a shape
+    if (window.Whiteboard?.interaction?.selectedId) {
+      window.Whiteboard.interaction._deselect();
+    }
 
     // Disable Foundry mass-select frame during drawing
     if (canvas?.controls?.select) {
@@ -673,7 +687,7 @@ class ShapeView {
     this.scale = data.scale !== undefined ? data.scale : 1;
     this.frozen = data.frozen || false;
     this.selected = data.selected || false;
-    this.zIndexRank = data.zIndexRank || '';
+    this.rank = data.rank || data.zIndexRank || ''; // Support both old and new field name
     this.zIndex = data.zIndex;
 
     // Text properties (for rect and circle shapes)
@@ -684,6 +698,7 @@ class ShapeView {
     this.fontFamily = data.fontFamily || 'Arial';
     this.fontWeight = data.fontWeight || 'normal';
     this.fontStyle = data.fontStyle || 'normal';
+    this.lineHeight = data.lineHeight !== undefined ? data.lineHeight : 1.2;
 
     // Shadow properties
     this.shadowColor = data.shadowColor || '#000000';
@@ -724,7 +739,7 @@ class ShapeView {
       rotation: this.rotation,
       scale: this.scale,
       frozen: this.frozen,
-      zIndexRank: this.zIndexRank,
+      rank: this.rank, // Use 'rank' to match Registry expectations
       // Text properties
       text: this.text,
       textColor: this.textColor,
@@ -733,6 +748,7 @@ class ShapeView {
       fontFamily: this.fontFamily,
       fontWeight: this.fontWeight,
       fontStyle: this.fontStyle,
+      lineHeight: this.lineHeight,
       // Shadow properties
       shadowColor: this.shadowColor,
       shadowOpacity: this.shadowOpacity,
@@ -751,6 +767,46 @@ class ShapeView {
 
   usesTransformScale() {
     return true; // Use transform scale like FateCardView
+  }
+
+  /**
+   * Apply group scale transformation (for mass selection scaling)
+   * 
+   * CRITICAL: Shapes use transform-origin: center, so we must:
+   * 1. Calculate visual center of the object (x + width/2, y + height/2)
+   * 2. Scale the visual center position relative to pivot
+   * 3. Calculate new CSS left/top from the new visual center
+   * 
+   * @param {number} scaleFactor - Scale multiplier
+   * @param {number} pivotX - X coordinate of scale pivot point (group center)
+   * @param {number} pivotY - Y coordinate of scale pivot point (group center)
+   * @param {Object} startData - Original object data { x, y, scale, width, height }
+   * @returns {Object} New values { x, y, scale }
+   */
+  applyGroupScale(scaleFactor, pivotX, pivotY, startData) {
+    // Get base dimensions (unscaled)
+    const baseWidth = startData.width ?? this.width;
+    const baseHeight = startData.height ?? this.height;
+    
+    // Visual center of the object (CSS left/top + half of base size)
+    // This is where the object visually appears centered regardless of scale
+    const visualCenterX = startData.x + baseWidth / 2;
+    const visualCenterY = startData.y + baseHeight / 2;
+    
+    // Scale the visual center position relative to group pivot
+    const dx = visualCenterX - pivotX;
+    const dy = visualCenterY - pivotY;
+    const newVisualCenterX = pivotX + dx * scaleFactor;
+    const newVisualCenterY = pivotY + dy * scaleFactor;
+    
+    // Calculate new CSS left/top from new visual center
+    // (new visual center - half of base size = new CSS position)
+    const newX = newVisualCenterX - baseWidth / 2;
+    const newY = newVisualCenterY - baseHeight / 2;
+    
+    const newScale = startData.scale * scaleFactor;
+    
+    return { x: newX, y: newY, scale: newScale };
   }
 
   isFrozen() {
@@ -872,6 +928,7 @@ class ShapeView {
       font-weight: ${this.fontWeight};
       font-style: ${this.fontStyle};
       text-align: ${this.textAlign};
+      line-height: ${this.lineHeight !== undefined ? this.lineHeight : 1.2};
       overflow: hidden;
       word-wrap: break-word;
       pointer-events: none;
@@ -992,7 +1049,8 @@ class ShapeView {
     if (data.points !== undefined) this.points = data.points;
     if (data.radiusX !== undefined) this.radiusX = data.radiusX;
     if (data.radiusY !== undefined) this.radiusY = data.radiusY;
-    if (data.zIndexRank !== undefined) this.zIndexRank = data.zIndexRank;
+    if (data.rank !== undefined) this.rank = data.rank;
+    if (data.zIndexRank !== undefined) this.rank = data.zIndexRank; // Legacy support
     if (data.zIndex !== undefined) this.zIndex = data.zIndex;
     // Text properties
     if (data.text !== undefined) this.text = data.text;
@@ -1048,7 +1106,8 @@ class ShapeView {
 
     // Text changes
     if (!changes || 'text' in changes || 'textColor' in changes || 'textSize' in changes ||
-      'textAlign' in changes || 'fontFamily' in changes || 'fontWeight' in changes || 'fontStyle' in changes) {
+      'textAlign' in changes || 'fontFamily' in changes || 'fontWeight' in changes || 'fontStyle' in changes ||
+      'lineHeight' in changes) {
       this._updateTextElement(container);
     }
 
@@ -1191,6 +1250,7 @@ class ShapeView {
     textEl.style.fontWeight = this.fontWeight;
     textEl.style.fontStyle = this.fontStyle;
     textEl.style.textAlign = this.textAlign;
+    textEl.style.lineHeight = this.lineHeight !== undefined ? this.lineHeight : 1.2;
     textEl.style.justifyContent = this.textAlign === 'left' ? 'flex-start' : this.textAlign === 'right' ? 'flex-end' : 'center';
   }
 
@@ -1354,7 +1414,8 @@ class ShapePanel {
           textSize: current?.textSize || 16,
           textAlign: current?.textAlign || 'center',
           fontWeight: current?.fontWeight || 'normal',
-          fontStyle: current?.fontStyle || 'normal'
+          fontStyle: current?.fontStyle || 'normal',
+          fontFamily: current?.fontFamily || 'Arial'
         }, (changes) => {
           this.registry.update(this.shapeId, changes, 'local');
         });
@@ -1401,6 +1462,17 @@ class ShapePanel {
       this.hide();
     });
     this.view.toolbar.appendChild(lockBtn);
+
+    // Copy/Apply Style buttons
+    const copyStyleBtn = this.view.makeToolbarButton('Copy Style', 'fas fa-eye-dropper', () => {
+      window.Whiteboard?.interaction?.copyStyle(this.shapeId);
+    });
+    this.view.toolbar.appendChild(copyStyleBtn);
+
+    const applyStyleBtn = this.view.makeToolbarButton('Apply Style', 'fas fa-paint-roller', () => {
+      window.Whiteboard?.interaction?.applyStyle(this.shapeId);
+    });
+    this.view.toolbar.appendChild(applyStyleBtn);
 
     document.body.appendChild(this.view.panel);
     this.view.positionNear(container);

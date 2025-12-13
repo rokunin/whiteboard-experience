@@ -1,8 +1,10 @@
 /**
  * Alignment Guides Module for Whiteboard Experience
  * 
- * Показывает линии-подсказки при перетаскивании объектов с зажатым Shift,
+ * Показывает линии-подсказки при перетаскивании объектов с зажатым Ctrl,
  * как в Miro/Figma. Линии показывают совпадение границ и центров объектов.
+ * 
+ * Ctrl+Drag = alignment guides (Shift используется для добавления в группу)
  * 
  * Архитектура:
  * - Полностью автономный модуль
@@ -14,8 +16,8 @@
 const GUIDE_COLOR = '#ff00ff';  // Magenta - хорошо видно на любом фоне
 const SPACING_COLOR = '#00d4ff'; // Cyan для spacing guides
 const GUIDE_WIDTH = 1;
-const SNAP_THRESHOLD = 5;  // Порог срабатывания в пикселях (world coordinates)
-const SPACING_THRESHOLD = 5; // Порог для equal spacing
+const SNAP_THRESHOLD = 2;  // Порог срабатывания в пикселях (world coordinates)
+const SPACING_THRESHOLD = 2; // Порог для equal spacing
 
 /**
  * AlignmentGuides - менеджер линий выравнивания
@@ -32,11 +34,20 @@ class AlignmentGuides {
   /**
    * Инициализация - подключение к WBE
    */
-  init() {
+  init(retryCount = 0) {
     // Ждём пока WBE инициализируется
     if (!window.Whiteboard?.layer?.element) {
-      console.log('[AlignmentGuides] Waiting for Whiteboard...');
-      setTimeout(() => this.init(), 500);
+      // Limit retries to avoid console spam when no scene is active
+      if (retryCount < 10) {
+        if (retryCount === 0) {
+          console.log('[AlignmentGuides] Waiting for Whiteboard...');
+        }
+        setTimeout(() => this.init(retryCount + 1), 500);
+      } else {
+        console.log('[AlignmentGuides] Whiteboard not available (no active scene?). Will init on canvasReady.');
+        // Register canvasReady hook to init when scene becomes active
+        Hooks.once('canvasReady', () => this.init(0));
+      }
       return;
     }
 
@@ -73,10 +84,18 @@ class AlignmentGuides {
     if (!this.enabled || !window.Whiteboard?.interaction) return;
 
     const interaction = window.Whiteboard.interaction;
+    const massSelection = interaction.massSelection;
+    
+    // Check for mass selection drag first
+    if (massSelection?.isDragging && e.ctrlKey) {
+      this._handleMassDrag(e, massSelection);
+      return;
+    }
+
     const dragState = interaction.dragState;
 
-    // Если нет активного drag или Shift не зажат - очищаем
-    if (!dragState || !e.shiftKey) {
+    // Если нет активного drag или Ctrl не зажат - очищаем
+    if (!dragState || !e.ctrlKey) {
       this.clear();
       return;
     }
@@ -104,6 +123,229 @@ class AlignmentGuides {
   }
 
   /**
+   * Handle mass selection drag with alignment guides
+   * Uses bounding box of all selected objects as a single unit
+   */
+  _handleMassDrag(e, massSelection) {
+    if (!massSelection.selectedIds || massSelection.selectedIds.size === 0) {
+      this.clear();
+      return;
+    }
+
+    // Calculate current group bounds
+    const groupBounds = this._getMassSelectionBounds(massSelection);
+    if (!groupBounds) {
+      this.clear();
+      return;
+    }
+
+    // Get snap offsets for the group
+    const snap = this._updateGuidesForGroup(groupBounds, massSelection.selectedIds);
+
+    // Apply snap if found
+    if (snap.x !== 0 || snap.y !== 0) {
+      // Store snap offset in massSelection for use in updateMassDrag
+      // This allows the main drag logic to apply the snap
+      if (!massSelection._snapOffset) {
+        massSelection._snapOffset = { x: 0, y: 0 };
+      }
+      massSelection._snapOffset.x = snap.x;
+      massSelection._snapOffset.y = snap.y;
+
+      // Update all objects by the snap offset
+      for (const id of massSelection.selectedIds) {
+        const obj = window.Whiteboard?.registry?.get(id);
+        if (!obj) continue;
+
+        // Get current position from object (not container, to handle crop offset correctly)
+        const container = this.layer?.querySelector(`#${id}`);
+        if (!container) continue;
+
+        // For images with crop, container position includes crop offset
+        // We need to calculate the snapped obj.x/y position
+        let currentObjX, currentObjY;
+        
+        if (obj.type === 'image' && obj.crop) {
+          // For cropped images, reverse-calculate obj position from container
+          const imageElement = container.querySelector('.wbe-canvas-image');
+          if (imageElement) {
+            const dims = window.Whiteboard.layer?._calculateImageVisibleDimensions(imageElement, id);
+            if (dims) {
+              const containerX = parseFloat(container.style.left) || 0;
+              const containerY = parseFloat(container.style.top) || 0;
+              currentObjX = containerX - (dims.left || 0);
+              currentObjY = containerY - (dims.top || 0);
+            } else {
+              currentObjX = parseFloat(container.style.left) || 0;
+              currentObjY = parseFloat(container.style.top) || 0;
+            }
+          } else {
+            currentObjX = parseFloat(container.style.left) || 0;
+            currentObjY = parseFloat(container.style.top) || 0;
+          }
+        } else {
+          currentObjX = parseFloat(container.style.left) || 0;
+          currentObjY = parseFloat(container.style.top) || 0;
+        }
+
+        // Apply snap offset
+        const snappedX = currentObjX + snap.x;
+        const snappedY = currentObjY + snap.y;
+
+        // Update DOM using layer method (handles crop offset correctly)
+        window.Whiteboard.layer?._updateDOMDuringDrag(id, snappedX, snappedY);
+      }
+
+      // Update bounding box
+      massSelection._updateBoundingBox();
+    } else {
+      // Clear snap offset when no snap
+      if (massSelection._snapOffset) {
+        massSelection._snapOffset.x = 0;
+        massSelection._snapOffset.y = 0;
+      }
+    }
+  }
+
+  /**
+   * Get bounding box of all mass-selected objects
+   */
+  _getMassSelectionBounds(massSelection) {
+    if (!massSelection.selectedIds || massSelection.selectedIds.size === 0) return null;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    for (const id of massSelection.selectedIds) {
+      const obj = window.Whiteboard?.registry?.get(id);
+      if (!obj) continue;
+
+      const bounds = this._getObjectBounds(obj);
+      if (!bounds) continue;
+
+      minX = Math.min(minX, bounds.left);
+      minY = Math.min(minY, bounds.top);
+      maxX = Math.max(maxX, bounds.right);
+      maxY = Math.max(maxY, bounds.bottom);
+    }
+
+    if (minX === Infinity) return null;
+
+    return {
+      left: minX,
+      right: maxX,
+      top: minY,
+      bottom: maxY,
+      centerX: (minX + maxX) / 2,
+      centerY: (minY + maxY) / 2
+    };
+  }
+
+  /**
+   * Update guides for a group of objects (mass selection)
+   * Treats the group bounding box as a single object for alignment
+   */
+  _updateGuidesForGroup(groupBounds, selectedIds) {
+    this.clear();
+
+    if (!window.Whiteboard?.registry) return { x: 0, y: 0 };
+
+    const allObjects = window.Whiteboard.registry.getAll();
+    const horizontalGuides = [];
+    const verticalGuides = [];
+    
+    let bestSnapX = null;
+    let bestSnapY = null;
+
+    // Check alignment against non-selected objects
+    for (const obj of allObjects) {
+      // Skip selected objects and frozen objects
+      if (selectedIds.has(obj.id) || obj.frozen) continue;
+
+      const bounds = this._getObjectBounds(obj);
+      if (!bounds) continue;
+
+      // Vertical alignments (X axis)
+      const xPairs = [
+        { dv: groupBounds.left, tv: bounds.left },
+        { dv: groupBounds.left, tv: bounds.right },
+        { dv: groupBounds.left, tv: bounds.centerX },
+        { dv: groupBounds.right, tv: bounds.left },
+        { dv: groupBounds.right, tv: bounds.right },
+        { dv: groupBounds.right, tv: bounds.centerX },
+        { dv: groupBounds.centerX, tv: bounds.left },
+        { dv: groupBounds.centerX, tv: bounds.right },
+        { dv: groupBounds.centerX, tv: bounds.centerX },
+      ];
+      
+      for (const { dv, tv } of xPairs) {
+        const dist = Math.abs(dv - tv);
+        if (dist <= SNAP_THRESHOLD) {
+          const offset = tv - dv;
+          verticalGuides.push({
+            x: tv,
+            minY: Math.min(groupBounds.top, bounds.top) - 20,
+            maxY: Math.max(groupBounds.bottom, bounds.bottom) + 20
+          });
+          if (!bestSnapX || dist < bestSnapX.distance) {
+            bestSnapX = { offset, distance: dist };
+          }
+        }
+      }
+
+      // Horizontal alignments (Y axis)
+      const yPairs = [
+        { dv: groupBounds.top, tv: bounds.top },
+        { dv: groupBounds.top, tv: bounds.bottom },
+        { dv: groupBounds.top, tv: bounds.centerY },
+        { dv: groupBounds.bottom, tv: bounds.top },
+        { dv: groupBounds.bottom, tv: bounds.bottom },
+        { dv: groupBounds.bottom, tv: bounds.centerY },
+        { dv: groupBounds.centerY, tv: bounds.top },
+        { dv: groupBounds.centerY, tv: bounds.bottom },
+        { dv: groupBounds.centerY, tv: bounds.centerY },
+      ];
+      
+      for (const { dv, tv } of yPairs) {
+        const dist = Math.abs(dv - tv);
+        if (dist <= SNAP_THRESHOLD) {
+          const offset = tv - dv;
+          horizontalGuides.push({
+            y: tv,
+            minX: Math.min(groupBounds.left, bounds.left) - 20,
+            maxX: Math.max(groupBounds.right, bounds.right) + 20
+          });
+          if (!bestSnapY || dist < bestSnapY.distance) {
+            bestSnapY = { offset, distance: dist };
+          }
+        }
+      }
+    }
+
+    // Equal spacing for group
+    const otherBounds = allObjects
+      .filter(o => !selectedIds.has(o.id) && !o.frozen)
+      .map(o => this._getObjectBounds(o))
+      .filter(b => b !== null);
+    
+    const spacingGuides = this._findEqualSpacing(groupBounds, otherBounds);
+    
+    if (spacingGuides.snapX !== null && (!bestSnapX || spacingGuides.snapX.distance < bestSnapX.distance)) {
+      bestSnapX = spacingGuides.snapX;
+    }
+    if (spacingGuides.snapY !== null && (!bestSnapY || spacingGuides.snapY.distance < bestSnapY.distance)) {
+      bestSnapY = spacingGuides.snapY;
+    }
+
+    this._drawGuides(verticalGuides, horizontalGuides);
+    this._drawSpacingGuides(spacingGuides.horizontal, spacingGuides.vertical);
+    
+    return {
+      x: bestSnapX?.offset ?? 0,
+      y: bestSnapY?.offset ?? 0
+    };
+  }
+
+  /**
    * Обработчик mouseup - очищаем линии
    */
   _onMouseUp() {
@@ -123,10 +365,10 @@ class AlignmentGuides {
     const draggedObj = allObjects.find(o => o.id === draggedId);
     if (!draggedObj) return { x: 0, y: 0 };
 
-    // Для драгаемого объекта используем selection overlay - он уже правильно
-    // позиционирован для всех типов (rect crop, circle crop, text, etc.)
-    const draggedBounds = this._getBoundsFromSelectionOverlay();
-    if (!draggedBounds) return { x: 0, y: 0 }; // overlay ещё не создан
+    // Вычисляем bounds драгаемого объекта на основе currentX/Y (не из DOM!)
+    // Это предотвращает "дрейф" snap offset при пересчёте
+    const draggedBounds = this._getDraggedBounds(draggedObj, currentX, currentY);
+    if (!draggedBounds) return { x: 0, y: 0 };
 
     const horizontalGuides = [];
     const verticalGuides = [];
@@ -250,7 +492,10 @@ class AlignmentGuides {
       if (diff <= SPACING_THRESHOLD * 2) {
         const avgGap = (gapLeft + gapRight) / 2;
         const snapOffset = (gapRight - gapLeft) / 2;
-        const y = (draggedBounds.centerY + leftNearest.centerY + rightNearest.centerY) / 3;
+        // Y position: use intersection of all objects (not average of centers)
+        const minBottom = Math.min(draggedBounds.bottom, leftNearest.bottom, rightNearest.bottom);
+        const maxTop = Math.max(draggedBounds.top, leftNearest.top, rightNearest.top);
+        const y = (minBottom + maxTop) / 2;
         
         result.horizontal.push({ x1: leftNearest.right, x2: draggedBounds.left, y, gap: avgGap });
         result.horizontal.push({ x1: draggedBounds.right, x2: rightNearest.left, y, gap: avgGap });
@@ -271,7 +516,10 @@ class AlignmentGuides {
       
       const diff = Math.abs(existingGap - currentGap);
       if (diff <= SPACING_THRESHOLD * 2 && existingGap > 0) {
-        const y = (draggedBounds.centerY + nearest.centerY + second.centerY) / 3;
+        // Y position: use intersection of all objects
+        const minBottom = Math.min(draggedBounds.bottom, nearest.bottom, second.bottom);
+        const maxTop = Math.max(draggedBounds.top, nearest.top, second.top);
+        const y = (minBottom + maxTop) / 2;
         const snapOffset = existingGap - currentGap; // Сдвинуть чтобы gaps были равны
         
         result.horizontal.push({ x1: second.right, x2: nearest.left, y, gap: existingGap });
@@ -293,7 +541,10 @@ class AlignmentGuides {
       
       const diff = Math.abs(existingGap - currentGap);
       if (diff <= SPACING_THRESHOLD * 2 && existingGap > 0) {
-        const y = (draggedBounds.centerY + nearest.centerY + second.centerY) / 3;
+        // Y position: use intersection of all objects
+        const minBottom = Math.min(draggedBounds.bottom, nearest.bottom, second.bottom);
+        const maxTop = Math.max(draggedBounds.top, nearest.top, second.top);
+        const y = (minBottom + maxTop) / 2;
         const snapOffset = currentGap - existingGap;
         
         result.horizontal.push({ x1: draggedBounds.right, x2: nearest.left, y, gap: existingGap });
@@ -325,7 +576,11 @@ class AlignmentGuides {
         const avgGap = (gapTop + gapBottom) / 2;
         const snapOffset = (gapBottom - gapTop) / 2;
         
-        const x = (draggedBounds.centerX + topNearest.centerX + bottomNearest.centerX) / 3;
+        // X position: use intersection of all objects (not average of centers)
+        // This ensures the line is within visible bounds of all objects
+        const minRight = Math.min(draggedBounds.right, topNearest.right, bottomNearest.right);
+        const maxLeft = Math.max(draggedBounds.left, topNearest.left, bottomNearest.left);
+        const x = (minRight + maxLeft) / 2;
         
         result.vertical.push({
           y1: topNearest.bottom,
@@ -356,7 +611,10 @@ class AlignmentGuides {
       
       const diff = Math.abs(existingGap - currentGap);
       if (diff <= SPACING_THRESHOLD * 2 && existingGap > 0) {
-        const x = (draggedBounds.centerX + nearest.centerX + second.centerX) / 3;
+        // X position: use intersection of all objects
+        const minRight = Math.min(draggedBounds.right, nearest.right, second.right);
+        const maxLeft = Math.max(draggedBounds.left, nearest.left, second.left);
+        const x = (minRight + maxLeft) / 2;
         const snapOffset = existingGap - currentGap;
         
         result.vertical.push({ y1: second.bottom, y2: nearest.top, x, gap: existingGap });
@@ -378,7 +636,10 @@ class AlignmentGuides {
       
       const diff = Math.abs(existingGap - currentGap);
       if (diff <= SPACING_THRESHOLD * 2 && existingGap > 0) {
-        const x = (draggedBounds.centerX + nearest.centerX + second.centerX) / 3;
+        // X position: use intersection of all objects
+        const minRight = Math.min(draggedBounds.right, nearest.right, second.right);
+        const maxLeft = Math.max(draggedBounds.left, nearest.left, second.left);
+        const x = (minRight + maxLeft) / 2;
         const snapOffset = currentGap - existingGap;
         
         result.vertical.push({ y1: draggedBounds.bottom, y2: nearest.top, x, gap: existingGap });
@@ -395,11 +656,15 @@ class AlignmentGuides {
 
   /**
    * Отрисовка spacing guides с засечками
+   * Толщина и размеры компенсируются зумом канваса
    */
   _drawSpacingGuides(horizontal, vertical) {
     if (!this.svg) return;
     
-    const TICK_SIZE = 6;
+    // Компенсируем зум канваса
+    const scale = this._getCanvasScale();
+    const compensatedWidth = GUIDE_WIDTH / scale;
+    const TICK_SIZE = 6 / scale;
     
     // Горизонтальные spacing линии
     for (const g of horizontal) {
@@ -410,7 +675,7 @@ class AlignmentGuides {
       line.setAttribute('x2', g.x2);
       line.setAttribute('y2', g.y);
       line.setAttribute('stroke', SPACING_COLOR);
-      line.setAttribute('stroke-width', GUIDE_WIDTH);
+      line.setAttribute('stroke-width', compensatedWidth);
       this.svg.appendChild(line);
       
       // Засечки на концах
@@ -421,7 +686,7 @@ class AlignmentGuides {
         tick.setAttribute('x2', x);
         tick.setAttribute('y2', g.y + TICK_SIZE);
         tick.setAttribute('stroke', SPACING_COLOR);
-        tick.setAttribute('stroke-width', GUIDE_WIDTH);
+        tick.setAttribute('stroke-width', compensatedWidth);
         this.svg.appendChild(tick);
       }
     }
@@ -434,7 +699,7 @@ class AlignmentGuides {
       line.setAttribute('x2', g.x);
       line.setAttribute('y2', g.y2);
       line.setAttribute('stroke', SPACING_COLOR);
-      line.setAttribute('stroke-width', GUIDE_WIDTH);
+      line.setAttribute('stroke-width', compensatedWidth);
       this.svg.appendChild(line);
       
       for (const y of [g.y1, g.y2]) {
@@ -444,16 +709,67 @@ class AlignmentGuides {
         tick.setAttribute('x2', g.x + TICK_SIZE);
         tick.setAttribute('y2', y);
         tick.setAttribute('stroke', SPACING_COLOR);
-        tick.setAttribute('stroke-width', GUIDE_WIDTH);
+        tick.setAttribute('stroke-width', compensatedWidth);
         this.svg.appendChild(tick);
       }
     }
   }
 
   /**
-   * Получить bounds от selection overlay (для драгаемого объекта)
-   * Selection overlay уже правильно позиционирован для всех типов объектов
+   * Вычислить bounds драгаемого объекта на основе currentX/Y
+   * Использует ту же логику что updateSelectionOverlay в main.mjs
    */
+  _getDraggedBounds(obj, currentX, currentY) {
+    if (!this.layer) return null;
+    
+    const container = this.layer.querySelector(`#${obj.id}`);
+    if (!container) return null;
+    
+    // Базовые размеры из container.style (не из getBoundingClientRect!)
+    const baseWidth = parseFloat(container.style.width) || container.offsetWidth;
+    const baseHeight = parseFloat(container.style.height) || container.offsetHeight;
+    const scale = obj.scale !== undefined ? obj.scale : 1;
+    const borderWidth = obj.borderWidth || obj.strokeWidth || 0;
+    
+    // Определяем тип масштабирования
+    const usesTransformScale = obj.usesTransformScale?.() ?? (obj.type === 'text' || obj.type === 'shape' || obj.type === 'fate-card');
+    
+    let width, height, borderPadding;
+    
+    if (usesTransformScale) {
+      // transform: scale() - размеры масштабируются, border тоже
+      width = baseWidth * scale;
+      height = baseHeight * scale;
+      borderPadding = borderWidth * scale;
+    } else {
+      // images - размеры уже в container, border не масштабируется
+      width = baseWidth;
+      height = baseHeight;
+      borderPadding = borderWidth;
+    }
+    
+    // Финальные размеры с учётом border
+    const finalWidth = width + 2 * borderPadding;
+    const finalHeight = height + 2 * borderPadding;
+    
+    // Центр объекта (для transform-origin: center это x + baseWidth/2)
+    const centerX = currentX + baseWidth / 2;
+    const centerY = currentY + baseHeight / 2;
+    
+    // Позиция = центр - половина финального размера
+    const left = centerX - finalWidth / 2;
+    const top = centerY - finalHeight / 2;
+    
+    return {
+      left,
+      right: left + finalWidth,
+      top,
+      bottom: top + finalHeight,
+      centerX,
+      centerY
+    };
+  }
+
   _getBoundsFromSelectionOverlay() {
     const overlay = this.layer?.querySelector('.wbe-selection-overlay');
     if (!overlay) return null;
@@ -463,10 +779,13 @@ class AlignmentGuides {
     
     // Конвертируем screen coords в world coords
     const layerRect = this.layer.getBoundingClientRect();
-    const left = (rect.left - layerRect.left) / canvasScale;
-    const top = (rect.top - layerRect.top) / canvasScale;
-    const width = rect.width / canvasScale;
-    const height = rect.height / canvasScale;
+    // Selection overlay has SELECTION_PADDING=1 built in - compensate to get perma-border edge
+    const padding = 1;
+    
+    const left = (rect.left - layerRect.left) / canvasScale + padding;
+    const top = (rect.top - layerRect.top) / canvasScale + padding;
+    const width = rect.width / canvasScale - 2 * padding;
+    const height = rect.height / canvasScale - 2 * padding;
     
     return {
       left,
@@ -479,9 +798,8 @@ class AlignmentGuides {
   }
 
   /**
-   * Получить bounds объекта из DOM контейнера
-   * Использует getBoundingClientRect - контейнер уже правильно позиционирован
-   * для всех типов объектов (text, image, cropped rect/circle)
+   * Получить bounds объекта
+   * Использует ту же логику что updateSelectionOverlay в main.mjs
    */
   _getObjectBounds(obj) {
     if (!this.layer) return null;
@@ -489,27 +807,50 @@ class AlignmentGuides {
     const container = this.layer.querySelector(`#${obj.id}`);
     if (!container) return null;
     
-    const rect = container.getBoundingClientRect();
-    const canvasScale = this._getCanvasScale();
-    const layerRect = this.layer.getBoundingClientRect();
+    // Позиция из container.style (world coordinates)
+    const x = parseFloat(container.style.left) || 0;
+    const y = parseFloat(container.style.top) || 0;
     
-    // Конвертируем screen coords в world coords
-    const left = (rect.left - layerRect.left) / canvasScale;
-    const top = (rect.top - layerRect.top) / canvasScale;
-    const width = rect.width / canvasScale;
-    const height = rect.height / canvasScale;
+    // Базовые размеры из container.style
+    const baseWidth = parseFloat(container.style.width) || container.offsetWidth;
+    const baseHeight = parseFloat(container.style.height) || container.offsetHeight;
+    const scale = obj.scale !== undefined ? obj.scale : 1;
+    const borderWidth = obj.borderWidth || obj.strokeWidth || 0;
     
-    let centerX = left + width / 2;
-    let centerY = top + height / 2;
-    let halfWidth = width / 2;
-    const halfHeight = height / 2;
+    // Определяем тип масштабирования
+    const usesTransformScale = obj.usesTransformScale?.() ?? (obj.type === 'text' || obj.type === 'shape' || obj.type === 'fate-card');
     
-    // getBoundingClientRect уже возвращает AABB для повёрнутых объектов
+    let width, height, borderPadding;
+    
+    if (usesTransformScale) {
+      // transform: scale() - размеры масштабируются, border тоже
+      width = baseWidth * scale;
+      height = baseHeight * scale;
+      borderPadding = borderWidth * scale;
+    } else {
+      // images - размеры уже в container, border не масштабируется
+      width = baseWidth;
+      height = baseHeight;
+      borderPadding = borderWidth;
+    }
+    
+    // Финальные размеры с учётом border
+    const finalWidth = width + 2 * borderPadding;
+    const finalHeight = height + 2 * borderPadding;
+    
+    // Центр объекта (для transform-origin: center это x + baseWidth/2)
+    const centerX = x + baseWidth / 2;
+    const centerY = y + baseHeight / 2;
+    
+    // Позиция = центр - половина финального размера
+    const left = centerX - finalWidth / 2;
+    const top = centerY - finalHeight / 2;
+    
     return {
       left,
-      right: left + width,
+      right: left + finalWidth,
       top,
-      bottom: top + height,
+      bottom: top + finalHeight,
       centerX,
       centerY
     };
@@ -543,6 +884,7 @@ class AlignmentGuides {
 
   /**
    * Нарисовать линию
+   * Толщина компенсируется зумом канваса, чтобы линии были видны на любом масштабе
    */
   _drawLine(x1, y1, x2, y2) {
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -551,8 +893,14 @@ class AlignmentGuides {
     line.setAttribute('x2', x2);
     line.setAttribute('y2', y2);
     line.setAttribute('stroke', GUIDE_COLOR);
-    line.setAttribute('stroke-width', GUIDE_WIDTH);
-    line.setAttribute('stroke-dasharray', '4,4');
+    
+    // Компенсируем зум канваса - линия всегда 1px на экране
+    const scale = this._getCanvasScale();
+    const compensatedWidth = GUIDE_WIDTH / scale;
+    const compensatedDash = 4 / scale;
+    
+    line.setAttribute('stroke-width', compensatedWidth);
+    line.setAttribute('stroke-dasharray', `${compensatedDash},${compensatedDash}`);
     this.svg.appendChild(line);
   }
 
@@ -622,6 +970,13 @@ const instance = new AlignmentGuides();
 if (typeof Hooks !== 'undefined') {
   Hooks.once('ready', () => {
     // Даём WBE время инициализироваться
+    setTimeout(() => instance.init(), 100);
+  });
+  
+  // Переинициализация при смене сцены - layer пересоздаётся
+  Hooks.on('canvasReady', () => {
+    console.log('[AlignmentGuides] Canvas ready - reinitializing...');
+    instance.destroy();
     setTimeout(() => instance.init(), 100);
   });
 } else {

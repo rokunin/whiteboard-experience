@@ -13,7 +13,9 @@
  * - 800: RightClickHandler - Right mouse button - pan or exit text mode
  * - 750: UnfreezeIconHandler - Click on unfreeze icon (must be above MassSelection)
  * 
- * MEDIUM PRIORITY (700-550):
+ * MEDIUM PRIORITY (710-550):
+ * - 710: MassScaleHandler - Scale handle on mass selection bounding box
+ * - 705: ShiftClickAddHandler - Shift+click to add/remove object from mass selection
  * - 700: MassSelectionDragHandler - Drag inside mass selection bounding box
  * - 695: MassSelectionClearHandler - Click outside mass selection bounding box
  * - 660: ShapeDrawHandler - Shape drawing tool active
@@ -63,16 +65,7 @@ export const PanelImmunityHandler = {
       }
     }
     
-    // Fallback: built-in panel selectors (for backwards compatibility)
-    return !!(
-      target.closest('.wbe-color-picker-panel') ||
-      target.closest('.wbe-text-styling-panel') ||
-      target.closest('.wbe-image-control-panel') ||
-      target.closest('.wbe-text-styling-subpanel') ||
-      target.closest('.wbe-image-control-subpanel') ||
-      target.closest('.wbe-color-subpanel') ||
-      target.closest('.wbe-rotation-subpanel')
-    );
+    return false;
   },
 
   /**
@@ -200,6 +193,47 @@ export function getHighPriorityMouseDownHandlers() {
 // ============================================
 
 /**
+ * MassScaleHandler (priority 710)
+ * 
+ * Handles scaling of mass-selected objects when clicking on the scale handle.
+ * Higher priority than MassSelectionDragHandler to intercept scale handle clicks.
+ */
+export const MassScaleHandler = {
+  name: 'massScale',
+  priority: 710,
+
+  /**
+   * Check if click is on mass selection scale handle
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if should handle mass scale
+   */
+  canHandle(ctx) {
+    // Only left click
+    if (ctx.button !== 0) return false;
+    
+    // Check if target is scale handle
+    if (!ctx.target.classList.contains('wbe-mass-scale-handle')) return false;
+    
+    // Must have mass selection with selected objects
+    const massSelection = ctx.massSelection;
+    if (!massSelection || !massSelection.selectedIds || massSelection.selectedIds.size === 0) return false;
+    
+    return true;
+  },
+
+  /**
+   * Handle mass scale - start scaling all selected objects
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if handled
+   */
+  handle(ctx) {
+    ctx.consume();
+    ctx.massSelection.startGroupScale(ctx.event);
+    return true;
+  }
+};
+
+/**
  * MassSelectionDragHandler (priority 700)
  * 
  * Handles dragging of mass-selected objects when clicking inside the bounding box.
@@ -228,6 +262,8 @@ export const MassSelectionDragHandler = {
     if (!massSelection.selectedIds || massSelection.selectedIds.size === 0) return false;
     
     // Check if click is inside bounding box
+    // Note: Shift+Drag inside bounding box = drag with alignment guides
+    // Shift+Click OUTSIDE bounding box = add object to group (handled by ShiftClickAddHandler)
     return massSelection.isPointInsideBoundingBox(ctx.clientX, ctx.clientY);
   },
 
@@ -264,6 +300,17 @@ export const MassSelectionClearHandler = {
     // Only left click
     if (ctx.button !== 0) return false;
     
+    // Skip if Shift is held - ShiftClickAddHandler will handle it
+    if (ctx.shiftKey) return false;
+    
+    // Skip if clicking on registered UI elements (DRY: use centralized UI selector check)
+    const uiSelectors = window.Whiteboard?.getUISelectors?.();
+    if (uiSelectors) {
+      for (const selector of uiSelectors) {
+        if (ctx.target?.closest?.(selector)) return false;
+      }
+    }
+    
     // Must have mass selection controller
     const massSelection = ctx.massSelection;
     if (!massSelection) return false;
@@ -285,6 +332,112 @@ export const MassSelectionClearHandler = {
     ctx.massSelection.clear();
     // Return false to allow other handlers to process (might select another object)
     return false;
+  }
+};
+
+/**
+ * ShiftClickAddHandler (priority 705)
+ * 
+ * Adds/removes objects to/from mass selection when Shift+clicking on an object.
+ * Works with any object type (text, image, shape, etc.).
+ * 
+ * Priority 705 > MassSelectionDragHandler (700) to intercept Shift+Click on objects
+ * inside bounding box for toggle functionality.
+ * (No conflict with alignment guides - those use Ctrl+Drag now)
+ * 
+ * Behavior:
+ * - If object is already in mass selection: removes it
+ * - If object is not in mass selection: adds it
+ * - If single object is selected (not mass): converts to mass selection with both objects
+ */
+export const ShiftClickAddHandler = {
+  name: 'shiftClickAdd',
+  priority: 705,
+
+  /**
+   * Check if Shift+clicking on an object
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if should handle
+   */
+  canHandle(ctx) {
+    // Only left click with Shift
+    if (ctx.button !== 0) return false;
+    if (!ctx.shiftKey) return false;
+    
+    // Check if mass selection is enabled in settings
+    if (window.WBE_isFeatureEnabled && !window.WBE_isFeatureEnabled('massSelection')) {
+      return false;
+    }
+    
+    // Must have mass selection controller
+    if (!ctx.massSelection) return false;
+    
+    // Must be clicking on an object
+    const hitResult = ctx.hitResult;
+    if (hitResult.type !== 'object') return false;
+    
+    const obj = hitResult.object;
+    if (!obj || !obj.id) return false;
+    
+    // Skip frozen objects
+    if (obj.isFrozen?.()) return false;
+    
+    return true;
+  },
+
+  /**
+   * Handle Shift+click - add/remove object to/from mass selection
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if handled
+   */
+  handle(ctx) {
+    ctx.consume();
+    
+    const clickedId = ctx.hitResult.object.id;
+    const massSelection = ctx.massSelection;
+    const im = ctx.im;
+    
+    // Case 1: Object is already in mass selection - toggle it
+    if (massSelection.selectedIds.has(clickedId)) {
+      massSelection.toggleObject(clickedId, false); // Remove
+      
+      // If only 1 object left, convert to single selection
+      if (massSelection.selectedIds.size === 1) {
+        const remainingId = [...massSelection.selectedIds][0];
+        massSelection.clear();
+        im._select(remainingId);
+      } else if (massSelection.selectedIds.size === 0) {
+        massSelection.clear();
+      }
+      return true;
+    }
+    
+    // Case 2: Single object is selected (not mass) - convert to mass selection
+    if (im.selectedId && massSelection.selectedIds.size === 0) {
+      const previousId = im.selectedId;
+      
+      // Don't add if clicking on the same object that's already selected
+      if (previousId === clickedId) return true;
+      
+      // Deselect single selection
+      im._deselect();
+      
+      // Add both objects to mass selection (toggleObject calls _updateBoundingBox)
+      massSelection.toggleObject(previousId, true);
+      massSelection.toggleObject(clickedId, true);
+      return true;
+    }
+    
+    // Case 3: Mass selection exists - add clicked object
+    if (massSelection.selectedIds.size > 0) {
+      massSelection.toggleObject(clickedId, true);
+      return true;
+    }
+    
+    // Case 4: Nothing selected - just select the clicked object normally
+    // (This shouldn't happen often, but handle it gracefully)
+    im._select(clickedId);
+    return true;
   }
 };
 
@@ -519,8 +672,10 @@ export const UnfreezeIconHandler = {
  */
 export function getMediumPriorityMouseDownHandlers() {
   return [
+    MassScaleHandler,
     MassSelectionDragHandler,
     MassSelectionClearHandler,
+    ShiftClickAddHandler,
     ShapeDrawHandler,
     MassSelectionStartHandler,
     TextModeCreateHandler

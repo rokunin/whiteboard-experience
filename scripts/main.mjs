@@ -19,6 +19,7 @@ Hooks.once("init", () => {
   if (window.WBE_registerSettings) {
     window.WBE_registerSettings();
   }
+  CONFIG.Canvas.maxZoom = 5.0;
 });
 
 // Initialize whiteboard after game is ready
@@ -32,9 +33,21 @@ Hooks.once("ready", async () => {
   if (window.Whiteboard) {
     await window.Whiteboard.init();
     
-    // Register color picker UI elements so clicks don't deselect objects
+    // Register UI elements so clicks don't deselect objects
+    // Color pickers
     window.Whiteboard.registerUISelector('.pcr-app');
     window.Whiteboard.registerUISelector('.wbe-color-swatches-popup');
+    // Styling panels
+    window.Whiteboard.registerUISelector('.wbe-text-styling-panel');
+    window.Whiteboard.registerUISelector('.wbe-image-control-panel');
+    window.Whiteboard.registerUISelector('.wbe-color-picker-panel');
+    // Subpanels
+    window.Whiteboard.registerUISelector('.wbe-text-styling-subpanel');
+    window.Whiteboard.registerUISelector('.wbe-image-control-subpanel');
+    window.Whiteboard.registerUISelector('.wbe-color-subpanel');
+    window.Whiteboard.registerUISelector('.wbe-rotation-subpanel');
+    // Mass selection panel (NOT bounding box - that needs to handle drag)
+    window.Whiteboard.registerUISelector('.wbe-mass-selection-panel');
   }
   console.log(`whiteboard-experience | Initialized`);
 });
@@ -132,7 +145,8 @@ const DEFAULT_SWATCHES = [
   // Row 5: Blue + black
   '#c6dcff', '#659df2', '#305bab', '#1a1a1a',
   // Row 6: Purple + red
-  '#dedaff', '#8f7fee', '#6631d7', '#fd0101'
+  '#dedaff', '#8f7fee', '#6631d7', '#fd0101', 
+  '#b4c1a7', '#fac710', '#9f3c3c'
 ];
 
 // Custom swatches added by user (persisted in localStorage)
@@ -393,6 +407,25 @@ const DEFAULT_BORDER_HEX = DEFAULT_TEXT_COLOR;
 const DEFAULT_BORDER_OPACITY = 100;
 const DEFAULT_BORDER_WIDTH = 0;
 const DEFAULT_BORDER_RADIUS = 0;
+
+/**
+ * Calculate inner border radius for imageWrapper clipping
+ * SVG stroke is drawn centered on the line, so inner edge = rx - strokeWidth/2
+ * Wrapper borderRadius must match this inner edge for seamless alignment
+ * @param {number} scaledBorderRadius - Border radius after scaling (SVG rx value)
+ * @param {number} baseBorderWidth - Border width (not scaled, visual constant)
+ * @returns {number} Inner radius for imageWrapper
+ */
+function calcInnerBorderRadius(scaledBorderRadius, baseBorderWidth) {
+  if (scaledBorderRadius <= 0) return 0;
+  // Inner edge of SVG stroke = rx - strokeWidth/2
+  // But we add strokeWidth/2 to rx in _updateSvgPermanentBorder, so:
+  // actual rx = scaledBorderRadius + borderWidth/2
+  // inner edge = (scaledBorderRadius + borderWidth/2) - borderWidth/2 = scaledBorderRadius
+  // So wrapper should just use scaledBorderRadius directly!
+  return Math.max(0, Math.round(scaledBorderRadius));
+}
+
 const DEFAULT_SHADOW_HEX = '#000000';
 const DEFAULT_SHADOW_OPACITY = 0;
 const DEFAULT_FONT_WEIGHT = 400;
@@ -2063,13 +2096,12 @@ class WhiteboardLayer {
           selectionBorder.style.left = '0px';
           selectionBorder.style.top = '0px';
         } else {
-          // Normal mode: expand by borderWidth
+          // Normal mode: expand by borderWidth (not scaled - border is visual constant)
           const baseBorderWidth = obj.borderWidth !== undefined ? obj.borderWidth : DEFAULT_BORDER_WIDTH;
-          const scaledBorderWidth = baseBorderWidth * scale;
-          selectionBorder.style.width = `${dims.width + 2 * scaledBorderWidth}px`;
-          selectionBorder.style.height = `${dims.height + 2 * scaledBorderWidth}px`;
-          selectionBorder.style.left = `-${scaledBorderWidth}px`;
-          selectionBorder.style.top = `-${scaledBorderWidth}px`;
+          selectionBorder.style.width = `${dims.width + 2 * baseBorderWidth}px`;
+          selectionBorder.style.height = `${dims.height + 2 * baseBorderWidth}px`;
+          selectionBorder.style.left = `-${baseBorderWidth}px`;
+          selectionBorder.style.top = `-${baseBorderWidth}px`;
         }
       }
       
@@ -2078,13 +2110,14 @@ class WhiteboardLayer {
       if (permanentBorder) {
         const baseBorderWidth = obj.borderWidth !== undefined ? obj.borderWidth : DEFAULT_BORDER_WIDTH;
         const baseBorderRadius = obj.borderRadius !== undefined ? obj.borderRadius : DEFAULT_BORDER_RADIUS;
-        const scaledBorderWidth = Math.round(baseBorderWidth * scale);
+        // borderWidth is NOT scaled - it's a visual constant
+        // borderRadius IS scaled - it's relative to image dimensions
         const scaledBorderRadius = Math.round(baseBorderRadius * scale);
-        const borderRgba = scaledBorderWidth > 0 
+        const borderRgba = baseBorderWidth > 0 
           ? hexToRgba(obj.borderHex || DEFAULT_BORDER_HEX, obj.borderOpacity !== undefined ? obj.borderOpacity : DEFAULT_BORDER_OPACITY) 
           : null;
         const isCircleMask = maskType === 'circle';
-        this._updateSvgPermanentBorder(permanentBorder, dims.width, dims.height, scaledBorderWidth, borderRgba, scaledBorderRadius, isCircleMask);
+        this._updateSvgPermanentBorder(permanentBorder, dims.width, dims.height, baseBorderWidth, borderRgba, scaledBorderRadius, isCircleMask);
       }
       
       // clickTarget = visible area
@@ -2277,9 +2310,9 @@ class WhiteboardLayer {
     
     // Account for borderWidth - selection overlay should be OUTSIDE permanent border
     // For transform:scale() types (text): border is scaled, need to add it
-    // For images: border is already included in container dimensions via CSS box model
+    // For images: border is drawn OUTSIDE container, need to add it
     const borderWidth = obj.borderWidth || 0;
-    const borderPadding = usesTransformScale ? borderWidth * scale : 0;
+    const borderPadding = usesTransformScale ? borderWidth * scale : borderWidth;
     
     // Fixed 1px padding around selection overlay (in world coordinates, independent of canvas scale)
     const SELECTION_PADDING = 1;
@@ -2500,6 +2533,9 @@ class WhiteboardLayer {
   init() {
     // Store bound callbacks for cleanup
     this._hookCallbacks.canvasReady = async () => {
+      // Hide "no scene" panel when scene becomes active
+      this._hideNoScenePanel();
+      
       this._createLayer();
       this._startContinuousSync();
       
@@ -2520,12 +2556,151 @@ class WhiteboardLayer {
     };
     Hooks.on("canvasReady", this._hookCallbacks.canvasReady);
     Hooks.on("canvasTearDown", this._hookCallbacks.canvasTearDown);
+    
+    // Fallback: ensure layer exists when canvas is ready
+    // This handles edge cases like scene deletion where canvasReady might not fire
+    this._hookCallbacks.renderSceneNavigation = () => {
+      if (canvas?.ready && !this.element) {
+        console.log('[WBE Layer] Fallback: recreating layer after scene navigation');
+        this._hideNoScenePanel();
+        this._createLayer();
+        this._startContinuousSync();
+        if (window.Whiteboard?.persistence) {
+          window.Whiteboard.persistence.loadAll();
+        }
+      }
+    };
+    Hooks.on("renderSceneNavigation", this._hookCallbacks.renderSceneNavigation);
+    
+    // Handle scene deletion - auto-activate another scene if current is deleted
+    this._hookCallbacks.deleteScene = (scene) => {
+      // Check if deleted scene was the active one and there are other scenes
+      if (canvas?.scene?.id === scene.id && game.scenes.size > 0) {
+        const remainingScene = game.scenes.find(s => s.id !== scene.id);
+        if (remainingScene) {
+          console.log(`[WBE] Active scene deleted, auto-activating: ${remainingScene.name}`);
+          // Small delay to let Foundry finish cleanup
+          setTimeout(async () => {
+            // activate() sets scene.active = true, view() loads the canvas
+            await remainingScene.activate();
+            remainingScene.view();
+          }, 100);
+        }
+      } else if (game.scenes.size === 0) {
+        // No scenes left - show notification and panel
+        ui.notifications?.warn('Whiteboard Experience: No scenes available. Create a scene to continue.');
+        this._showNoScenePanel();
+      }
+    };
+    Hooks.on("deleteScene", this._hookCallbacks.deleteScene);
+    
     if (canvas.ready) {
       this._createLayer();
       this._startContinuousSync();
       // Mark initial scene as loaded (Whiteboard.init will call persistence.loadAll)
       this._hasLoadedInitialScene = true;
+    } else if (!canvas.scene && game.scenes.size > 0) {
+      // No active scene but scenes exist - auto-activate first one
+      const firstScene = game.scenes.contents[0];
+      if (firstScene) {
+        console.log(`[WBE] No active scene on startup, auto-activating: ${firstScene.name}`);
+        ui.notifications?.info(`Whiteboard Experience: Auto-activating scene "${firstScene.name}"`);
+        // Small delay to ensure Foundry is ready
+        setTimeout(async () => {
+          // activate() sets scene.active = true, view() loads the canvas
+          await firstScene.activate();
+          firstScene.view();
+        }, 500);
+      }
+    } else if (!canvas.scene && game.scenes.size === 0) {
+      // No scenes at all
+      ui.notifications?.warn('Whiteboard Experience: No scenes available. Create a scene to start.');
+      this._showNoScenePanel();
     }
+  }
+  
+  /**
+   * Show "no scene" notification and overlay panel
+   */
+  /**
+   * Show "no scene" notification and overlay panel
+   */
+  _showNoSceneNotification() {
+    // Use Foundry's built-in notification system
+    ui.notifications?.info('Whiteboard Experience: Please select a scene to start drawing.');
+    
+    // Also show overlay panel on the board
+    this._showNoScenePanel();
+  }
+  
+  /**
+   * Show overlay panel when no scene is active
+   */
+  _showNoScenePanel() {
+    // Don't create duplicate
+    if (document.getElementById('wbe-no-scene-panel')) return;
+    
+    const board = document.getElementById('board');
+    if (!board) return;
+    
+    const panel = document.createElement('div');
+    panel.id = 'wbe-no-scene-panel';
+    panel.innerHTML = `
+      <div class="wbe-no-scene-icon">🎨</div>
+      <div class="wbe-no-scene-title">Please select a scene</div>
+      <div class="wbe-no-scene-subtitle">Activate a scene from the navigation bar to start drawing</div>
+    `;
+    
+    // Inline styles for the panel
+    Object.assign(panel.style, {
+      position: 'fixed',
+      top: '50%',
+      left: '50%',
+      transform: 'translate(-50%, -50%)',
+      background: 'rgba(30, 30, 40, 0.95)',
+      border: '2px solid rgba(100, 100, 120, 0.5)',
+      borderRadius: '12px',
+      padding: '40px 60px',
+      textAlign: 'center',
+      zIndex: '10000',
+      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)',
+      backdropFilter: 'blur(8px)',
+      color: '#e0e0e0',
+      fontFamily: 'var(--font-primary, "Signika", sans-serif)'
+    });
+    
+    // Style the icon
+    const icon = panel.querySelector('.wbe-no-scene-icon');
+    Object.assign(icon.style, {
+      fontSize: '48px',
+      marginBottom: '16px'
+    });
+    
+    // Style the title
+    const title = panel.querySelector('.wbe-no-scene-title');
+    Object.assign(title.style, {
+      fontSize: '24px',
+      fontWeight: '600',
+      marginBottom: '8px',
+      color: '#ffffff'
+    });
+    
+    // Style the subtitle
+    const subtitle = panel.querySelector('.wbe-no-scene-subtitle');
+    Object.assign(subtitle.style, {
+      fontSize: '14px',
+      color: '#a0a0a0'
+    });
+    
+    document.body.appendChild(panel);
+  }
+  
+  /**
+   * Hide no-scene panel
+   */
+  _hideNoScenePanel() {
+    const panel = document.getElementById('wbe-no-scene-panel');
+    if (panel) panel.remove();
   }
   
   /**
@@ -2590,6 +2765,14 @@ class WhiteboardLayer {
     const style = document.createElement('style');
     style.id = 'wbe-global-styles';
     style.textContent = `
+      /* High-quality image downscaling */
+      /* Uses high-quality interpolation for better results when scaling down */
+      .wbe-canvas-image {
+        image-rendering: auto;
+        image-rendering: -webkit-optimize-contrast;
+        image-rendering: smooth;
+      }
+      
       /* Text mode cursor - must override all child elements including inline styles */
       /* Apply to both board AND whiteboard layer (layer is sibling of board, not child) */
       #board.wbe-text-mode,
@@ -2653,6 +2836,14 @@ class WhiteboardLayer {
     if (this._hookCallbacks.canvasTearDown) {
       Hooks.off("canvasTearDown", this._hookCallbacks.canvasTearDown);
       this._hookCallbacks.canvasTearDown = null;
+    }
+    if (this._hookCallbacks.renderSceneNavigation) {
+      Hooks.off("renderSceneNavigation", this._hookCallbacks.renderSceneNavigation);
+      this._hookCallbacks.renderSceneNavigation = null;
+    }
+    if (this._hookCallbacks.deleteScene) {
+      Hooks.off("deleteScene", this._hookCallbacks.deleteScene);
+      this._hookCallbacks.deleteScene = null;
     }
     
     this._destroyLayer();
@@ -3118,32 +3309,33 @@ class WhiteboardLayer {
         imageElement.style.left = `${-roundedLeft}px`;
         imageElement.style.top = `${-roundedTop}px`;
         
+        // Calculate border dimensions (needed for imageWrapper, permanentBorder and selectionBorder)
+        // CRITICAL: borderWidth should NOT scale with image - it's a visual constant
+        // borderRadius DOES scale because it's relative to image dimensions
+        const baseBorderWidth = obj.borderWidth !== undefined ? obj.borderWidth : DEFAULT_BORDER_WIDTH;
+        const baseBorderRadius = obj.borderRadius !== undefined ? obj.borderRadius : DEFAULT_BORDER_RADIUS;
+        const scaledBorderRadius = Math.round(baseBorderRadius * scale);
+        
         const imageWrapper = container.querySelector('.wbe-image-wrapper');
         if (imageWrapper && roundedWidth > 0 && roundedHeight > 0) {
-          const baseBorderRadius = obj.borderRadius !== undefined ? obj.borderRadius : DEFAULT_BORDER_RADIUS;
-          const scaledBorderRadius = Math.round(baseBorderRadius * scale);
           imageWrapper.style.width = `${roundedWidth}px`;
           imageWrapper.style.height = `${roundedHeight}px`;
           imageWrapper.style.left = `0px`;
           imageWrapper.style.top = `0px`;
           // Circle mask uses 50% border-radius, BUT NOT in crop mode (show full image)
-          imageWrapper.style.borderRadius = (!obj.isCropping && obj.maskType === 'circle') ? '50%' : `${scaledBorderRadius}px`;
+          // CRITICAL: imageWrapper radius must be INNER radius (proportionally scaled)
+          const innerRadius = calcInnerBorderRadius(scaledBorderRadius, baseBorderWidth);
+          imageWrapper.style.borderRadius = (!obj.isCropping && obj.maskType === 'circle') ? '50%' : `${innerRadius}px`;
         }
-              
-        // Calculate border dimensions (needed for both permanentBorder and selectionBorder)
-        const baseBorderWidth = obj.borderWidth !== undefined ? obj.borderWidth : DEFAULT_BORDER_WIDTH;
-        const baseBorderRadius = obj.borderRadius !== undefined ? obj.borderRadius : DEFAULT_BORDER_RADIUS;
-        const scaledBorderWidth = Math.round(baseBorderWidth * scale);
-        const scaledBorderRadius = Math.round(baseBorderRadius * scale);
               
         // Update SVG permanentBorder
         const permanentBorder = container.querySelector('.wbe-image-permanent-border');
         if (permanentBorder) {
-          const borderRgba = scaledBorderWidth > 0 
+          const borderRgba = baseBorderWidth > 0 
             ? hexToRgba(obj.borderHex || DEFAULT_BORDER_HEX, obj.borderOpacity !== undefined ? obj.borderOpacity : DEFAULT_BORDER_OPACITY) 
             : null;
           const isCircleMask = obj.maskType === 'circle';
-          this._updateSvgPermanentBorder(permanentBorder, roundedWidth, roundedHeight, scaledBorderWidth, borderRgba, scaledBorderRadius, isCircleMask);
+          this._updateSvgPermanentBorder(permanentBorder, roundedWidth, roundedHeight, baseBorderWidth, borderRgba, scaledBorderRadius, isCircleMask);
         }
               
         // selectionBorder must be OUTSIDE permanentBorder (box-shadow)
@@ -3157,11 +3349,11 @@ class WhiteboardLayer {
             selectionBorder.style.left = `0px`;
             selectionBorder.style.top = `0px`;
           } else {
-            // Normal mode: expand by borderWidth
-            selectionBorder.style.width = `${roundedWidth + 2 * scaledBorderWidth}px`;
-            selectionBorder.style.height = `${roundedHeight + 2 * scaledBorderWidth}px`;
-            selectionBorder.style.left = `-${scaledBorderWidth}px`;
-            selectionBorder.style.top = `-${scaledBorderWidth}px`;
+            // Normal mode: expand by borderWidth (not scaled - border is visual constant)
+            selectionBorder.style.width = `${roundedWidth + 2 * baseBorderWidth}px`;
+            selectionBorder.style.height = `${roundedHeight + 2 * baseBorderWidth}px`;
+            selectionBorder.style.left = `-${baseBorderWidth}px`;
+            selectionBorder.style.top = `-${baseBorderWidth}px`;
           }
         }
               
@@ -3177,7 +3369,7 @@ class WhiteboardLayer {
         if (resizeHandle && obj.selected) {
           // In crop mode: no borderWidth offset (permanentBorder is hidden)
           // In normal mode: add borderWidth offset to match selectionBorder corner
-          const borderOffset = obj.isCropping ? 0 : scaledBorderWidth;
+          const borderOffset = obj.isCropping ? 0 : baseBorderWidth;
           resizeHandle.style.left = `${roundedWidth + RESIZE_HANDLE_OFFSET_X + borderOffset}px`;
           resizeHandle.style.top = `${roundedHeight + RESIZE_HANDLE_OFFSET_Y + borderOffset}px`;
           resizeHandle.style.transform = 'none';
@@ -3290,6 +3482,7 @@ class WhiteboardLayer {
         textElement.style.fontWeight = obj.fontWeight || DEFAULT_FONT_WEIGHT;
         textElement.style.fontStyle = obj.fontStyle || DEFAULT_FONT_STYLE;
         textElement.style.textAlign = obj.textAlign || DEFAULT_TEXT_ALIGN;
+        textElement.style.lineHeight = obj.lineHeight !== undefined ? obj.lineHeight : 1.2;
 
         // CRITICAL: Update scale even during resize for smooth scaling
         // Scale must be updated during resize, otherwise scaling will be jerky
@@ -3373,6 +3566,9 @@ class WhiteboardLayer {
         }
         if (shouldUpdate('textAlign')) {
           allTextElementStyles.textAlign = obj.textAlign || DEFAULT_TEXT_ALIGN;
+        }
+        if (shouldUpdate('lineHeight')) {
+          allTextElementStyles.lineHeight = obj.lineHeight !== undefined ? obj.lineHeight : 1.2;
         }
         
         // Border (depends on borderWidth, borderColor, and borderOpacity)
@@ -3569,6 +3765,7 @@ class WhiteboardLayer {
       // clip-path on imageElement already clips the image, so imageWrapper should match visible area
       const imageWrapper = container.querySelector('.wbe-image-wrapper');
       if (imageWrapper && dims.width > 0 && dims.height > 0) {
+        const baseBorderWidth = obj.borderWidth !== undefined ? obj.borderWidth : DEFAULT_BORDER_WIDTH;
         const baseBorderRadius = obj.borderRadius !== undefined ? obj.borderRadius : DEFAULT_BORDER_RADIUS;
         // Scale borderRadius proportionally - round to prevent subpixel jittering
         const scaledBorderRadius = Math.round(baseBorderRadius * scale);
@@ -3577,7 +3774,9 @@ class WhiteboardLayer {
         imageWrapper.style.left = `0px`;  // Always at container origin
         imageWrapper.style.top = `0px`;    // Always at container origin
         // Circle mask uses 50% border-radius, BUT NOT in crop mode (show full image)
-        imageWrapper.style.borderRadius = (!obj.isCropping && obj.maskType === 'circle') ? '50%' : `${scaledBorderRadius}px`;
+        // CRITICAL: imageWrapper radius must be INNER radius (proportionally scaled)
+        const innerRadius = calcInnerBorderRadius(scaledBorderRadius, baseBorderWidth);
+        imageWrapper.style.borderRadius = (!obj.isCropping && obj.maskType === 'circle') ? '50%' : `${innerRadius}px`;
       }
       
       // permanentBorder uses inset: 0 - automatically matches container size
@@ -3629,13 +3828,12 @@ class WhiteboardLayer {
             selectionBorder.style.top = `${dims.top || 0}px`;
           } else {
             // Normal mode: expand by borderWidth to be outside permanentBorder
-            // Round to prevent subpixel jittering
+            // borderWidth is NOT scaled - it's a visual constant
             const baseBorderWidth = obj.borderWidth !== undefined ? obj.borderWidth : DEFAULT_BORDER_WIDTH;
-            const scaledBorderWidth = Math.round(baseBorderWidth * scale);
-            selectionBorder.style.width = `${dims.width + 2 * scaledBorderWidth}px`;
-            selectionBorder.style.height = `${dims.height + 2 * scaledBorderWidth}px`;
-            selectionBorder.style.left = `-${scaledBorderWidth}px`;
-            selectionBorder.style.top = `-${scaledBorderWidth}px`;
+            selectionBorder.style.width = `${dims.width + 2 * baseBorderWidth}px`;
+            selectionBorder.style.height = `${dims.height + 2 * baseBorderWidth}px`;
+            selectionBorder.style.left = `-${baseBorderWidth}px`;
+            selectionBorder.style.top = `-${baseBorderWidth}px`;
           }
         }
       }
@@ -3724,35 +3922,38 @@ class WhiteboardLayer {
         if (shouldUpdate('borderWidth') || shouldUpdate('borderHex') || shouldUpdate('borderOpacity') || shouldUpdate('borderRadius') || shouldUpdate('scale') || shouldUpdate('maskType') || shouldUpdate('isCropping')) {
           const baseBorderWidth = obj.borderWidth !== undefined ? obj.borderWidth : DEFAULT_BORDER_WIDTH;
           const baseBorderRadius = obj.borderRadius !== undefined ? obj.borderRadius : DEFAULT_BORDER_RADIUS;
-          // Scale proportionally - round to prevent subpixel jittering
-          const scaledBorderWidth = Math.round(baseBorderWidth * scale);
+          // borderWidth is NOT scaled - it's a visual constant
+          // borderRadius IS scaled - it's relative to image dimensions
           const scaledBorderRadius = Math.round(baseBorderRadius * scale);
-          const borderRgba = scaledBorderWidth > 0 
+          const borderRgba = baseBorderWidth > 0 
             ? hexToRgba(obj.borderHex || DEFAULT_BORDER_HEX, obj.borderOpacity !== undefined ? obj.borderOpacity : DEFAULT_BORDER_OPACITY) 
             : null;
           const isCircleMask = obj.maskType === 'circle';
           
           // Update SVG border
-          this._updateSvgPermanentBorder(permanentBorder, dims.width, dims.height, scaledBorderWidth, borderRgba, scaledBorderRadius, isCircleMask);
+          this._updateSvgPermanentBorder(permanentBorder, dims.width, dims.height, baseBorderWidth, borderRgba, scaledBorderRadius, isCircleMask);
           
           // Save the original borderRadius in dataset for persistence
           permanentBorder.dataset.borderRadius = `${baseBorderRadius}`;
           
-          // Update imageWrapper border-radius to clip the image (also scaled)
+          // Update imageWrapper border-radius to clip the image
           // For circle mask: use 50% to make wrapper circular, BUT NOT in crop mode
+          // CRITICAL: imageWrapper radius must be INNER radius (proportionally scaled)
+          // This ensures image is clipped correctly inside the border
           const imageWrapper = container.querySelector('.wbe-image-wrapper');
           if (imageWrapper) {
-            imageWrapper.style.borderRadius = (!obj.isCropping && isCircleMask) ? '50%' : `${scaledBorderRadius}px`;
+            const innerRadius = calcInnerBorderRadius(scaledBorderRadius, baseBorderWidth);
+            imageWrapper.style.borderRadius = (!obj.isCropping && isCircleMask) ? '50%' : `${innerRadius}px`;
           }
           
           // CRITICAL: Update selectionBorder size/position when borderWidth changes
           // selectionBorder must be OUTSIDE permanentBorder (box-shadow)
           const selectionBorderForStyle = container.querySelector('.wbe-image-selection-border');
           if (selectionBorderForStyle && dims.width > 0 && dims.height > 0) {
-            selectionBorderForStyle.style.width = `${dims.width + 2 * scaledBorderWidth}px`;
-            selectionBorderForStyle.style.height = `${dims.height + 2 * scaledBorderWidth}px`;
-            selectionBorderForStyle.style.left = `-${scaledBorderWidth}px`;
-            selectionBorderForStyle.style.top = `-${scaledBorderWidth}px`;
+            selectionBorderForStyle.style.width = `${dims.width + 2 * baseBorderWidth}px`;
+            selectionBorderForStyle.style.height = `${dims.height + 2 * baseBorderWidth}px`;
+            selectionBorderForStyle.style.left = `-${baseBorderWidth}px`;
+            selectionBorderForStyle.style.top = `-${baseBorderWidth}px`;
           }
         }
         
@@ -3796,8 +3997,16 @@ class WhiteboardLayer {
   _updateSvgPermanentBorder(permanentBorder, width, height, borderWidth, borderColor, borderRadius, isCircle) {
     if (!permanentBorder) return;
     
-    // Update viewBox
-    permanentBorder.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    // Border is drawn OUTSIDE the image area
+    // Expand viewBox by borderWidth on each side, position SVG with negative offset
+    const totalWidth = width + 2 * borderWidth;
+    const totalHeight = height + 2 * borderWidth;
+    
+    permanentBorder.setAttribute("viewBox", `0 0 ${totalWidth} ${totalHeight}`);
+    permanentBorder.style.width = `${totalWidth}px`;
+    permanentBorder.style.height = `${totalHeight}px`;
+    permanentBorder.style.left = `-${borderWidth}px`;
+    permanentBorder.style.top = `-${borderWidth}px`;
     
     // Get or create shape
     let borderShape = permanentBorder.querySelector('.wbe-permanent-border-shape');
@@ -3815,19 +4024,24 @@ class WhiteboardLayer {
       permanentBorder.appendChild(borderShape);
     }
     
-    // Update shape attributes
+    // Update shape attributes - rect is centered in expanded viewBox
+    // Stroke is drawn centered on the line, so offset by borderWidth/2 from edge
     if (isCircle) {
-      const radius = Math.min(width, height) / 2;
-      borderShape.setAttribute("cx", `${width / 2}`);
-      borderShape.setAttribute("cy", `${height / 2}`);
-      borderShape.setAttribute("r", `${Math.max(0, radius - borderWidth / 2)}`);
+      const radius = Math.min(width, height) / 2 + borderWidth / 2;
+      borderShape.setAttribute("cx", `${totalWidth / 2}`);
+      borderShape.setAttribute("cy", `${totalHeight / 2}`);
+      borderShape.setAttribute("r", `${radius}`);
     } else {
-      borderShape.setAttribute("x", `${borderWidth / 2}`);
-      borderShape.setAttribute("y", `${borderWidth / 2}`);
-      borderShape.setAttribute("width", `${Math.max(0, width - borderWidth)}`);
-      borderShape.setAttribute("height", `${Math.max(0, height - borderWidth)}`);
-      borderShape.setAttribute("rx", `${borderRadius}`);
-      borderShape.setAttribute("ry", `${borderRadius}`);
+      // Rect is inset by 1px to ensure stroke overlaps wrapper edge (prevents subpixel gaps)
+      const inset = 1;
+      borderShape.setAttribute("x", `${borderWidth / 2 + inset}`);
+      borderShape.setAttribute("y", `${borderWidth / 2 + inset}`);
+      borderShape.setAttribute("width", `${width + borderWidth - 2 * inset}`);
+      borderShape.setAttribute("height", `${height + borderWidth - 2 * inset}`);
+      // rx adjusted for inset
+      const svgRx = borderRadius > 0 ? Math.max(0, borderRadius + borderWidth / 2 - inset) : 0;
+      borderShape.setAttribute("rx", `${svgRx}`);
+      borderShape.setAttribute("ry", `${svgRx}`);
     }
     borderShape.setAttribute("stroke", borderColor || "transparent");
     borderShape.setAttribute("stroke-width", `${borderWidth}`);
@@ -4439,6 +4653,46 @@ class WhiteboardObject {
   }
 
   /**
+   * Apply group scale transformation (for mass selection scaling)
+   * Default implementation works for transform:scale() objects with transform-origin: center
+   * 
+   * CRITICAL: Objects with transform-origin: center scale from their visual center,
+   * not from CSS left/top. We must:
+   * 1. Calculate visual center (x + width/2, y + height/2)
+   * 2. Scale the visual center position relative to group pivot
+   * 3. Calculate new CSS left/top from the new visual center
+   * 
+   * @param {number} scaleFactor - Scale multiplier (1.0 = no change, 1.1 = +10%)
+   * @param {number} pivotX - X coordinate of scale pivot point (group center)
+   * @param {number} pivotY - Y coordinate of scale pivot point (group center)
+   * @param {Object} startData - Original object data { x, y, scale, width, height }
+   * @returns {Object} New values { x, y, scale }
+   */
+  applyGroupScale(scaleFactor, pivotX, pivotY, startData) {
+    // Get base dimensions (unscaled)
+    const baseWidth = startData.width ?? 100;
+    const baseHeight = startData.height ?? 100;
+    
+    // Visual center of the object (CSS left/top + half of base size)
+    const visualCenterX = startData.x + baseWidth / 2;
+    const visualCenterY = startData.y + baseHeight / 2;
+    
+    // Scale the visual center position relative to group pivot
+    const dx = visualCenterX - pivotX;
+    const dy = visualCenterY - pivotY;
+    const newVisualCenterX = pivotX + dx * scaleFactor;
+    const newVisualCenterY = pivotY + dy * scaleFactor;
+    
+    // Calculate new CSS left/top from new visual center
+    const newX = newVisualCenterX - baseWidth / 2;
+    const newY = newVisualCenterY - baseHeight / 2;
+    
+    const newScale = startData.scale * scaleFactor;
+    
+    return { x: newX, y: newY, scale: newScale };
+  }
+
+  /**
    * Check if object is frozen (cannot be selected/dragged)
    * @returns {boolean}
    */
@@ -4651,6 +4905,7 @@ class WhiteboardText extends WhiteboardObject {
     this.borderOpacity = data.borderOpacity !== undefined ? data.borderOpacity : DEFAULT_BORDER_OPACITY;
     this.borderWidth = data.borderWidth !== undefined ? data.borderWidth : DEFAULT_BORDER_WIDTH;
     this.textWidth = data.textWidth || null; // null = auto width, number = fixed width in px
+    this.lineHeight = data.lineHeight !== undefined ? data.lineHeight : 1.2; // Default line-height
     this.scale = data.scale !== undefined ? data.scale : 1;
     this.rotation = data.rotation || 0;
 
@@ -4712,7 +4967,7 @@ class WhiteboardText extends WhiteboardObject {
             word-wrap: break-word;
             word-break: break-word;
             overflow: hidden;
-            line-height: 1;
+            line-height: ${this.lineHeight};
         `;
 
     // Editable span (like in old code - contentEditable for editing)
@@ -4918,6 +5173,7 @@ class WhiteboardText extends WhiteboardObject {
       borderOpacity: this.borderOpacity,
       borderWidth: this.borderWidth,
       textWidth: this.textWidth,
+      lineHeight: this.lineHeight,
       scale: this.scale,
       rotation: this.rotation
     };
@@ -4945,6 +5201,42 @@ class WhiteboardText extends WhiteboardObject {
 
   usesTransformScale() {
     return true;
+  }
+
+  /**
+   * Apply group scale transformation (for mass selection scaling)
+   * 
+   * CRITICAL: Text uses transform: scale() with transform-origin: center,
+   * so we must scale the visual center position, not the CSS left/top.
+   * 
+   * @param {number} scaleFactor - Scale multiplier (1.0 = no change, 1.1 = +10%)
+   * @param {number} pivotX - X coordinate of scale pivot point (group center)
+   * @param {number} pivotY - Y coordinate of scale pivot point (group center)
+   * @param {Object} startData - Original object data { x, y, scale, width, height }
+   * @returns {Object} New values { x, y, scale }
+   */
+  applyGroupScale(scaleFactor, pivotX, pivotY, startData) {
+    // Get base dimensions (unscaled container size)
+    const baseWidth = startData.width ?? 100;
+    const baseHeight = startData.height ?? 100;
+    
+    // Visual center of the object (CSS left/top + half of base size)
+    const visualCenterX = startData.x + baseWidth / 2;
+    const visualCenterY = startData.y + baseHeight / 2;
+    
+    // Scale the visual center position relative to group pivot
+    const dx = visualCenterX - pivotX;
+    const dy = visualCenterY - pivotY;
+    const newVisualCenterX = pivotX + dx * scaleFactor;
+    const newVisualCenterY = pivotY + dy * scaleFactor;
+    
+    // Calculate new CSS left/top from new visual center
+    const newX = newVisualCenterX - baseWidth / 2;
+    const newY = newVisualCenterY - baseHeight / 2;
+    
+    const newScale = startData.scale * scaleFactor;
+    
+    return { x: newX, y: newY, scale: newScale };
   }
 
   isFrozen() {
@@ -5192,9 +5484,14 @@ class WhiteboardImage extends WhiteboardObject {
     // Needed to clip the image by border-radius so the image does not overflow the rounding
     const imageWrapper = document.createElement("div");
     imageWrapper.className = "wbe-image-wrapper";
-    const borderRadius = this.borderRadius !== undefined ? this.borderRadius : DEFAULT_BORDER_RADIUS;
-    // Initial wrapper size (will be updated via _updateObjectElement after image load)
-    // displayWidth/displayHeight already calculated above for container
+    const baseBorderRadius = this.borderRadius !== undefined ? this.borderRadius : DEFAULT_BORDER_RADIUS;
+    const baseBorderWidth = this.borderWidth !== undefined ? this.borderWidth : DEFAULT_BORDER_WIDTH;
+    // borderRadius IS scaled (relative to image dimensions), borderWidth is NOT (visual constant)
+    const scaledBorderRadius = Math.round(baseBorderRadius * scale);
+    // CRITICAL: imageWrapper radius must match SVG inner edge
+    // This ensures image is clipped correctly inside the border
+    const innerRadius = calcInnerBorderRadius(scaledBorderRadius, baseBorderWidth);
+    // imageWrapper = same size as image, border is drawn OUTSIDE via negative offset
     imageWrapper.style.cssText = `
             position: absolute;
             left: 0;
@@ -5202,7 +5499,7 @@ class WhiteboardImage extends WhiteboardObject {
             width: ${displayWidth}px;
             height: ${displayHeight}px;
             overflow: hidden;
-            border-radius: ${borderRadius}px;
+            border-radius: ${innerRadius}px;
             pointer-events: none;
         `;
     
@@ -5268,6 +5565,7 @@ class WhiteboardImage extends WhiteboardObject {
     // Permanent border as SVG (prevents subpixel gaps between border and image)
     // SVG renders as single composited layer, avoiding browser rounding issues
     const borderWidth = this.borderWidth !== undefined ? this.borderWidth : DEFAULT_BORDER_WIDTH;
+    const borderRadius = this.borderRadius !== undefined ? this.borderRadius : DEFAULT_BORDER_RADIUS;
     const borderRgba = borderWidth > 0 
       ? hexToRgba(this.borderHex || DEFAULT_BORDER_HEX, this.borderOpacity !== undefined ? this.borderOpacity : DEFAULT_BORDER_OPACITY) 
       : null;
@@ -5792,6 +6090,54 @@ class WhiteboardImage extends WhiteboardObject {
 
   usesTransformScale() {
     return false; // Images use width/height for scaling
+  }
+
+  /**
+   * Apply group scale transformation (for mass selection scaling)
+   * 
+   * CRITICAL: Images use width/height for scaling (not transform: scale()),
+   * so the container grows from top-left corner, NOT from center.
+   * However, we want group scaling to work as if objects scale from their centers.
+   * 
+   * Algorithm:
+   * 1. Calculate visual center of the image (x + displayWidth/2, y + displayHeight/2)
+   * 2. Scale the visual center position relative to group pivot
+   * 3. Calculate new CSS left/top so that the new visual center is correct
+   * 
+   * @param {number} scaleFactor - Scale multiplier (1.0 = no change, 1.1 = +10%)
+   * @param {number} pivotX - X coordinate of scale pivot point (group center)
+   * @param {number} pivotY - Y coordinate of scale pivot point (group center)
+   * @param {Object} startData - Original object data { x, y, scale, width, height }
+   * @returns {Object} New values { x, y, scale }
+   */
+  applyGroupScale(scaleFactor, pivotX, pivotY, startData) {
+    // Get displayed dimensions at start (baseWidth * startScale)
+    const baseWidth = startData.width ?? this.baseWidth ?? 200;
+    const baseHeight = startData.height ?? this.baseHeight ?? 200;
+    const startScale = startData.scale;
+    const startDisplayWidth = baseWidth * startScale;
+    const startDisplayHeight = baseHeight * startScale;
+    
+    // Visual center of the image at start
+    const visualCenterX = startData.x + startDisplayWidth / 2;
+    const visualCenterY = startData.y + startDisplayHeight / 2;
+    
+    // Scale the visual center position relative to group pivot
+    const dx = visualCenterX - pivotX;
+    const dy = visualCenterY - pivotY;
+    const newVisualCenterX = pivotX + dx * scaleFactor;
+    const newVisualCenterY = pivotY + dy * scaleFactor;
+    
+    // New scale and new displayed dimensions
+    const newScale = startScale * scaleFactor;
+    const newDisplayWidth = baseWidth * newScale;
+    const newDisplayHeight = baseHeight * newScale;
+    
+    // Calculate new CSS left/top from new visual center and new dimensions
+    const newX = newVisualCenterX - newDisplayWidth / 2;
+    const newY = newVisualCenterY - newDisplayHeight / 2;
+    
+    return { x: newX, y: newY, scale: newScale };
   }
 
   isFrozen() {
@@ -6346,7 +6692,6 @@ class TextStylingPanelView {
             align-items: center;
             justify-content: center;
             gap: 12px;
-            aspect-ratio: 4 / 1;
             transform: translateX(-50%) scale(0.9) translateY(12px);
             opacity: 0;
             transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -6383,12 +6728,21 @@ class TextStylingPanelView {
       const bgBtn = this.makeToolbarButton("Background", "fas fa-fill", () => onSubpanelOpen("background", bgBtn));
       const borderBtn = this.makeToolbarButton("Border", "fas fa-border-all", () => onSubpanelOpen("border", borderBtn));
       const rotateBtn = this.makeToolbarButton("Rotate", "fas fa-sync-alt", () => onSubpanelOpen("rotation", rotateBtn));
-      // Universal solution: setButtonActive is now called automatically in makeToolbarButton
-      // These calls can be kept for clarity or removed - the result is the same
+      
+      // Copy/Apply Style buttons
+      const copyStyleBtn = this.makeToolbarButton("Copy Style", "fas fa-eye-dropper", () => {
+        window.Whiteboard?.interaction?.copyStyle(window.Whiteboard?.interaction?.selectedId);
+      });
+      const applyStyleBtn = this.makeToolbarButton("Apply Style", "fas fa-paint-roller", () => {
+        window.Whiteboard?.interaction?.applyStyle(window.Whiteboard?.interaction?.selectedId);
+      });
+      
       toolbar.appendChild(textBtn);
       toolbar.appendChild(bgBtn);
       toolbar.appendChild(borderBtn);
       toolbar.appendChild(rotateBtn);
+      toolbar.appendChild(copyStyleBtn);
+      toolbar.appendChild(applyStyleBtn);
     }
     panel.appendChild(toolbar);
     this.panel = panel;
@@ -6489,18 +6843,29 @@ class TextStylingController {
     this.textId = textId;
     this.layer = layer;
   }
+  
+  // Helper to update lastTextStyle in InteractionManager
+  _updateLastTextStyle(changes) {
+    const im = window.Whiteboard?.interaction;
+    if (im?.lastTextStyle) {
+      Object.assign(im.lastTextStyle, changes);
+    }
+  }
+  
   handleColorChange(hex, opacity) {
     // Store hex + opacity separately (not rgba string)
     this.registry.update(this.textId, {
       color: hex,
       colorOpacity: opacity
     }, 'local');
+    this._updateLastTextStyle({ color: hex, colorOpacity: opacity });
   }
   handleBackgroundColorChange(hex, opacity) {
     this.registry.update(this.textId, {
       backgroundColor: hex,
       backgroundColorOpacity: opacity
     }, 'local');
+    this._updateLastTextStyle({ backgroundColor: hex, backgroundColorOpacity: opacity });
   }
   handleFontChange(fontFamily, fontSize, fontWeight, fontStyle) {
     this.registry.update(this.textId, {
@@ -6509,11 +6874,19 @@ class TextStylingController {
       fontWeight,
       fontStyle
     }, 'local');
+    this._updateLastTextStyle({ fontFamily, fontSize, fontWeight, fontStyle });
   }
   handleAlignmentChange(textAlign) {
     this.registry.update(this.textId, {
       textAlign
     }, 'local');
+    this._updateLastTextStyle({ textAlign });
+  }
+  handleLineHeightChange(lineHeight) {
+    this.registry.update(this.textId, {
+      lineHeight
+    }, 'local');
+    this._updateLastTextStyle({ lineHeight });
   }
   handleBorderChange(borderColor, borderOpacity, borderWidth) {
     this.registry.update(this.textId, {
@@ -6521,11 +6894,13 @@ class TextStylingController {
       borderOpacity,
       borderWidth
     }, 'local');
+    // Border is not part of lastTextStyle (it's object-specific, not text formatting)
   }
   handleRotationChange(rotation) {
     this.registry.update(this.textId, {
       rotation
     }, 'local');
+    // Rotation is not part of lastTextStyle (it's object-specific, not text formatting)
   }
 }
 
@@ -6874,6 +7249,39 @@ class TextSubpanel {
     fontSizeInput.addEventListener("input", () => {
       updateFontSizeLabel(Number(fontSizeInput.value));
     });
+    
+    // Line height control
+    let currentLineHeight = this.stylingData.lineHeight !== undefined ? this.stylingData.lineHeight : 1.2;
+    const lineHeightGroup = document.createElement("div");
+    lineHeightGroup.style.cssText = "display: flex; align-items: center; gap: 4px;";
+    sub.appendChild(lineHeightGroup);
+    const lineHeightLabel = document.createElement("span");
+    lineHeightLabel.textContent = "Line:";
+    lineHeightLabel.style.cssText = "font-size: 12px; color: #555; white-space: nowrap;";
+    lineHeightGroup.appendChild(lineHeightLabel);
+    const {
+      wrapper: lineHeightRow,
+      input: lineHeightInput,
+      update: updateLineHeightLabel
+    } = this.uiHelpers.createDropdownInput(currentLineHeight, {
+      min: 0.8,
+      max: 3,
+      step: 0.1,
+      format: v => `${Number(v).toFixed(1)}`,
+      presetValues: [0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5, 3],
+      onChange: (lineHeight) => {
+        currentLineHeight = lineHeight;
+        this.controller.handleLineHeightChange(lineHeight);
+      }
+    });
+    lineHeightGroup.appendChild(lineHeightRow);
+    lineHeightInput.addEventListener("change", () => {
+      updateLineHeightLabel(Number(lineHeightInput.value));
+    });
+    lineHeightInput.addEventListener("input", () => {
+      updateLineHeightLabel(Number(lineHeightInput.value));
+    });
+    
     opacityInput.addEventListener("change", () => {
       updateOpacityLabel(Number(opacityInput.value));
     });
@@ -7255,7 +7663,8 @@ class TextStylingPanel {
           fontSize: obj.fontSize || DEFAULT_FONT_SIZE,
           fontWeight: obj.fontWeight || DEFAULT_FONT_WEIGHT,
           fontStyle: obj.fontStyle || DEFAULT_FONT_STYLE,
-          textAlign: obj.textAlign || DEFAULT_TEXT_ALIGN
+          textAlign: obj.textAlign || DEFAULT_TEXT_ALIGN,
+          lineHeight: obj.lineHeight !== undefined ? obj.lineHeight : 1.2
         }, uiHelpers);
         subpanelElement = await textSubpanel.render();
       } else if (type === "background") {
@@ -7390,7 +7799,7 @@ class BasePanelView {
       padding: 10px 14px;
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
       pointer-events: auto;
     `;
   }
@@ -8146,10 +8555,10 @@ class BasePanelView {
   }
 
   /**
-   * Open text formatting subpanel (color, size, align, bold/italic)
+   * Open text formatting subpanel (color, size, align, bold/italic, font family)
    * Same as TextSubpanel but as method for shapes
    * @param {HTMLElement} button - Button that triggered the subpanel
-   * @param {Object} textData - { textColor, textSize, textAlign, fontWeight, fontStyle }
+   * @param {Object} textData - { textColor, textSize, textAlign, fontWeight, fontStyle, fontFamily }
    * @param {Function} onChange - Callback (changes) => void
    */
   openTextSubpanel(button, textData, onChange) {
@@ -8159,14 +8568,15 @@ class BasePanelView {
     }
 
     const content = document.createElement('div');
-    content.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+    content.style.cssText = 'display: flex; align-items: center; gap: 12px;';
 
     let {
       textColor = '#ffffff',
       textSize = 16,
       textAlign = 'center',
       fontWeight = 'normal',
-      fontStyle = 'normal'
+      fontStyle = 'normal',
+      fontFamily = DEFAULT_FONT_FAMILY
     } = textData || {};
 
     // Color swatch with Vanilla Picker
@@ -8175,6 +8585,48 @@ class BasePanelView {
       onChange({ textColor: hex });
     });
     content.appendChild(swatch);
+
+    // Font family dropdown (same style as TextSubpanel)
+    const fontFamilyGroup = document.createElement('div');
+    fontFamilyGroup.style.cssText = 'display: flex; align-items: center; gap: 4px;';
+    content.appendChild(fontFamilyGroup);
+
+    const fontLabel = document.createElement('span');
+    fontLabel.textContent = 'Font:';
+    fontLabel.style.cssText = 'font-size: 12px; color: #555; white-space: nowrap;';
+    fontFamilyGroup.appendChild(fontLabel);
+
+    const fontSelect = document.createElement('select');
+    fontSelect.style.cssText = `
+      min-width: 120px;
+      padding: 6px 8px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      background: white;
+      font-size: 12px;
+      color: #333;
+      cursor: pointer;
+    `;
+    fontFamilyGroup.appendChild(fontSelect);
+
+    // Populate with available fonts
+    const populateFonts = async () => {
+      const fonts = await getAvailableFonts();
+      fontSelect.innerHTML = '';
+      for (const font of fonts) {
+        const option = document.createElement('option');
+        option.value = font;
+        option.textContent = font;
+        option.style.fontFamily = font;
+        if (font === fontFamily) option.selected = true;
+        fontSelect.appendChild(option);
+      }
+    };
+    populateFonts();
+    fontSelect.addEventListener('change', () => {
+      fontFamily = fontSelect.value;
+      onChange({ fontFamily });
+    });
 
     // Font size dropdown
     const sizeLabel = document.createElement('span');
@@ -8192,6 +8644,24 @@ class BasePanelView {
       }
     });
     content.appendChild(sizeRow);
+
+    // Line height dropdown
+    let { lineHeight = 1.2 } = textData || {};
+    const lineLabel = document.createElement('span');
+    lineLabel.textContent = 'Line:';
+    lineLabel.style.cssText = 'font-size: 11px; color: #666; white-space: nowrap;';
+    content.appendChild(lineLabel);
+
+    const { wrapper: lineRow, input: lineInput } = this.createDropdownInput(lineHeight, {
+      min: 0.8, max: 3, step: 0.1,
+      format: v => `${Number(v).toFixed(1)}`,
+      presetValues: [0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5, 3],
+      onChange: (val) => {
+        lineHeight = val;
+        onChange({ lineHeight: val });
+      }
+    });
+    content.appendChild(lineRow);
 
     // Bold/Italic buttons
     const styleGroup = document.createElement('div');
@@ -8314,6 +8784,143 @@ class BasePanelView {
       this.panel = null;
     }
     this.toolbar = null;
+  }
+}
+
+// ==========================================
+// MassSelectionPanel - Panel for mass selection operations
+// Uses BasePanelView and PanelPositionManager like other panels
+// ==========================================
+class MassSelectionPanel {
+  constructor(massSelectionController) {
+    this.massSelection = massSelectionController;
+    this.registry = massSelectionController.registry;
+    this.layer = massSelectionController.layer;
+    this.view = null;
+    this.positionManager = null;
+    this.isVisible = false;
+  }
+
+  /**
+   * Show panel for mass selection
+   */
+  show() {
+    if (this.massSelection.selectedIds.size < 2) return;
+    
+    // Create panel only once (lazy initialization)
+    if (!this.view) {
+      this._createPanel();
+    }
+    
+    // Just show existing panel
+    if (this.view?.panel) {
+      this.view.panel.style.display = '';
+      this.isVisible = true;
+      
+      // Update position
+      this.updatePosition();
+    }
+  }
+  
+  /**
+   * Create panel (called once)
+   */
+  _createPanel() {
+    // Create view - use BasePanelView directly (no custom subclass needed)
+    this.view = new BasePanelView();
+    
+    // Create panel with rotate button
+    const panel = this.view.createPanel();
+    panel.className = 'wbe-panel wbe-mass-selection-panel';
+    
+    // Rotate button
+    const rotateBtn = this.view.makeToolbarButton('Rotate group', 'fas fa-sync-alt', () => {
+      this._toggleRotationSubpanel(rotateBtn);
+    });
+    this.view.toolbar.appendChild(rotateBtn);
+    this.rotateBtn = rotateBtn;
+
+    document.body.appendChild(panel);
+
+    // Position manager - use bounding box as reference
+    const boundingBox = this.massSelection.view.boundingBox;
+    if (boundingBox) {
+      this.positionManager = new PanelPositionManager(panel, boundingBox, this.view);
+      this.positionManager.init();
+    }
+
+    // Animate in
+    requestAnimationFrame(() => {
+      panel.style.opacity = '1';
+      panel.style.transform = 'translateX(-50%) scale(1)';
+    });
+  }
+
+  /**
+   * Hide panel (just hide, don't destroy)
+   */
+  hide() {
+    if (this.view?.activeSubpanel) {
+      this.view.closeSubpanel();
+    }
+    if (this.view?.panel) {
+      this.view.panel.style.display = 'none';
+    }
+    this.isVisible = false;
+  }
+  
+  /**
+   * Destroy panel completely (called when mass selection is cleared)
+   */
+  destroy() {
+    if (this.view?.activeSubpanel) {
+      this.view.closeSubpanel();
+    }
+    if (this.view?.panel) {
+      this.view.panel.remove();
+    }
+    this.view = null;
+    this.positionManager = null;
+    this.isVisible = false;
+  }
+
+  /**
+   * Update panel position (called when bounding box moves)
+   */
+  updatePosition() {
+    if (this.positionManager) {
+      this.positionManager.update();
+    }
+  }
+
+  /**
+   * Toggle rotation subpanel
+   */
+  _toggleRotationSubpanel(button) {
+    if (!this.view) return;
+
+    // If already open, close it
+    if (this.view.activeSubpanel && this.view.activeButton === button) {
+      this.view.closeSubpanel();
+      return;
+    }
+
+    // Close any existing subpanel
+    this.view.closeSubpanel();
+
+    // Get current group rotation
+    const currentRotation = this.massSelection.getGroupRotation();
+
+    // Open rotation subpanel using BasePanelView method
+    // Subpanel positioning is handled by openSubpanel() - relative to panel
+    this.view.openRotationSubpanel(button, currentRotation, (rotation) => {
+      if (rotation === 0) {
+        // Reset = remove all rotation from objects
+        this.massSelection.resetRotation();
+      } else {
+        this.massSelection.setGroupRotation(rotation);
+      }
+    });
   }
 }
 
@@ -8992,7 +9599,6 @@ class ImageControlPanelView {
             align-items: center;
             justify-content: center;
             gap: 12px;
-            aspect-ratio: 4 / 1;
             transform: translateX(-50%) scale(0.9) translateY(12px);
             opacity: 0;
             transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -9037,6 +9643,17 @@ class ImageControlPanelView {
       if (openSubpanelFn) openSubpanelFn("lock", lockBtn);
     });
     toolbar.appendChild(lockBtn);
+
+    // Copy/Apply Style buttons
+    const copyStyleBtn = this.makeToolbarButton("Copy Style", "fas fa-eye-dropper", () => {
+      window.Whiteboard?.interaction?.copyStyle(window.Whiteboard?.interaction?.selectedId);
+    });
+    toolbar.appendChild(copyStyleBtn);
+    
+    const applyStyleBtn = this.makeToolbarButton("Apply Style", "fas fa-paint-roller", () => {
+      window.Whiteboard?.interaction?.applyStyle(window.Whiteboard?.interaction?.selectedId);
+    });
+    toolbar.appendChild(applyStyleBtn);
 
     panel.appendChild(toolbar);
     return panel;
@@ -9285,21 +9902,24 @@ class ImageControlController {
       const scale = updatedObj?.scale || 1;
       const baseBorderWidth = updatedObj?.borderWidth !== undefined ? updatedObj.borderWidth : DEFAULT_BORDER_WIDTH;
       const baseBorderRadius = updatedObj?.borderRadius !== undefined ? updatedObj.borderRadius : DEFAULT_BORDER_RADIUS;
-      const scaledBorderWidth = Math.round(baseBorderWidth * scale);
+      // borderWidth is NOT scaled - it's a visual constant
+      // borderRadius IS scaled - it's relative to image dimensions
       const scaledBorderRadius = Math.round(baseBorderRadius * scale);
-      const borderRgba = scaledBorderWidth > 0 
+      const borderRgba = baseBorderWidth > 0 
         ? hexToRgba(updatedObj?.borderHex || DEFAULT_BORDER_HEX, updatedObj?.borderOpacity !== undefined ? updatedObj.borderOpacity : DEFAULT_BORDER_OPACITY) 
         : null;
       const containerWidth = parseFloat(container.style.width) || 0;
       const containerHeight = parseFloat(container.style.height) || 0;
-      layer._updateSvgPermanentBorder(permanentBorder, containerWidth, containerHeight, scaledBorderWidth, borderRgba, scaledBorderRadius, isCircleMask);
+      layer._updateSvgPermanentBorder(permanentBorder, containerWidth, containerHeight, baseBorderWidth, borderRgba, scaledBorderRadius, isCircleMask);
       
       // Also update imageWrapper border-radius
       // BUT NOT in crop mode - imageWrapper shows full image (rectangular)
+      // CRITICAL: imageWrapper radius must be INNER radius (proportionally scaled)
       const imageWrapper = container.querySelector('.wbe-image-wrapper');
       if (imageWrapper) {
         const isCropping = updatedObj?.isCropping;
-        imageWrapper.style.borderRadius = (!isCropping && isCircleMask) ? '50%' : `${baseBorderRadius * scale}px`;
+        const innerRadius = calcInnerBorderRadius(scaledBorderRadius, baseBorderWidth);
+        imageWrapper.style.borderRadius = (!isCropping && isCircleMask) ? '50%' : `${innerRadius}px`;
       }
     }
     
@@ -9614,6 +10234,26 @@ const MASS_SELECTION_CSS = `
     display: none;
   }
 
+  /* Scale handle for mass selection (bottom-right corner) */
+  .wbe-mass-scale-handle {
+    position: absolute;
+    right: -8px;
+    bottom: -8px;
+    width: 14px;
+    height: 14px;
+    background: #4d8dff;
+    border: 2px solid white;
+    border-radius: 50%;
+    cursor: nwse-resize;
+    pointer-events: auto;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    z-index: 1001;
+  }
+  .wbe-mass-scale-handle:hover {
+    background: #3a7de8;
+    transform: scale(1.1);
+  }
+
   /* Selection count indicator */
   .wbe-mass-indicator {
     position: fixed;
@@ -9628,6 +10268,7 @@ const MASS_SELECTION_CSS = `
     z-index: 9999;
     display: none;
   }
+
 `;
 
 /**
@@ -9658,6 +10299,11 @@ class MassSelectionView {
     this.boundingBox = document.createElement('div');
     this.boundingBox.className = 'wbe-mass-bounding-box';
     // Will be added to layer when first needed (layer might not exist yet)
+
+    // Scale handle (inside bounding box)
+    this.scaleHandle = document.createElement('div');
+    this.scaleHandle.className = 'wbe-mass-scale-handle';
+    this.boundingBox.appendChild(this.scaleHandle);
 
     // Indicator (fixed position - shows "N selected")
     this.indicator = document.createElement('div');
@@ -9735,36 +10381,49 @@ class MassSelectionView {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
     for (const container of containers) {
-      const left = parseFloat(container.style.left) || 0;
-      const top = parseFloat(container.style.top) || 0;
+      const x = parseFloat(container.style.left) || 0;
+      const y = parseFloat(container.style.top) || 0;
       
       // Get object from registry to check type and scale
       const obj = this.layer?.registry?.get(container.id);
       const scale = obj?.scale !== undefined ? obj.scale : 1;
+      const borderWidth = obj?.borderWidth || obj?.strokeWidth || 0;
       
-      // Get dimensions - same logic as updateSelectionOverlay
+      // Get base dimensions
       const baseWidth = parseFloat(container.style.width) || container.offsetWidth;
       const baseHeight = parseFloat(container.style.height) || container.offsetHeight;
       
-      let width, height;
-      if (obj?.type === 'text') {
-        // Text uses transform: scale()
+      // Use polymorphic check for scale type
+      const usesTransformScale = obj?.usesTransformScale?.() ?? (obj?.type === 'text' || obj?.type === 'shape' || obj?.type === 'fate-card');
+      
+      let width, height, borderPadding;
+      if (usesTransformScale) {
+        // transform: scale() objects - dimensions are scaled
         width = baseWidth * scale;
         height = baseHeight * scale;
+        borderPadding = borderWidth * scale;
       } else {
         // Images: container dimensions are already correct
         width = baseWidth;
         height = baseHeight;
+        borderPadding = borderWidth;
       }
       
-      // Account for border
-      const borderWidth = obj?.borderWidth || 0;
-      const scaledBorderWidth = obj?.type === 'text' ? borderWidth * scale : borderWidth;
+      // Final dimensions with border
+      const finalWidth = width + 2 * borderPadding;
+      const finalHeight = height + 2 * borderPadding;
+      
+      // For transform-origin: center, calculate visual bounds
+      // Center is at (x + baseWidth/2, y + baseHeight/2)
+      const centerX = x + baseWidth / 2;
+      const centerY = y + baseHeight / 2;
+      const left = centerX - finalWidth / 2;
+      const top = centerY - finalHeight / 2;
 
-      minX = Math.min(minX, left - scaledBorderWidth);
-      minY = Math.min(minY, top - scaledBorderWidth);
-      maxX = Math.max(maxX, left + width + scaledBorderWidth);
-      maxY = Math.max(maxY, top + height + scaledBorderWidth);
+      minX = Math.min(minX, left);
+      minY = Math.min(minY, top);
+      maxX = Math.max(maxX, left + finalWidth);
+      maxY = Math.max(maxY, top + finalHeight);
     }
 
     // Add padding
@@ -9820,16 +10479,28 @@ class MassSelectionController {
     this.layer = layer;
     this.view = view;
     this.interactionManager = interactionManager;
+    
+    // Panel for group operations (created lazily when needed)
+    this.panel = null;
 
     // State
     this.selectedIds = new Set();
     this.isSelecting = false;
     this.isDragging = false;
+    this.isScaling = false;
     this.toggleMode = this._loadToggleMode(); // from localStorage
     this.selectionStart = { x: 0, y: 0 };
     this.dragStart = { x: 0, y: 0 };
     this.startPositions = new Map();
     this.clipboard = [];
+    this.lastCopyWasMass = false; // Flag to track if last copy was mass selection (vs external copy)
+    
+    // Group scale state
+    this.scaleState = null; // { startX, pivotX, pivotY, startData: Map<id, {x, y, scale}> }
+    
+    // Group rotation state
+    this.groupRotation = 0; // Current rotation applied to group
+    this.startRotations = new Map(); // Original rotations before group rotation
   }
 
   // ========== Toggle Mode ==========
@@ -10099,6 +10770,9 @@ class MassSelectionController {
 
     // Commit final positions to Registry
     // We saved start positions from Registry (obj.x/obj.y), so just add total delta
+    let dragDeltaX = 0, dragDeltaY = 0;
+    let deltaCalculated = false;
+    
     for (const id of this.selectedIds) {
       const start = this.startPositions.get(id);
       if (!start) continue;
@@ -10136,15 +10810,221 @@ class MassSelectionController {
       const deltaX = currentContainerX - startContainerX;
       const deltaY = currentContainerY - startContainerY;
       
+      // Save delta for pivot update (all objects move by same delta)
+      if (!deltaCalculated) {
+        dragDeltaX = deltaX;
+        dragDeltaY = deltaY;
+        deltaCalculated = true;
+      }
+      
       // New obj position = start obj position + delta
       const x = Math.round(start.x + deltaX);
       const y = Math.round(start.y + deltaY);
 
       this.registry.update(id, { x, y }, 'local');
+      
+      // Update startRotations if we have rotation state (so reset doesn't undo drag)
+      // Add drag delta to the START positions, not replace with current positions
+      // This way reset will return to "start position + drag offset" = correct place
+      if (this.startRotations.has(id)) {
+        const rotState = this.startRotations.get(id);
+        rotState.x += deltaX;
+        rotState.y += deltaY;
+        rotState.centerX += deltaX;
+        rotState.centerY += deltaY;
+      }
+    }
+
+    // Update rotation pivot (group center moved with drag)
+    if (this._rotationPivot && deltaCalculated) {
+      this._rotationPivot.x += dragDeltaX;
+      this._rotationPivot.y += dragDeltaY;
     }
 
     this.startPositions.clear();
     FoundryAPIAdapter.enableMassSelect();
+  }
+
+  // ========== Group Scale ==========
+
+  /**
+   * Start group scale operation
+   * @param {MouseEvent} e
+   */
+  startGroupScale(e) {
+    if (this.selectedIds.size === 0) return;
+
+    this.isScaling = true;
+
+    // Calculate group bounds to find pivot (center)
+    const bounds = this._getGroupBounds();
+    if (!bounds) {
+      this.isScaling = false;
+      return;
+    }
+
+    // Save start data for each object (including dimensions for transform-origin: center objects)
+    const startData = new Map();
+    for (const id of this.selectedIds) {
+      const obj = this.registry.get(id);
+      if (obj) {
+        // Get base dimensions - CRITICAL: use baseWidth for images, width for others
+        // Images have baseWidth (natural size) and displayed size = baseWidth * scale
+        // Text/Shapes have width (container size) and displayed size = width * scale (via transform)
+        let baseWidth, baseHeight;
+        
+        if (obj.type === 'image') {
+          // For images: use baseWidth/baseHeight (natural image dimensions)
+          baseWidth = obj.baseWidth ?? obj.width ?? 200;
+          baseHeight = obj.baseHeight ?? obj.height ?? 200;
+        } else {
+          // For text/shapes: use width/height (container dimensions, unscaled)
+          const container = this.layer?.getObjectContainer(id);
+          baseWidth = obj.width ?? (container ? parseFloat(container.style.width) || container.offsetWidth : 100);
+          baseHeight = obj.height ?? (container ? parseFloat(container.style.height) || container.offsetHeight : 100);
+        }
+        
+        startData.set(id, {
+          x: obj.x,
+          y: obj.y,
+          scale: obj.scale !== undefined ? obj.scale : 1,
+          width: baseWidth,
+          height: baseHeight
+        });
+      }
+    }
+
+    this.scaleState = {
+      startX: e.clientX,
+      pivotX: bounds.centerX,
+      pivotY: bounds.centerY,
+      startData
+    };
+
+    // Disable Foundry select during scale
+    FoundryAPIAdapter.disableMassSelect();
+  }
+
+  /**
+   * Update group scale during drag
+   * @param {MouseEvent} e
+   */
+  updateGroupScale(e) {
+    if (!this.isScaling || !this.scaleState) return;
+
+    const deltaX = e.clientX - this.scaleState.startX;
+    const sensitivity = 0.005; // Adjustable sensitivity
+    const scaleFactor = 1 + deltaX * sensitivity;
+    const clampedFactor = Math.max(0.1, Math.min(10, scaleFactor));
+
+    const { pivotX, pivotY, startData } = this.scaleState;
+
+    // Update each object using polymorphic applyGroupScale
+    for (const id of this.selectedIds) {
+      const obj = this.registry.get(id);
+      const start = startData.get(id);
+      if (!obj || !start) continue;
+
+      // Use polymorphic method if available, otherwise default calculation
+      let newValues;
+      if (obj.applyGroupScale) {
+        newValues = obj.applyGroupScale(clampedFactor, pivotX, pivotY, start);
+      } else {
+        // Default calculation for objects without applyGroupScale
+        // Assumes transform-origin: center (scale visual center, not CSS left/top)
+        const baseWidth = start.width ?? 100;
+        const baseHeight = start.height ?? 100;
+        const visualCenterX = start.x + baseWidth / 2;
+        const visualCenterY = start.y + baseHeight / 2;
+        const dx = visualCenterX - pivotX;
+        const dy = visualCenterY - pivotY;
+        const newVisualCenterX = pivotX + dx * clampedFactor;
+        const newVisualCenterY = pivotY + dy * clampedFactor;
+        newValues = {
+          x: newVisualCenterX - baseWidth / 2,
+          y: newVisualCenterY - baseHeight / 2,
+          scale: start.scale * clampedFactor
+        };
+      }
+
+      // Update registry (will trigger DOM update)
+      this.registry.update(id, newValues, 'local');
+    }
+
+    // Update bounding box
+    this._updateBoundingBox();
+  }
+
+  /**
+   * End group scale operation
+   */
+  endGroupScale() {
+    if (!this.isScaling) return;
+
+    this.isScaling = false;
+    this.scaleState = null;
+
+    FoundryAPIAdapter.enableMassSelect();
+  }
+
+  /**
+   * Get bounding box of all selected objects (in world coordinates)
+   * @returns {{ minX, minY, maxX, maxY, centerX, centerY } | null}
+   */
+  _getGroupBounds() {
+    if (this.selectedIds.size === 0) return null;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    for (const id of this.selectedIds) {
+      const obj = this.registry.get(id);
+      const container = this.layer?.getObjectContainer(id);
+      if (!obj || !container) continue;
+
+      const x = obj.x;
+      const y = obj.y;
+      const scale = obj.scale !== undefined ? obj.scale : 1;
+      const borderWidth = obj.borderWidth || obj.strokeWidth || 0;
+
+      const baseWidth = parseFloat(container.style.width) || container.offsetWidth;
+      const baseHeight = parseFloat(container.style.height) || container.offsetHeight;
+
+      const usesTransformScale = obj.usesTransformScale?.() ?? (obj.type === 'text' || obj.type === 'shape' || obj.type === 'fate-card');
+
+      let width, height, borderPadding;
+      if (usesTransformScale) {
+        width = baseWidth * scale;
+        height = baseHeight * scale;
+        borderPadding = borderWidth * scale;
+      } else {
+        width = baseWidth;
+        height = baseHeight;
+        borderPadding = borderWidth;
+      }
+
+      const finalWidth = width + 2 * borderPadding;
+      const finalHeight = height + 2 * borderPadding;
+
+      // For transform-origin: center
+      const centerX = x + baseWidth / 2;
+      const centerY = y + baseHeight / 2;
+      const left = centerX - finalWidth / 2;
+      const top = centerY - finalHeight / 2;
+
+      minX = Math.min(minX, left);
+      minY = Math.min(minY, top);
+      maxX = Math.max(maxX, left + finalWidth);
+      maxY = Math.max(maxY, top + finalHeight);
+    }
+
+    return {
+      minX,
+      minY,
+      maxX,
+      maxY,
+      centerX: (minX + maxX) / 2,
+      centerY: (minY + maxY) / 2
+    };
   }
 
   /**
@@ -10163,13 +11043,34 @@ class MassSelectionController {
   /**
    * Update bounding box based on current selected containers
    */
-  _updateBoundingBox() {
+  /**
+   * @param {boolean} skipPanelReposition - Skip panel repositioning (during rotation to avoid slider jump)
+   */
+  _updateBoundingBox(skipPanelReposition = false) {
     const containers = [];
     for (const id of this.selectedIds) {
       const container = this.layer?.getObjectContainer(id);
       if (container) containers.push(container);
     }
     this.view.updateBoundingBox(containers);
+    
+    // Show/update panel
+    if (this.selectedIds.size >= 2) {
+      if (!this.panel) {
+        this.panel = new MassSelectionPanel(this);
+        // Register in InteractionManager.panels for unified hide/show behavior
+        if (this.interactionManager?.panels) {
+          this.interactionManager.panels.massSelection = this.panel;
+        }
+      }
+      if (!this.panel.isVisible) {
+        this.panel.show();
+      } else if (!skipPanelReposition) {
+        this.panel.updatePosition();
+      }
+    } else if (this.panel) {
+      this.panel.hide();
+    }
     
     // Show individual selection overlays for each mass-selected object
     if (this.selectedIds.size > 0) {
@@ -10230,8 +11131,142 @@ class MassSelectionController {
     this.selectedIds.clear();
     this.view.hideBoundingBox();
     this.view.updateIndicator(0);
+    // Destroy panel (not just hide - we're clearing selection)
+    if (this.panel) {
+      this.panel.destroy();
+    }
     // Hide individual selection overlays
     this.layer?.hideMassSelectionOverlays();
+    // Reset group rotation state
+    this.groupRotation = 0;
+    this.startRotations.clear();
+    this._rotationPivot = null;
+  }
+
+  // ========== Group Rotation ==========
+
+  /**
+   * Get current group rotation delta
+   * This is the rotation applied to the group since selection, not absolute rotation
+   * @returns {number} Current group rotation delta in degrees
+   */
+  getGroupRotation() {
+    return this.groupRotation;
+  }
+  
+  /**
+   * Reset rotation of all selected objects to 0
+   * Returns objects to their start positions (which include drag offset) with rotation=0
+   */
+  resetRotation() {
+    // If we have startRotations, restore positions from there (includes drag offset)
+    // This returns objects to where they were BEFORE rotation, but AFTER any drags
+    if (this.startRotations.size > 0) {
+      for (const [id, start] of this.startRotations) {
+        this.registry.update(id, {
+          x: start.x,
+          y: start.y,
+          rotation: 0
+        }, 'local');
+      }
+    } else {
+      // No rotation state - just reset rotation value
+      for (const id of this.selectedIds) {
+        this.registry.update(id, { rotation: 0 }, 'local');
+      }
+    }
+    
+    // Clear group rotation state
+    this.groupRotation = 0;
+    this.startRotations.clear();
+    this._rotationPivot = null;
+    
+    this._updateBoundingBox();
+  }
+
+  /**
+   * Set rotation for all selected objects
+   * Rotates each object around the group center
+   * @param {number} rotation - New rotation in degrees (absolute, not delta)
+   */
+  setGroupRotation(rotation) {
+    if (this.selectedIds.size === 0) return;
+
+    // Initialize start state if not set (first rotation change)
+    if (this.startRotations.size === 0) {
+      // Calculate initial group center BEFORE any rotation
+      const bounds = this._getGroupBounds();
+      if (!bounds) return;
+      
+      this._rotationPivot = { x: bounds.centerX, y: bounds.centerY };
+      
+      for (const id of this.selectedIds) {
+        const obj = this.registry.get(id);
+        const container = this.layer?.getObjectContainer(id);
+        if (!obj || !container) continue;
+        
+        // Calculate object center same way as _getGroupBounds
+        const baseWidth = parseFloat(container.style.width) || container.offsetWidth || 100;
+        const baseHeight = parseFloat(container.style.height) || container.offsetHeight || 100;
+        const objCenterX = obj.x + baseWidth / 2;
+        const objCenterY = obj.y + baseHeight / 2;
+        
+        this.startRotations.set(id, {
+          rotation: obj.rotation || 0,
+          x: obj.x,
+          y: obj.y,
+          centerX: objCenterX,
+          centerY: objCenterY
+        });
+      }
+    }
+
+    const pivotX = this._rotationPivot.x;
+    const pivotY = this._rotationPivot.y;
+    const rad = (rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    // Apply absolute rotation from start positions
+    for (const id of this.selectedIds) {
+      const start = this.startRotations.get(id);
+      if (!start) continue;
+
+      // Rotate object's CENTER around group pivot
+      const dx = start.centerX - pivotX;
+      const dy = start.centerY - pivotY;
+      
+      const newCenterX = pivotX + dx * cos - dy * sin;
+      const newCenterY = pivotY + dx * sin + dy * cos;
+      
+      // Convert back to top-left (x, y) position
+      const offsetX = start.centerX - start.x;  // half width
+      const offsetY = start.centerY - start.y;  // half height
+      const newX = newCenterX - offsetX;
+      const newY = newCenterY - offsetY;
+
+      // New rotation = start rotation + group rotation delta
+      const newRotation = (start.rotation + rotation) % 360;
+
+      // Update object
+      this.registry.update(id, {
+        x: newX,
+        y: newY,
+        rotation: newRotation
+      }, 'local');
+    }
+
+    this.groupRotation = rotation;
+    
+    // Reset start state when rotation returns to 0
+    // This allows next rotation to start fresh from current positions
+    if (rotation === 0) {
+      this.startRotations.clear();
+      this._rotationPivot = null;
+    }
+    
+    // Update bounding box but don't reposition panel (would cause slider jump)
+    this._updateBoundingBox(true);
   }
 
   /**
@@ -10262,9 +11297,19 @@ class MassSelectionController {
         this.clipboard.push(obj.toJSON());
       }
     }
-    console.log('[MassSelection] copySelected:', this.clipboard.length, 'objects copied to internal clipboard');
+    // Mark that last copy was mass selection (not external)
+    // This flag is used to decide whether to use mass clipboard on paste
+    this.lastCopyWasMass = this.clipboard.length > 0;
+    console.log('[MassSelection] copySelected:', this.clipboard.length, 'objects copied to internal clipboard, lastCopyWasMass:', this.lastCopyWasMass);
     if (this.clipboard.length > 0) {
       ui?.notifications?.info?.(`Copied ${this.clipboard.length} object(s)`);
+      // Write marker to system clipboard so we can detect it on paste
+      // This allows us to distinguish between mass copy and external copy
+      try {
+        navigator.clipboard.writeText('[wbe-MASS-COPY]');
+      } catch (err) {
+        console.warn('[MassSelection] Failed to write marker to system clipboard:', err);
+      }
     }
   }
 
@@ -10295,12 +11340,18 @@ class MassSelectionController {
         y: data.y + offset
       };
 
-      // Create object based on type
+      // Create object based on type using registered object types
       let obj;
       if (data.type === 'text') {
         obj = new WhiteboardText(newData);
       } else if (data.type === 'image') {
         obj = new WhiteboardImage(newData);
+      } else {
+        // Use registered object type (shape, fate-card, etc.) via Whiteboard API
+        const typeConfig = Whiteboard.getObjectTypeConfig(data.type);
+        if (typeConfig?.ViewClass) {
+          obj = new typeConfig.ViewClass(newData);
+        }
       }
 
       if (obj) {
@@ -10327,22 +11378,12 @@ class MassSelectionController {
    */
   handleKeyDown(e) {
     // Use e.code for keyboard layout independence (works with any language)
-    const code = e.code; // KeyC, KeyV, KeyA, Delete, Backspace
+    const code = e.code; // KeyC, KeyA, Delete, Backspace (NOT KeyV - handled in _handlePaste)
     console.log('[MassSelection] handleKeyDown called, code:', code, 'key:', e.key, 'ctrl:', e.ctrlKey, 'selectedIds:', this.selectedIds.size, 'clipboard:', this.clipboard.length);
     
-    // Ctrl+V works even without selection (just needs clipboard)
-    // Use code === 'KeyV' for keyboard layout independence
-    if (code === 'KeyV' && (e.ctrlKey || e.metaKey)) {
-      if (this.clipboard.length > 0) {
-        console.log('[MassSelection] handleKeyDown - Ctrl+V, pasting', this.clipboard.length, 'objects');
-        e.preventDefault();
-        e.stopPropagation();
-        this.paste();
-        return true;
-      }
-      console.log('[MassSelection] handleKeyDown - Ctrl+V but clipboard is empty');
-      return false;
-    }
+    // NOTE: Ctrl+V is NOT handled here - it's handled in InteractionManager._handlePaste
+    // This allows _handlePaste to check system clipboard and decide whether to use
+    // mass clipboard or external clipboard data (e.g. from Miro)
 
     // All other shortcuts require selection
     if (this.selectedIds.size === 0) {
@@ -10602,10 +11643,11 @@ class InteractionManager {
   // Constants for scale (different speeds for text and images due to different scaling mechanisms)
   static SCALE_SENSITIVITY_TEXT = 0.01; // Scale change speed for texts (transform: scale())
   static SCALE_SENSITIVITY_IMAGE = 0.003; // Scale change speed for images (width/height)
-  static MIN_SCALE = 0.1; // Minimum scale
+  static MIN_SCALE = 0.01; // Minimum scale
   static MAX_SCALE = 20.0; // Maximum scale
 
-  // Constants for mass selection operations
+  // Constants for drag operations
+  static DRAG_SENSITIVITY = 1.2; // Sensitivity for single object drag (1.0 = 1:1 movement)
   static MASS_DRAG_SENSITIVITY = 1.0; // Sensitivity for mass drag (1.0 = 1:1 movement)
   static KEYBOARD_MOVE_STEP = 1; // Normal step for arrow keys (1px)
   static KEYBOARD_MOVE_STEP_LARGE = 10; // Large step with Shift held (10px)
@@ -10628,9 +11670,11 @@ class InteractionManager {
 
     // Universal panels interface (DRY: extensible architecture for panels)
     // When adding a new object type - just add the panel here
+    // TODO: Refactor to use Whiteboard.registerPanel() API for extensibility
     this.panels = {
       text: new TextStylingPanel(registry, layer),
-      image: new ImageControlPanel(registry, layer, this, this.socketController)
+      image: new ImageControlPanel(registry, layer, this, this.socketController),
+      massSelection: null  // Will be set by MassSelectionController
     };
 
     // Backward compatibility: keep stylingPanel for gradual migration
@@ -10644,6 +11688,25 @@ class InteractionManager {
     // Last mouse position (for paste - center under cursor)
     this.lastMouseX = null;
     this.lastMouseY = null;
+
+    // Last text style - used when creating new text objects
+    // Persists user's formatting preferences across text creations
+    this.lastTextStyle = {
+      color: DEFAULT_TEXT_COLOR,
+      colorOpacity: 100,
+      fontSize: DEFAULT_FONT_SIZE,
+      fontFamily: DEFAULT_FONT_FAMILY,
+      fontWeight: DEFAULT_FONT_WEIGHT,
+      fontStyle: DEFAULT_FONT_STYLE,
+      textAlign: DEFAULT_TEXT_ALIGN,
+      backgroundColor: DEFAULT_SPAN_BACKGROUND_COLOR,
+      backgroundColorOpacity: 100,
+      lineHeight: 1.2
+    };
+
+    // Copied style - for "Copy Style" / "Apply Style" feature
+    // Stores style from any object type, can be applied to same type objects
+    this.copiedStyle = null; // { type: 'text'|'image'|'shape', style: {...} }
 
     // Set drag state checker in Registry to protect object styles during drag
     // Similar to editingId protection - creates "lock state" for drag
@@ -10931,7 +11994,7 @@ class InteractionManager {
       const isCtrl = e.ctrlKey || e.metaKey;
       
       // Ctrl+C/Delete/Backspace/Ctrl+A: only if mass selection is ACTIVE (has selected objects)
-      // Ctrl+V: only if mass selection clipboard has data
+      // Ctrl+V: only if mass selection clipboard has data AND was recent (not overwritten by external copy)
       const hasMassSelection = this.massSelection.selectedIds.size > 0;
       const hasMassClipboard = this.massSelection.clipboard.length > 0;
       
@@ -10939,14 +12002,17 @@ class InteractionManager {
       const isZIndexKey = e.key === 'PageUp' || e.key === 'PageDown' || 
                           code === 'BracketLeft' || code === 'BracketRight';
       
+      // NOTE: Ctrl+V is NOT handled here anymore - it's handled in _handlePaste
+      // This allows _handlePaste to check system clipboard first and decide whether to use mass clipboard
+      // or external clipboard data (e.g. from Miro)
+      
       const shouldHandleMassSelection = 
         (hasMassSelection && (code === 'KeyC' || code === 'KeyA' || code === 'Delete' || code === 'Backspace') && isCtrl) ||
         (hasMassSelection && (code === 'Delete' || code === 'Backspace')) ||
-        (hasMassSelection && isZIndexKey) ||
-        (hasMassClipboard && code === 'KeyV' && isCtrl);
+        (hasMassSelection && isZIndexKey);
       
       if (shouldHandleMassSelection) {
-        console.log('[InteractionManager] _handleKeyDown - delegating to massSelection.handleKeyDown', { code, hasMassSelection, hasMassClipboard });
+        console.log('[InteractionManager] _handleKeyDown - delegating to massSelection.handleKeyDown', { code, hasMassSelection, hasMassClipboard, lastCopyWasMass: this.massSelection.lastCopyWasMass });
         if (this.massSelection.handleKeyDown(e)) {
           return;
         }
@@ -10986,6 +12052,7 @@ class InteractionManager {
       // This prevents mass clipboard from blocking future paste operations
       if (this.massSelection) {
         this.massSelection.clipboard = [];
+        this.massSelection.lastCopyWasMass = false;
       }
 
       // CRITICAL: Browser does not automatically fire copy event for our objects
@@ -11204,6 +12271,12 @@ class InteractionManager {
         this.massSelection.updateMassDrag(e);
         return;
       }
+      if (this.massSelection.isScaling) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.massSelection.updateGroupScale(e);
+        return;
+      }
     }
 
     // Handle Crop Drag (priority over scale resize)
@@ -11326,6 +12399,10 @@ class InteractionManager {
       }
       if (this.massSelection.isDragging) {
         this.massSelection.endMassDrag();
+        return;
+      }
+      if (this.massSelection.isScaling) {
+        this.massSelection.endGroupScale();
         return;
       }
     }
@@ -11485,33 +12562,36 @@ class InteractionManager {
     }
   }
   _handleWheel(_e) {
-    // Hide styling panel during zoom (standardized for all object types)
-    if (this.selectedId) {
-      this._hideAllPanels();
-    }
+    // Hide all panels during zoom
+    this._hideAllPanels();
 
     // Temporarily disable pointer events to allow zoom through objects
     this._setPointerEvents(false);
+    // Also disable pointer events on mass selection bounding box
+    if (this.massSelection?.view?.boundingBox) {
+      this.massSelection.view.boundingBox.style.pointerEvents = 'none';
+    }
 
     // Restore pointer events after a short delay (debounce)
     clearTimeout(this._wheelRestoreTimeout);
     this._wheelRestoreTimeout = setTimeout(() => {
       this._setPointerEvents(true);
-
-      // Show styling panel after zoom if object is still selected (standardized for all object types)
-      if (this.selectedId) {
-        const obj = this.registry.get(this.selectedId);
-        if (obj) {
-          requestAnimationFrame(() => {
-            if (this.selectedId) {
-              const selectedObj = this.registry.get(this.selectedId);
-              if (selectedObj) {
-                this._showPanelForObject(selectedObj);
-              }
-            }
-          });
-        }
+      // Restore bounding box pointer events
+      if (this.massSelection?.view?.boundingBox) {
+        this.massSelection.view.boundingBox.style.pointerEvents = 'auto';
       }
+
+      // Show panel after zoom based on current selection
+      requestAnimationFrame(() => {
+        if (this.selectedId) {
+          const selectedObj = this.registry.get(this.selectedId);
+          if (selectedObj) {
+            this._showPanelForObject(selectedObj);
+          }
+        } else if (this.massSelection?.selectedIds?.size >= 2) {
+          this.massSelection.panel?.show();
+        }
+      });
     }, 150);
 
     // Don't preventDefault - let Foundry handle zoom
@@ -12331,8 +13411,9 @@ class InteractionManager {
       scale
     } = this.dragState;
     // Convert screen delta to world delta
-    const dx = (e.clientX - startX) / scale;
-    const dy = (e.clientY - startY) / scale;
+    const sensitivity = InteractionManager.DRAG_SENSITIVITY;
+    const dx = (e.clientX - startX) / scale * sensitivity;
+    const dy = (e.clientY - startY) / scale * sensitivity;
     const newX = objStartX + dx;
     const newY = objStartY + dy;
 
@@ -12708,10 +13789,10 @@ class InteractionManager {
     const updateData = {};
     let needsUpdate = false;
 
-    // Only update scale if it actually changed
-    // _updateScaleResize already updated Registry during drag, so scale should already be correct
-    // But check anyway to handle edge cases (e.g., drag was cancelled)
-    if (currentScale !== undefined && Math.abs((obj?.scale ?? 1) - currentScale) > 0.0001) {
+    // CRITICAL: Always update scale in Registry after resize
+    // During resize, only DOM is updated (not Registry) for performance
+    // So we MUST sync Registry with final scale here
+    if (currentScale !== undefined) {
       updateData.scale = currentScale;
       needsUpdate = true;
     }
@@ -12782,6 +13863,7 @@ class InteractionManager {
    * DRY: one method for all panel types
    */
   _hideAllPanels() {
+    // Hides all registered panels (text, image, massSelection, etc.)
     Object.values(this.panels).forEach(panel => {
       if (panel && typeof panel.hide === 'function') {
         panel.hide();
@@ -12881,11 +13963,103 @@ class InteractionManager {
    * @returns {WhiteboardText} Created text object
    */
   _createTextAt(screenX, screenY, autoEdit = false) {
+    // Use last text style for new text objects
     return this._createObjectAt('text', screenX, screenY, {
       text: "",
-      autoEdit
+      autoEdit,
+      ...this.lastTextStyle
     });
   }
+
+  /**
+   * Copy style from selected object
+   * @param {string} id - Object ID
+   */
+  copyStyle(id) {
+    const obj = this.registry.get(id);
+    if (!obj) return;
+
+    let style = {};
+    if (obj.type === 'text') {
+      style = {
+        color: obj.color,
+        colorOpacity: obj.colorOpacity,
+        fontSize: obj.fontSize,
+        fontFamily: obj.fontFamily,
+        fontWeight: obj.fontWeight,
+        fontStyle: obj.fontStyle,
+        textAlign: obj.textAlign,
+        backgroundColor: obj.backgroundColor,
+        backgroundColorOpacity: obj.backgroundColorOpacity,
+        lineHeight: obj.lineHeight,
+        borderColor: obj.borderColor,
+        borderOpacity: obj.borderOpacity,
+        borderWidth: obj.borderWidth
+      };
+    } else if (obj.type === 'image') {
+      style = {
+        borderHex: obj.borderHex,
+        borderOpacity: obj.borderOpacity,
+        borderWidth: obj.borderWidth,
+        borderRadius: obj.borderRadius,
+        shadowHex: obj.shadowHex,
+        shadowOpacity: obj.shadowOpacity,
+        shadowOffsetX: obj.shadowOffsetX,
+        shadowOffsetY: obj.shadowOffsetY
+      };
+    } else if (obj.type === 'shape') {
+      style = {
+        strokeColor: obj.strokeColor,
+        strokeWidth: obj.strokeWidth,
+        fillColor: obj.fillColor,
+        fillOpacity: obj.fillOpacity,
+        textColor: obj.textColor,
+        textSize: obj.textSize,
+        textAlign: obj.textAlign,
+        fontFamily: obj.fontFamily,
+        fontWeight: obj.fontWeight,
+        fontStyle: obj.fontStyle,
+        lineHeight: obj.lineHeight,
+        shadowColor: obj.shadowColor,
+        shadowOpacity: obj.shadowOpacity,
+        shadowOffsetX: obj.shadowOffsetX,
+        shadowOffsetY: obj.shadowOffsetY
+      };
+    }
+
+    this.copiedStyle = { type: obj.type, style };
+    ui?.notifications?.info?.('Style copied');
+  }
+
+  /**
+   * Apply copied style to selected object
+   * @param {string} id - Object ID
+   */
+  applyStyle(id) {
+    if (!this.copiedStyle) {
+      ui?.notifications?.warn?.('No style copied');
+      return;
+    }
+
+    const obj = this.registry.get(id);
+    if (!obj) return;
+
+    // Only apply style to same type objects
+    if (obj.type !== this.copiedStyle.type) {
+      ui?.notifications?.warn?.(`Cannot apply ${this.copiedStyle.type} style to ${obj.type}`);
+      return;
+    }
+
+    // CRITICAL: For text objects, end editing mode before applying style
+    // Otherwise canUpdateStyles() returns false and DOM won't be updated
+    if (obj.type === 'text' && this.editingId === id) {
+      this._endEditText(id);
+    }
+
+    this.registry.update(id, this.copiedStyle.style, 'local');
+    ui?.notifications?.info?.('Style applied');
+  }
+
   _startEditText(id) {
     const obj = this.registry.get(id);
     if (!obj || obj.type !== 'text') return;
@@ -13191,39 +14365,22 @@ class InteractionManager {
     const copyData = obj.getCopyData(this.layer);
     let additionalData = {};
     
-    // For text, get additional data from the DOM (scale and opacity)
+    // For text, get additional opacity data (scale is already in baseData from toJSON())
     if (copyData && obj.canEdit && obj.canEdit()) {
-      const textElement = this.layer?.getTextElement(id);
-      if (textElement) {
-        // Get scale from transform
-        const transform = textElement.style.transform || '';
-        const scaleMatch = transform.match(/scale\(([^)]+)\)/);
-        const scale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
-        additionalData = {
-          scale,
-          colorOpacity: obj.colorOpacity,
-          backgroundColorOpacity: obj.backgroundColorOpacity,
-          borderOpacity: obj.borderOpacity
-        };
-      }
+      additionalData = {
+        colorOpacity: obj.colorOpacity,
+        backgroundColorOpacity: obj.backgroundColorOpacity,
+        borderOpacity: obj.borderOpacity
+      };
     } else if (obj.type === 'image') {
-      // For images, get additional data from the DOM
-      const imageElement = this.layer?.getImageElement(id);
-      if (imageElement) {
-        // Get scale from transform
-        const transform = imageElement.style.transform || '';
-        const scaleMatch = transform.match(/scale\(([^)]+)\)/);
-        const scale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
-
-        // Crop data is already included in baseData via toJSON(), but we add it explicitly for reliability
-        additionalData = {
-          scale,
-          crop: obj.crop,
-          maskType: obj.maskType,
-          circleOffset: obj.circleOffset,
-          circleRadius: obj.circleRadius
-        };
-      }
+      // For images, crop data is already in baseData via toJSON()
+      // Just ensure all crop-related fields are present
+      additionalData = {
+        crop: obj.crop,
+        maskType: obj.maskType,
+        circleOffset: obj.circleOffset,
+        circleRadius: obj.circleRadius
+      };
     }
     return {
       type: obj.type,
@@ -13591,6 +14748,10 @@ class InteractionManager {
             console.log('[InteractionManager] Image URL copied as text fallback');
           }
         }
+      } else {
+        // Universal fallback for any other object type (shapes, fate-cards, etc.)
+        await this._copyObjectToClipboard(obj);
+        return; // _copyObjectToClipboard handles everything including copiedObjectData
       }
       
       // Save copied data for internal use
@@ -13601,6 +14762,46 @@ class InteractionManager {
       }
     } catch (error) {
       console.error('[InteractionManager] Direct clipboard copy failed:', error);
+    }
+  }
+
+  /**
+   * Copy any object type to clipboard (universal fallback for shapes, etc.)
+   * Uses internal clipboard + marker in system clipboard
+   */
+  async _copyObjectToClipboard(obj) {
+    if (!obj) return;
+
+    const marker = `[wbe-OBJECT-COPY:${obj.id}:${obj.type}]`;
+    
+    // Save data internally
+    const copiedData = this._copyObject(obj.id);
+    if (copiedData) {
+      this.copiedObjectData = copiedData;
+    }
+
+    // Put marker in system clipboard so paste event can detect it
+    try {
+      const tempDiv = document.createElement('div');
+      tempDiv.style.cssText = 'position: fixed; left: -9999px; top: -9999px;';
+      tempDiv.contentEditable = 'true';
+      tempDiv.textContent = marker;
+      document.body.appendChild(tempDiv);
+
+      const range = document.createRange();
+      range.selectNodeContents(tempDiv);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      document.execCommand('copy');
+      document.body.removeChild(tempDiv);
+      selection.removeAllRanges();
+
+      console.log(`[InteractionManager] Object copied: ${obj.type} (${obj.id})`);
+      ui?.notifications?.info?.(`Copied ${obj.type}`);
+    } catch (error) {
+      console.warn('[InteractionManager] Failed to copy marker to clipboard:', error);
     }
   }
 
@@ -13745,8 +14946,10 @@ class InteractionManager {
         preloadImg.src = objectURL;
       });
 
-      // Use real size (no auto-scaling)
-      const finalScale = 1;
+      // Compensate for canvas zoom so pasted image has the same VISUAL size as the original
+      // Without this, image would appear smaller when canvas is zoomed out
+      const canvasZoom = getCanvasScale();
+      const finalScale = 1 / canvasZoom;
 
       // Upload file via Foundry API
       const timestamp = Date.now();
@@ -13849,15 +15052,33 @@ class InteractionManager {
       return; // return; // Let the browser handle text paste
     }
 
-    // NOTE: Mass selection paste is handled via keydown (Ctrl+V) in MassSelectionController.handleKeyDown
-    // This _handlePaste only handles single object paste and external clipboard
-
     const clipboardData = e.clipboardData || window.clipboardData;
     if (!clipboardData) {
       return;
     }
 
     const text = clipboardData.getData("text/plain");
+    
+    // PRIORITY 0: Mass selection paste
+    // Only use mass clipboard if:
+    // 1. Mass clipboard has data
+    // 2. System clipboard is empty OR contains our mass copy marker
+    // This allows external clipboard (e.g. from Miro) to override mass clipboard
+    if (this.massSelection && this.massSelection.clipboard.length > 0) {
+      const isSystemClipboardEmpty = !text || !text.trim();
+      const isOurMassMarker = text && text.startsWith('[wbe-MASS-COPY]');
+      
+      if (isSystemClipboardEmpty || isOurMassMarker) {
+        console.log('[InteractionManager] Paste - using mass clipboard:', this.massSelection.clipboard.length, 'objects');
+        e.preventDefault();
+        e.stopPropagation();
+        this.massSelection.paste();
+        return;
+      } else {
+        // System clipboard has external data - clear mass clipboard flag
+        console.log('[InteractionManager] Paste - system clipboard has external data, ignoring mass clipboard');
+      }
+    }
 
     // PRIORITY 0.5: Check marker - is it our single object?
     // If marker found AND saved data exists - use it (like old code!)
@@ -13894,6 +15115,22 @@ class InteractionManager {
           e.stopPropagation();
           console.warn('[InteractionManager] Image marker found but copiedObjectData is missing or wrong type');
           ui.notifications?.warn?.('Failed to paste image object - copy data expired or corrupted');
+          return;
+        }
+      }
+      // Check universal marker for any object type (shapes, fate-cards, etc.)
+      if (text.startsWith("[wbe-OBJECT-COPY:")) {
+        if (this.copiedObjectData) {
+          e.preventDefault();
+          e.stopPropagation();
+          console.log('[InteractionManager] Pasting object from copiedObjectData:', this.copiedObjectData.type);
+          await this._handleCopiedObjectPaste();
+          return;
+        } else {
+          e.preventDefault();
+          e.stopPropagation();
+          console.warn('[InteractionManager] Object marker found but copiedObjectData is missing');
+          ui.notifications?.warn?.('Failed to paste object - copy data expired or corrupted');
           return;
         }
       }
