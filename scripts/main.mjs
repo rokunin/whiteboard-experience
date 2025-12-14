@@ -20,6 +20,7 @@ Hooks.once("init", () => {
     window.WBE_registerSettings();
   }
   CONFIG.Canvas.maxZoom = 5.0;
+  CONFIG.Canvas.minZoom = 0.18; // Prevent UI glitches at extreme zoom levels
 });
 
 // Initialize whiteboard after game is ready
@@ -10539,6 +10540,19 @@ class MassSelectionController {
    */
   startSelection(e) {
     if (!this._shouldStartSelection(e)) return false;
+
+    // CRITICAL: Don't start selection if clicking on Foundry UI elements
+    // This prevents mass-select from interfering with sidebar, toolbar, etc.
+    const target = e.target;
+    if (target) {
+      // Check if click is inside Foundry UI containers
+      const foundryUI = target.closest('#ui-left, #ui-right, #ui-top, #ui-bottom, #sidebar, #controls, #navigation, #players, #hotbar, .app, .window-app, .dialog');
+      if (foundryUI) return false;
+      
+      // Check if click is inside WBE panels/toolbar
+      const wbeUI = target.closest('.wbe-panel, .wbe-toolbar, .wbe-subpanel');
+      if (wbeUI) return false;
+    }
 
     // Deselect single selection BEFORE hitTest (like Miro)
     // This ensures selection border doesn't interfere with hitTest
