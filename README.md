@@ -1,3 +1,5 @@
+[![Discord Widget](https://discord.com/api/guilds/1449774975815782575/widget.png?style=banner2)](https://discord.gg/mBM87up3bt)
+
 # Whiteboard Experience, Foundry11+
 
 FoundryVTT module that provides whiteboard-style tools for images, text, shapes, and freehand drawing.
@@ -137,7 +139,7 @@ Click thumbnails to view full size:
 ## Installation
 
 1. In Foundry, go to Add-on Modules → Install Module
-2. Paste manifest URL: `https://github.com/rokunin/whiteboard-experience/releases/latest/download/module.json`
+2. Paste manifest URL: `https://raw.githubusercontent.com/rokunin/whiteboard-experience/main/module.json`
 3. Enable the module in your world
 
 ## TODO
