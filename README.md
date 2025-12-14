@@ -36,7 +36,7 @@ I usually start with my table main background picture, place it and FREEZE it, s
 
 ![Background Setup](freeze_your_table_background.gif)
 
-Then we can have a character for the mecha game there. I don't own the art, just took firts one I liked from Google, and then deleted it, used just for the example.
+Then we can have a character for the mecha game there. I don't own the art, just took first one I liked from Google, and then deleted it, used just for the example.
 
 ![Create a character and give him some Fate Points](create_character.gif)
 
@@ -44,6 +44,16 @@ So basically that's the whole idea: quick and somewhat "dirty" and you can do it
 Create tables, write down your characters, notes, Fate Aspects, make tokens, draw freehand lines, shapes etc. Have fun!
 
 
+## Table Examples
+
+Some examples of tables that I've played, you can see that I keep the same idea and close-to-similar style, but you can go all crazy!
+
+Click thumbnails to view full size:
+
+<a href="table_1.png"><img src="table_1.png" width="50%"></a>
+<a href="table_2.png"><img src="table_2.png" width="50%"></a>
+<a href="table_3.png"><img src="table_3.png" width="50%"></a>
+<a href="table_4.png"><img src="table_4.png" width="50%"></a>
 
 
 ## Features
@@ -89,7 +99,6 @@ Create tables, write down your characters, notes, Fate Aspects, make tokens, dra
 - Works for single objects and mass selection groups
 - Snap to edges and centers of other objects
 - Visual guides show matching boundaries
-- Toggle on/off from WBE toolbar
 
 ### Collaboration
 - Real-time sync between players via sockets
@@ -131,14 +140,10 @@ Create tables, write down your characters, notes, Fate Aspects, make tokens, dra
 2. Paste manifest URL: `https://github.com/rokunin/whiteboard-experience/releases/latest/download/module.json`
 3. Enable the module in your world
 
-## Usage
-
-1. Make sure the WBE icon is in your Token Layer toolbar
-2. Press `T` to enter text mode, click to create text
-3. Paste images with `Ctrl+V`
-4. Use the styling panel (appears on selection) to customize objects
-5. Toggle WBE icon in token tools for multi-select without Shift
+## TODO
+- [ ] Undo / Redo lib
 
 ## License
 
 MIT
+
