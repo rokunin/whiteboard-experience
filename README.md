@@ -1,4 +1,4 @@
-![Discord Widget](https://discord.com/api/guilds/1449774975815782575/widget.png?style=banner3)
+![Discord Widget](https://discord.com/api/guilds/1449774975815782575/widget.png?style=banner3)(https://discord.gg/mBM87up3bt)
 
 # Whiteboard Experience, Foundry11+
 
