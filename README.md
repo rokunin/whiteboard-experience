@@ -1,5 +1,5 @@
 # Whiteboard Experience, Foundry11+
-
+<iframe src="https://discord.com/widget?id=1449774975815782575&theme=dark" width="350" height="500" allowtransparency="true" frameborder="0" sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"></iframe>
 FoundryVTT module that provides whiteboard-style tools for images, text, shapes, and freehand drawing.
 
 **Important:** WBE objects live in a layer ABOVE the standard Foundry canvas. They will overlay tokens, tiles, drawings, and other native VTT objects.
