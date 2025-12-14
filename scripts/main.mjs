@@ -5734,6 +5734,7 @@ class WhiteboardImage extends WhiteboardObject {
         game.socket.emit(SOCKET_NAME, {
           action: 'imageLock',
           imageId: this.id,
+          sceneId: canvas.scene?.id,
           userId: game.user.id,
           userName: game.user.name
         });
@@ -6001,7 +6002,8 @@ class WhiteboardImage extends WhiteboardObject {
       if (game.socket) {
         game.socket.emit(SOCKET_NAME, {
           action: 'imageUnlock',
-          imageId: this.id
+          imageId: this.id,
+          sceneId: canvas.scene?.id
         });
       }
     }
@@ -11286,10 +11288,10 @@ class MassSelectionController {
   // ========== Copy/Paste ==========
 
   /**
-   * Copy selected objects to internal clipboard
-   * NOTE: Uses internal clipboard only (like old code), not system clipboard
+   * Copy selected objects to system clipboard (cross-browser compatible)
+   * Data is stored as JSON with "wbe-clipboard" wrapper for identification
    */
-  copySelected() {
+  async copySelected() {
     this.clipboard = [];
     for (const id of this.selectedIds) {
       const obj = this.registry.get(id);
@@ -11298,35 +11300,135 @@ class MassSelectionController {
       }
     }
     // Mark that last copy was mass selection (not external)
-    // This flag is used to decide whether to use mass clipboard on paste
     this.lastCopyWasMass = this.clipboard.length > 0;
-    console.log('[MassSelection] copySelected:', this.clipboard.length, 'objects copied to internal clipboard, lastCopyWasMass:', this.lastCopyWasMass);
+    console.log('[MassSelection] copySelected:', this.clipboard.length, 'objects');
+    
     if (this.clipboard.length > 0) {
       ui?.notifications?.info?.(`Copied ${this.clipboard.length} object(s)`);
-      // Write marker to system clipboard so we can detect it on paste
-      // This allows us to distinguish between mass copy and external copy
-      try {
-        navigator.clipboard.writeText('[wbe-MASS-COPY]');
-      } catch (err) {
-        console.warn('[MassSelection] Failed to write marker to system clipboard:', err);
+      
+      // Write full data to system clipboard (enables cross-browser paste)
+      const clipboardData = JSON.stringify({
+        'wbe-clipboard': this.clipboard,
+        version: 1
+      });
+      
+      // Try modern Clipboard API first, fallback to execCommand
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+          await navigator.clipboard.writeText(clipboardData);
+          console.log('[MassSelection] Written to system clipboard (API):', clipboardData.length, 'bytes');
+        } catch (err) {
+          console.warn('[MassSelection] Clipboard API failed:', err);
+          this._writeClipboardFallback(clipboardData);
+        }
+      } else {
+        this._writeClipboardFallback(clipboardData);
       }
+    }
+  }
+  
+  /**
+   * Fallback clipboard write using execCommand (for non-HTTPS contexts)
+   */
+  _writeClipboardFallback(text) {
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      console.log('[MassSelection] Written to clipboard (fallback):', text.length, 'bytes');
+    } catch (err) {
+      console.warn('[MassSelection] Fallback clipboard write failed:', err);
     }
   }
 
   /**
-   * Paste objects from clipboard
+   * Paste objects from system clipboard (cross-browser compatible)
+   * First tries to read from system clipboard, falls back to internal clipboard
+   * @param {string} [clipboardText] - Optional clipboard text passed from _handlePaste
    */
-  async paste() {
-    console.log('[MassSelection] paste() called, clipboard.length:', this.clipboard.length);
-    if (this.clipboard.length === 0) {
-      console.log('[MassSelection] paste() - clipboard is empty, returning');
+  async paste(clipboardText = null) {
+    console.log('[MassSelection] paste() called, clipboardText provided:', !!clipboardText);
+    
+    // Try to parse clipboard text (passed from _handlePaste or read via API)
+    let objectsToPaste = [];
+    
+    // First try passed clipboard text (from paste event - most reliable)
+    if (clipboardText) {
+      try {
+        const parsed = JSON.parse(clipboardText);
+        if (parsed['wbe-clipboard'] && Array.isArray(parsed['wbe-clipboard'])) {
+          objectsToPaste = parsed['wbe-clipboard'];
+          console.log('[MassSelection] Parsed from passed clipboard text:', objectsToPaste.length, 'objects');
+        }
+      } catch {
+        // Not valid WBE JSON
+      }
+    }
+    
+    // Try Clipboard API if no data yet
+    if (objectsToPaste.length === 0 && navigator.clipboard && navigator.clipboard.readText) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          const parsed = JSON.parse(text);
+          if (parsed['wbe-clipboard'] && Array.isArray(parsed['wbe-clipboard'])) {
+            objectsToPaste = parsed['wbe-clipboard'];
+            console.log('[MassSelection] Read from system clipboard (API):', objectsToPaste.length, 'objects');
+          }
+        }
+      } catch {
+        // Clipboard API not available or no valid data
+      }
+    }
+    
+    // Fallback to internal clipboard
+    if (objectsToPaste.length === 0 && this.clipboard.length > 0) {
+      objectsToPaste = this.clipboard;
+      console.log('[MassSelection] Using internal clipboard:', objectsToPaste.length, 'objects');
+    }
+    
+    if (objectsToPaste.length === 0) {
+      console.log('[MassSelection] paste() - no WBE data in clipboard');
       return;
     }
 
-    const offset = 20;
+    // Calculate bounding box center of all objects
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const data of objectsToPaste) {
+      const w = data.width || 100;
+      const h = data.height || 50;
+      minX = Math.min(minX, data.x);
+      minY = Math.min(minY, data.y);
+      maxX = Math.max(maxX, data.x + w);
+      maxY = Math.max(maxY, data.y + h);
+    }
+    const groupCenterX = (minX + maxX) / 2;
+    const groupCenterY = (minY + maxY) / 2;
+    
+    // Get cursor position in world coordinates (from InteractionManager)
+    const im = this.interactionManager;
+    const screenX = im?.lastMouseX ?? window.innerWidth / 2;
+    const screenY = im?.lastMouseY ?? window.innerHeight / 2;
+    
+    // Convert screen to world coordinates
+    const transform = canvas.stage.worldTransform;
+    const worldX = (screenX - transform.tx) / transform.a;
+    const worldY = (screenY - transform.ty) / transform.d;
+    
+    // Calculate offset to center group under cursor
+    const offsetX = worldX - groupCenterX;
+    const offsetY = worldY - groupCenterY;
+    
+    console.log('[MassSelection] paste - centering under cursor:', { screenX, screenY, worldX, worldY, offsetX, offsetY });
+
     const newIds = [];
 
-    for (const data of this.clipboard) {
+    for (const data of objectsToPaste) {
       const newId = `wbe-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       
       // Remove old z-index related fields - registry.register() will assign new ones
@@ -11336,8 +11438,8 @@ class MassSelectionController {
       const newData = {
         ...cleanData,
         id: newId,
-        x: data.x + offset,
-        y: data.y + offset
+        x: data.x + offsetX,
+        y: data.y + offsetY
       };
 
       // Create object based on type using registered object types
@@ -13516,8 +13618,8 @@ class InteractionManager {
   _startPan(e) {
     if (!canvas?.stage) return;
 
-    // Hide styling panel during pan (standardized for all object types)
-    if (this.selectedId) {
+    // Hide all panels during pan (single selection OR mass selection)
+    if (this.selectedId || this.massSelection?.selectedIds.size > 0) {
       this._hideAllPanels();
     }
 
@@ -13560,20 +13662,28 @@ class InteractionManager {
     // Restore pointer events
     this._setPointerEvents(true);
 
-    // Show styling panel after pan if object is still selected (standardized for all object types)
-      if (this.selectedId) {
-        const obj = this.registry.get(this.selectedId);
-        if (obj) {
-          requestAnimationFrame(() => {
-            if (this.selectedId) {
-              const selectedObj = this.registry.get(this.selectedId);
-              if (selectedObj) {
-                this._showPanelForObject(selectedObj);
-              }
+    // Show panel after pan if object(s) still selected
+    if (this.selectedId) {
+      // Single selection - show object panel
+      const obj = this.registry.get(this.selectedId);
+      if (obj) {
+        requestAnimationFrame(() => {
+          if (this.selectedId) {
+            const selectedObj = this.registry.get(this.selectedId);
+            if (selectedObj) {
+              this._showPanelForObject(selectedObj);
             }
-          });
-        }
+          }
+        });
       }
+    } else if (this.massSelection?.selectedIds.size >= 2) {
+      // Mass selection - show mass selection panel
+      requestAnimationFrame(() => {
+        if (this.massSelection?.selectedIds.size >= 2) {
+          this.massSelection.panel?.show();
+        }
+      });
+    }
   }
   _startWidthResize(id, e) {
     const textElement = this.layer?.getTextElement(id);
@@ -14754,11 +14864,19 @@ class InteractionManager {
         return; // _copyObjectToClipboard handles everything including copiedObjectData
       }
       
-      // Save copied data for internal use
+      // Save copied data for internal use AND write JSON to system clipboard
       const copiedData = this._copyObject(this.selectedId);
       if (copiedData) {
         this.copiedObjectData = copiedData;
         console.log('[InteractionManager] Copied data saved internally:', copiedData.type);
+        
+        // Also write JSON to system clipboard for cross-browser paste
+        // This overwrites the marker/HTML but enables cross-browser copy
+        const clipboardJson = JSON.stringify({
+          'wbe-clipboard': [copiedData.data],
+          version: 1
+        });
+        await this._writeToSystemClipboard(clipboardJson);
       }
     } catch (error) {
       console.error('[InteractionManager] Direct clipboard copy failed:', error);
@@ -14766,42 +14884,59 @@ class InteractionManager {
   }
 
   /**
-   * Copy any object type to clipboard (universal fallback for shapes, etc.)
-   * Uses internal clipboard + marker in system clipboard
+   * Copy any object type to clipboard (universal - works cross-browser)
+   * Writes full JSON data to system clipboard for cross-browser paste
    */
   async _copyObjectToClipboard(obj) {
     if (!obj) return;
 
-    const marker = `[wbe-OBJECT-COPY:${obj.id}:${obj.type}]`;
-    
-    // Save data internally
+    // Save data internally (fallback)
     const copiedData = this._copyObject(obj.id);
     if (copiedData) {
       this.copiedObjectData = copiedData;
     }
 
-    // Put marker in system clipboard so paste event can detect it
+    // Write full JSON to system clipboard (enables cross-browser paste)
+    const clipboardData = JSON.stringify({
+      'wbe-clipboard': [copiedData.data], // Array format for compatibility with mass selection
+      version: 1
+    });
+    
+    await this._writeToSystemClipboard(clipboardData);
+    console.log(`[InteractionManager] Object copied: ${obj.type} (${obj.id})`);
+    ui?.notifications?.info?.(`Copied ${obj.type}`);
+  }
+  
+  /**
+   * Write text to system clipboard (with fallback for non-HTTPS)
+   */
+  async _writeToSystemClipboard(text) {
+    // Try modern Clipboard API first
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        console.log('[InteractionManager] Written to clipboard (API):', text.length, 'bytes');
+        return true;
+      } catch (err) {
+        console.warn('[InteractionManager] Clipboard API failed:', err);
+      }
+    }
+    
+    // Fallback: execCommand
     try {
-      const tempDiv = document.createElement('div');
-      tempDiv.style.cssText = 'position: fixed; left: -9999px; top: -9999px;';
-      tempDiv.contentEditable = 'true';
-      tempDiv.textContent = marker;
-      document.body.appendChild(tempDiv);
-
-      const range = document.createRange();
-      range.selectNodeContents(tempDiv);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
       document.execCommand('copy');
-      document.body.removeChild(tempDiv);
-      selection.removeAllRanges();
-
-      console.log(`[InteractionManager] Object copied: ${obj.type} (${obj.id})`);
-      ui?.notifications?.info?.(`Copied ${obj.type}`);
-    } catch (error) {
-      console.warn('[InteractionManager] Failed to copy marker to clipboard:', error);
+      document.body.removeChild(textarea);
+      console.log('[InteractionManager] Written to clipboard (fallback):', text.length, 'bytes');
+      return true;
+    } catch (err) {
+      console.warn('[InteractionManager] Fallback clipboard write failed:', err);
+      return false;
     }
   }
 
@@ -15059,24 +15194,44 @@ class InteractionManager {
 
     const text = clipboardData.getData("text/plain");
     
-    // PRIORITY 0: Mass selection paste
-    // Only use mass clipboard if:
-    // 1. Mass clipboard has data
-    // 2. System clipboard is empty OR contains our mass copy marker
-    // This allows external clipboard (e.g. from Miro) to override mass clipboard
-    if (this.massSelection && this.massSelection.clipboard.length > 0) {
+    // DEBUG: Log what's in clipboard
+    console.log('[InteractionManager] _handlePaste - clipboard text (first 100 chars):', text?.substring(0, 100));
+    
+    // PRIORITY 0: WBE clipboard data (cross-browser compatible JSON format)
+    if (text && text.trim()) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed['wbe-clipboard'] && Array.isArray(parsed['wbe-clipboard'])) {
+          const objects = parsed['wbe-clipboard'];
+          console.log('[InteractionManager] Paste - detected WBE clipboard data:', objects.length, 'objects');
+          e.preventDefault();
+          e.stopPropagation();
+          
+          if (objects.length === 1) {
+            // Single object - use normal paste flow (InteractionManager handles selection)
+            this.copiedObjectData = { type: objects[0].type, data: objects[0] };
+            await this._handleCopiedObjectPaste();
+          } else if (objects.length > 1) {
+            // Multiple objects - use mass selection paste
+            await this.massSelection.paste(text);
+          }
+          return;
+        }
+      } catch (parseErr) {
+        // Not JSON - continue to other paste handlers
+        console.log('[InteractionManager] Paste - not valid JSON:', parseErr.message);
+      }
+    }
+    
+    // Fallback: internal mass clipboard (same browser, clipboard API failed)
+    if (this.massSelection && this.massSelection.clipboard.length > 0 && this.massSelection.lastCopyWasMass) {
       const isSystemClipboardEmpty = !text || !text.trim();
-      const isOurMassMarker = text && text.startsWith('[wbe-MASS-COPY]');
-      
-      if (isSystemClipboardEmpty || isOurMassMarker) {
-        console.log('[InteractionManager] Paste - using mass clipboard:', this.massSelection.clipboard.length, 'objects');
+      if (isSystemClipboardEmpty) {
+        console.log('[InteractionManager] Paste - using internal mass clipboard:', this.massSelection.clipboard.length, 'objects');
         e.preventDefault();
         e.stopPropagation();
-        this.massSelection.paste();
+        await this.massSelection.paste();
         return;
-      } else {
-        // System clipboard has external data - clear mass clipboard flag
-        console.log('[InteractionManager] Paste - system clipboard has external data, ignoring mass clipboard');
       }
     }
 
@@ -15745,6 +15900,7 @@ class SocketController {
     const payload = {
       action: action,
       ...data,
+      sceneId: canvas.scene?.id, // Scene ID to filter messages by scene
       timestamp: Date.now(),
       userId: game.user?.id
     };
@@ -15838,7 +15994,8 @@ class SocketController {
       // 'created', 'updated', 'deleted'
       id: id,
       data: jsonData,
-      timestamp: Date.now(), // timestamp: Date.now(), // Timestamp to prevent race conditions
+      sceneId: canvas.scene?.id, // Scene ID to filter messages by scene
+      timestamp: Date.now(), // Timestamp to prevent race conditions
       userId: game.user?.id // For debugging
     };
     try {
@@ -15853,9 +16010,17 @@ class SocketController {
       action,
       id,
       data,
+      sceneId,
       timestamp,
       userId
     } = payload;
+
+    // CRITICAL: Filter by scene - ignore messages from other scenes
+    // This prevents cross-scene object pollution
+    if (sceneId && canvas.scene?.id && sceneId !== canvas.scene.id) {
+      console.log(`[Socket] Ignoring message from different scene: ${sceneId} (current: ${canvas.scene.id})`);
+      return;
+    }
 
     // CRITICAL: Log content for debugging text retrieval
     if (action === 'created' && data && data.type === 'text') {
