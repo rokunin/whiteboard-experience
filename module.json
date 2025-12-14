@@ -2,12 +2,12 @@
   "id": "whiteboard-experience",
   "title": "Whiteboard Experience",
   "description": "Now tokens layer gives you whiteboard experience",
-  "version": "0.8b",
+  "version": "0.8a",
   "compatibility": { "minimum": "11", "verified": "13", "maximum": "13" },
   "authors": [{ "name": "rokunin" }],
   "esmodules": ["scripts/main.mjs"],
   "socket": true,
   "url": "https://github.com/rokunin/whiteboard-experience",
   "manifest": "https://raw.githubusercontent.com/rokunin/whiteboard-experience/main/module.json",
-  "download": "https://github.com/rokunin/whiteboard-experience/releases/download/v0.8b/module.zip"
+  "download": "https://github.com/rokunin/whiteboard-experience/releases/download/v0.8a/module.zip"
 }
