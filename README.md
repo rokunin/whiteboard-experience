@@ -1,4 +1,5 @@
-[![Discord Widget](https://discord.com/api/guilds/1449774975815782575/widget.png?style=banner2)](https://discord.gg/mBM87up3bt)
+[![Discord Widget](https://discord.com/api/guilds/1449774975815782575/widget.png?style=banner2)](https://discord.gg/mBM87up3bt) <br>
+![Downloads](https://img.shields.io/github/downloads/rokunin/whiteboard-experience/total)
 
 # Whiteboard Experience, Foundry11+
 
@@ -64,14 +65,15 @@ Click thumbnails to view full size:
 - Independent toolbar next to Foundry controls
 - Draggable — grab the "WBE" header and move it anywhere
 - Position persists between sessions
-- Tools: Rectangle (`R`), Circle (`C`), Freehand (`F`), Multi-select, Alignment guides toggle
+- Tools: Rectangle (`S`), Circle (`C`), Freehand (`F`), Text (`T`), Image paste, Multi-select
 
 ### Shapes (Rectangles & Circles)
 - Create rectangles and circles directly on canvas
-- Hotkeys: `R` — rectangle, `C` — circle
+- Hotkeys: `S` — rectangle (square), `C` — circle
 - Styling: fill color, border (color, width, style, radius), shadow
+- Add texts to the shapes (double click them) and style it too
 - Shadow with color, opacity, and X/Y offset controls
-- Drag & resize like other objects
+- Drag & resize with visual gizmo handles
 
 ### Freehand Drawing
 - Draw freehand directly on canvas (`F`)
@@ -81,7 +83,7 @@ Click thumbnails to view full size:
 ### Text Objects
 - Create text anywhere on the canvas (press `T`, then click; right click to disable)
 - Rich text styling: font size, color, background, border, opacity
-- Drag and scale texts
+- Drag and resize with visual gizmo handles
 - Copy/paste support
 
 ### Image Objects  
@@ -97,10 +99,11 @@ Click thumbnails to view full size:
 - Copy/paste and delete work on entire group
 
 ### Smart Alignment
-- Hold `Ctrl` while dragging to see alignment guides
+- Alignment guides appear automatically while dragging
 - Works for single objects and mass selection groups
 - Snap to edges and centers of other objects
 - Visual guides show matching boundaries
+- Guides also work during shape and text resize
 
 ### Collaboration
 - Real-time sync between players via sockets
@@ -115,7 +118,7 @@ Click thumbnails to view full size:
 - Border subpanel with all border + shadow settings in one place
 
 ### Hotkeys
-- `R` — Rectangle tool
+- `S` — Rectangle tool
 - `C` — Circle tool  
 - `F` — Freehand tool
 - `T` — Text tool
@@ -123,10 +126,8 @@ Click thumbnails to view full size:
 - `PageUp/PageDown` — z-index control
 - `Shift+PageUp/PageDown` — z-index jump (move to top/bottom)
 - `Ctrl+C/V` — copy/paste
-- `Ctrl+D` — duplicate selected
 - `Shift+Click` — add/remove object from group
 - `Shift+Drag` (empty space) — select multiple objects with box
-- `Ctrl+Drag` — show alignment guides while dragging
 
 ### Other
 - Z-index control (`PageUp`/`PageDown`)
@@ -144,8 +145,31 @@ Click thumbnails to view full size:
 
 ## TODO
 - [ ] Undo / Redo lib
+- [ ] Vector Line Shape Tool
+- [ ] Place DOM layer under Foundry Canvas option
 
 ## License
 
 MIT
+
+---
+
+## Changelog
+
+### v0.8a.1
+
+**New Features:**
+- Added text creation and image paste icons to the WBE toolbar
+- New resize gizmo for shapes and text objects — drag corner handles to resize visually
+- Alignment guides now support shape and text resize operations
+
+**Improvements:**
+- Alignment guides are now always active — removed the `Ctrl` key requirement for simpler workflow
+
+**Fixes:**
+- First fix for image paste CORS issues
+
+**Known Issues:**
+- Text objects may jitter slightly during resize
+- Selection frames may be slightly offset from objects
 

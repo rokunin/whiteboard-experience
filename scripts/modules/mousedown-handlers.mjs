@@ -829,6 +829,70 @@ export const CropHandleHandler = {
  * 
  * Requirements: 6.7
  */
+export const StretchResizeHandler = {
+  name: 'stretchResize',
+  priority: 450, // Higher than scale (400) - stretch handles are more specific
+
+  /**
+   * Check if clicking on a stretch handle
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if should handle stretch
+   */
+  canHandle(ctx) {
+    // Only left click
+    if (ctx.button !== 0) return false;
+    
+    // Check hit result for stretch handle
+    const hitResult = ctx.hitResult;
+    if (hitResult.handleType !== 'stretch') return false;
+    
+    // Must have an object and direction
+    const obj = hitResult.object;
+    const direction = hitResult.stretchDirection;
+    if (!obj || !direction) return false;
+    
+    // Check if object supports stretching via capabilities interface
+    const caps = obj.getCapabilities?.() || {};
+    const isHorizontal = direction === 'left' || direction === 'right';
+    const isVertical = direction === 'top' || direction === 'bottom';
+    
+    if (isHorizontal && !caps.stretchX) return false;
+    if (isVertical && !caps.stretchY) return false;
+    
+    // Check if feature is enabled for this object type
+    if (obj.isEnabled && !obj.isEnabled()) {
+      return false;
+    }
+    
+    // Skip frozen objects
+    if (obj.isFrozen?.()) {
+      return false;
+    }
+    
+    return true;
+  },
+
+  /**
+   * Handle stretch resize start
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if handled
+   */
+  handle(ctx) {
+    ctx.consume();
+    const { object, stretchDirection } = ctx.hitResult;
+    ctx.im._startStretchResize(object.id, stretchDirection, ctx.event);
+    return true;
+  }
+};
+
+/**
+ * ScaleHandleHandler (priority 400)
+ * 
+ * Handles scale resize when clicking on the scale handle (corner circle).
+ * Works for all object types that support scaling.
+ * 
+ * Requirements: 6.7
+ */
 export const ScaleHandleHandler = {
   name: 'scaleHandle',
   priority: 400,
@@ -1054,6 +1118,7 @@ export const CanvasDeselectHandler = {
 export function getLowPriorityMouseDownHandlers() {
   return [
     WidthResizeHandler,
+    StretchResizeHandler,  // Unified stretch handles (width/height)
     CropHandleHandler,
     ScaleHandleHandler,
     CircleCropDragHandler,

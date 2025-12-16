@@ -84,6 +84,7 @@ const TOOLBAR_STYLES = `
 #wbe-toolbar .wbe-tool-btn {
   all: unset;
   box-sizing: border-box;
+  position: relative;
   
   width: 32px;
   height: 32px;
@@ -141,31 +142,95 @@ const TOOLBAR_STYLES = `
   user-select: none;
 }
 
-/* Submenu (для shapes и т.д.) */
+/* Submenu (для shapes, images и т.д.) */
 #wbe-toolbar .wbe-tool-submenu {
   position: absolute;
-  left: 100%;
-  top: 0;
-  margin-left: 4px;
+  left: calc(100% - 8px);
+  top: -8px;
+  /* Padding creates hover-safe zone on all sides */
+  padding: 8px 8px 8px 16px;
+  min-width: 180px;
   
   display: none;
   flex-direction: column;
-  gap: 2px;
-  padding: 4px;
+  gap: 4px;
+  
+  background: transparent;
+  pointer-events: auto;
+}
+
+/* Inner container for actual submenu styling */
+#wbe-toolbar .wbe-tool-submenu::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  bottom: 8px;
+  left: 16px;
   
   background: rgba(30, 30, 30, 0.95);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 4px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  z-index: -1;
 }
 
-#wbe-toolbar .wbe-tool-btn:hover .wbe-tool-submenu,
+#wbe-toolbar .wbe-tool-btn:hover > .wbe-tool-submenu,
 #wbe-toolbar .wbe-tool-submenu:hover {
   display: flex;
 }
 
-/* Tooltip */
-#wbe-toolbar .wbe-tool-btn[data-tooltip]:hover::after {
+/* Submenu info text */
+#wbe-toolbar .wbe-submenu-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+#wbe-toolbar .wbe-submenu-info i {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: rgba(100, 180, 255, 0.9);
+}
+
+/* Submenu button */
+#wbe-toolbar .wbe-submenu-btn {
+  all: unset;
+  box-sizing: border-box;
+  
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  
+  background: rgba(60, 60, 60, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+#wbe-toolbar .wbe-submenu-btn:hover {
+  background: rgba(80, 80, 80, 0.9);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+#wbe-toolbar .wbe-submenu-btn i {
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+}
+
+/* Tooltip - hide for buttons with submenu */
+#wbe-toolbar .wbe-tool-btn[data-tooltip]:not(:has(.wbe-tool-submenu)):hover::after {
   content: attr(data-tooltip);
   position: absolute;
   left: 100%;
@@ -340,14 +405,74 @@ function createToolButton(tool) {
   const btn = document.createElement('button');
   btn.className = 'wbe-tool-btn';
   btn.dataset.toolId = tool.id;
-  btn.dataset.tooltip = tool.title;
+  
+  // Don't set tooltip for buttons with submenu (submenu replaces tooltip)
+  if (!tool.submenu) {
+    btn.dataset.tooltip = tool.title;
+  }
   
   // Icon
   const icon = document.createElement('i');
   icon.className = tool.icon;
   btn.appendChild(icon);
   
-  // Click handler
+  // Submenu (if defined)
+  if (tool.submenu && Array.isArray(tool.submenu)) {
+    const submenu = document.createElement('div');
+    submenu.className = 'wbe-tool-submenu';
+    
+    for (const item of tool.submenu) {
+      if (item.type === 'info') {
+        // Info text with icon
+        const info = document.createElement('div');
+        info.className = 'wbe-submenu-info';
+        
+        if (item.icon) {
+          const infoIcon = document.createElement('i');
+          infoIcon.className = item.icon;
+          info.appendChild(infoIcon);
+        }
+        
+        const text = document.createElement('span');
+        text.textContent = item.text;
+        info.appendChild(text);
+        
+        submenu.appendChild(info);
+        
+      } else if (item.type === 'button') {
+        // Clickable button
+        const subBtn = document.createElement('button');
+        subBtn.className = 'wbe-submenu-btn';
+        
+        if (item.icon) {
+          const subIcon = document.createElement('i');
+          subIcon.className = item.icon;
+          subBtn.appendChild(subIcon);
+        }
+        
+        const label = document.createElement('span');
+        label.textContent = item.text;
+        subBtn.appendChild(label);
+        
+        subBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          item.onClick?.();
+        });
+        
+        submenu.appendChild(subBtn);
+      }
+    }
+    
+    btn.appendChild(submenu);
+    
+    // Don't add click handler for menu-type tools (submenu handles clicks)
+    if (tool.type === 'menu') {
+      return btn;
+    }
+  }
+  
+  // Click handler (for non-menu tools)
   btn.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -426,7 +551,7 @@ function deactivateTool(toolId) {
 }
 
 // Group order for consistent toolbar layout
-const GROUP_ORDER = ['selection', 'shapes', 'objects', 'default'];
+const GROUP_ORDER = ['selection', 'create', 'shapes', 'objects', 'default'];
 
 /**
  * Перерендерить тулбар

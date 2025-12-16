@@ -1,0 +1,52 @@
+name: Release Module
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'module.json'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Читаем версию из module.json
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(jq -r '.version' module.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+      
+      # Проверяем, существует ли уже такой тег
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+      
+      # Создаём zip (укажи свои файлы!)
+      - name: Create zip
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          zip -r module.zip \
+            module.json \
+            scripts/ \
+            styles/ \
+            templates/ \
+            lang/
+      
+      # Создаём релиз
+      - name: Create Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.version }}
+          artifacts: 'module.json,module.zip'
+          token: ${{ secrets.GITHUB_TOKEN }}

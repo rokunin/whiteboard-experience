@@ -587,7 +587,7 @@ class ShapesManager {
 
     // Use e.code for keyboard layout independence (works with Russian layout too)
     const toolMap = {
-      'KeyR': SHAPE_TYPES.RECT,
+      'KeyS': SHAPE_TYPES.RECT,
       'KeyC': SHAPE_TYPES.CIRCLE,
       'KeyF': SHAPE_TYPES.FREEHAND
     };
@@ -814,11 +814,15 @@ class ShapeView {
   }
 
   getCapabilities() {
+    // Freehand can only scale (proportionally), rect/circle can stretch
+    const canStretch = this.shapeType !== SHAPE_TYPES.FREEHAND;
     return {
       scalable: true,
       draggable: true,
       freezable: true,
-      editable: this.shapeType !== SHAPE_TYPES.FREEHAND
+      editable: canStretch,
+      stretchX: canStretch,  // Rect/circle can stretch horizontally
+      stretchY: canStretch   // Rect/circle can stretch vertically
     };
   }
 

@@ -2217,23 +2217,54 @@ class WhiteboardLayer {
       rect.setAttribute('fill', 'none');
       rect.setAttribute('vector-effect', 'non-scaling-stroke');
       
-      // Resize handle (circle) - SVG gizmo for scale resize
+      // Scale handle (circle) - SVG gizmo for proportional scale resize
       // DRY: Unified gizmo in overlay layer instead of per-object DOM elements
-      const handle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      handle.setAttribute('class', 'wbe-selection-overlay-handle');
-      handle.setAttribute('r', '6');
-      handle.setAttribute('fill', '#4a9eff');
-      handle.setAttribute('stroke', 'white');
-      handle.setAttribute('stroke-width', '2');
-      handle.setAttribute('cursor', 'nwse-resize');
-      handle.style.pointerEvents = 'auto'; // Handle needs to receive events
+      const scaleHandle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      scaleHandle.setAttribute('class', 'wbe-selection-overlay-handle wbe-scale-handle');
+      scaleHandle.setAttribute('r', '6');
+      scaleHandle.setAttribute('fill', '#4a9eff');
+      scaleHandle.setAttribute('stroke', 'white');
+      scaleHandle.setAttribute('stroke-width', '2');
+      scaleHandle.setAttribute('cursor', 'nwse-resize');
+      scaleHandle.style.pointerEvents = 'auto';
       
+      // Stretch handles (squares) - for width/height resize
+      // Created once, visibility controlled by object capabilities
+      const stretchHandles = {};
+      const stretchDirs = [
+        { name: 'left', cursor: 'ew-resize' },
+        { name: 'right', cursor: 'ew-resize' },
+        { name: 'top', cursor: 'ns-resize' },
+        { name: 'bottom', cursor: 'ns-resize' }
+      ];
+      
+      // Add rect FIRST (lowest z-order in SVG)
       svg.appendChild(rect);
-      svg.appendChild(handle);
+      
+      // Add stretch handles AFTER rect (above selection border)
+      stretchDirs.forEach(({ name, cursor }) => {
+        const h = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        h.setAttribute('class', `wbe-selection-overlay-handle wbe-stretch-handle wbe-stretch-${name}`);
+        h.setAttribute('width', '8');
+        h.setAttribute('height', '8');
+        h.setAttribute('fill', '#4a9eff');
+        h.setAttribute('stroke', 'white');
+        h.setAttribute('stroke-width', '1.5');
+        h.setAttribute('cursor', cursor);
+        h.setAttribute('data-stretch-direction', name);
+        h.style.pointerEvents = 'auto';
+        h.style.display = 'none'; // Hidden by default, shown based on capabilities
+        svg.appendChild(h);
+        stretchHandles[name] = h;
+      });
+      
+      // Add scale handle LAST (highest z-order)
+      svg.appendChild(scaleHandle);
       this.element.appendChild(svg);
       this._selectionOverlay = svg;
       this._selectionOverlayRect = rect;
-      this._selectionOverlayHandle = handle;
+      this._selectionOverlayHandle = scaleHandle; // Keep for backward compatibility
+      this._stretchHandles = stretchHandles;
     }
     
     this._selectionOverlaySelectedId = objectId;
@@ -2316,7 +2347,7 @@ class WhiteboardLayer {
     const borderPadding = usesTransformScale ? borderWidth * scale : borderWidth;
     
     // Fixed 1px padding around selection overlay (in world coordinates, independent of canvas scale)
-    const SELECTION_PADDING = 1;
+    const SELECTION_PADDING = 0;
     
     // Calculate final dimensions (no rounding needed for SVG - it handles subpixels well)
     const finalWidth = width + 2 * borderPadding + 2 * SELECTION_PADDING;
@@ -2354,10 +2385,10 @@ class WhiteboardLayer {
       this._selectionOverlayRect.setAttribute('height', `${finalHeight - 1}`);
     }
     
-    // Update resize handle position (bottom-right corner with offset)
+    // Update scale handle position (bottom-right corner with offset)
     // Handle is positioned at corner + small offset for better UX
+    const canvasScale = getCanvasScale();
     if (this._selectionOverlayHandle) {
-      const canvasScale = getCanvasScale();
       const handleOffset = 4; // Offset from corner (same as old RESIZE_HANDLE_OFFSET)
       const handleX = finalWidth + handleOffset;
       const handleY = finalHeight + handleOffset;
@@ -2372,8 +2403,57 @@ class WhiteboardLayer {
       
       // Show/hide handle based on object state (frozen objects cannot be scaled)
       const isFrozen = obj.isFrozen?.() ?? false;
-      const showHandle = !isFrozen && !obj.isCropping;
+      const caps = obj.getCapabilities?.() || {};
+      const showHandle = !isFrozen && !obj.isCropping && caps.scalable !== false;
       this._selectionOverlayHandle.style.display = showHandle ? 'block' : 'none';
+    }
+    
+    // Update stretch handles position and visibility
+    if (this._stretchHandles) {
+      const isFrozen = obj.isFrozen?.() ?? false;
+      const caps = obj.getCapabilities?.() || {};
+      const showStretchX = !isFrozen && !obj.isCropping && caps.stretchX === true;
+      const showStretchY = !isFrozen && !obj.isCropping && caps.stretchY === true;
+      
+      // Compensate handle size for canvas zoom
+      const handleSize = 8 / canvasScale;
+      const handleStroke = 1.5 / canvasScale;
+      
+      // Left handle (center of left edge)
+      const leftH = this._stretchHandles.left;
+      leftH.setAttribute('x', `${-handleSize / 2}`);
+      leftH.setAttribute('y', `${finalHeight / 2 - handleSize / 2}`);
+      leftH.setAttribute('width', `${handleSize}`);
+      leftH.setAttribute('height', `${handleSize}`);
+      leftH.setAttribute('stroke-width', `${handleStroke}`);
+      leftH.style.display = showStretchX ? 'block' : 'none';
+      
+      // Right handle (center of right edge)
+      const rightH = this._stretchHandles.right;
+      rightH.setAttribute('x', `${finalWidth - handleSize / 2}`);
+      rightH.setAttribute('y', `${finalHeight / 2 - handleSize / 2}`);
+      rightH.setAttribute('width', `${handleSize}`);
+      rightH.setAttribute('height', `${handleSize}`);
+      rightH.setAttribute('stroke-width', `${handleStroke}`);
+      rightH.style.display = showStretchX ? 'block' : 'none';
+      
+      // Top handle (center of top edge)
+      const topH = this._stretchHandles.top;
+      topH.setAttribute('x', `${finalWidth / 2 - handleSize / 2}`);
+      topH.setAttribute('y', `${-handleSize / 2}`);
+      topH.setAttribute('width', `${handleSize}`);
+      topH.setAttribute('height', `${handleSize}`);
+      topH.setAttribute('stroke-width', `${handleStroke}`);
+      topH.style.display = showStretchY ? 'block' : 'none';
+      
+      // Bottom handle (center of bottom edge)
+      const bottomH = this._stretchHandles.bottom;
+      bottomH.setAttribute('x', `${finalWidth / 2 - handleSize / 2}`);
+      bottomH.setAttribute('y', `${finalHeight - handleSize / 2}`);
+      bottomH.setAttribute('width', `${handleSize}`);
+      bottomH.setAttribute('height', `${handleSize}`);
+      bottomH.setAttribute('stroke-width', `${handleStroke}`);
+      bottomH.style.display = showStretchY ? 'block' : 'none';
     }
     
     this._selectionOverlay.style.display = 'block';
@@ -3055,6 +3135,75 @@ class WhiteboardLayer {
   }
 
   /**
+   * OPTIMIZATION: Update DOM directly during stretch resize (no Registry update)
+   * Used to prevent jitter from multiple Registry updates during stretch operation
+   * @param {string} objectId - Object ID
+   * @param {number} newX - New X position
+   * @param {number} newWidth - New width (or textWidth for texts)
+   * @param {number} newY - New Y position (optional)
+   * @param {number} newHeight - New height (optional)
+   * @param {boolean} isText - Whether object is text
+   */
+  _updateDOMDuringStretch(objectId, newX, newWidth, newY, newHeight, isText, objScale = 1) {
+    const container = document.getElementById(objectId);
+    if (!container) return;
+
+    // Update position - use subpixel values for smooth animation
+    if (newX !== undefined) container.style.left = `${newX}px`;
+    if (newY !== undefined) container.style.top = `${newY}px`;
+    
+    // Update size (base dimensions, before scale)
+    if (newWidth !== undefined) container.style.width = `${newWidth}px`;
+    if (newHeight !== undefined) container.style.height = `${newHeight}px`;
+    
+    // For texts, also update the text element width
+    if (isText && newWidth !== undefined) {
+      const textElement = container.querySelector('.wbe-canvas-text');
+      if (textElement) {
+        textElement.style.width = `${newWidth}px`;
+      }
+    }
+    
+    // For shapes, update SVG element
+    if (!isText && (newWidth !== undefined || newHeight !== undefined)) {
+      const svgElement = container.querySelector('svg');
+      if (svgElement) {
+        // Get current dimensions for viewBox update
+        const currentWidth = newWidth !== undefined ? newWidth : parseFloat(svgElement.getAttribute('width')) || parseFloat(container.style.width) || 100;
+        const currentHeight = newHeight !== undefined ? newHeight : parseFloat(svgElement.getAttribute('height')) || parseFloat(container.style.height) || 100;
+        
+        // Update SVG viewBox (CRITICAL: must match width/height for proper scaling)
+        svgElement.setAttribute('viewBox', `0 0 ${currentWidth} ${currentHeight}`);
+        
+        if (newWidth !== undefined) svgElement.setAttribute('width', newWidth);
+        if (newHeight !== undefined) svgElement.setAttribute('height', newHeight);
+        
+        // Update rect/ellipse inside SVG
+        const rect = svgElement.querySelector('rect');
+        if (rect) {
+          if (newWidth !== undefined) rect.setAttribute('width', newWidth);
+          if (newHeight !== undefined) rect.setAttribute('height', newHeight);
+        }
+        const ellipse = svgElement.querySelector('ellipse');
+        if (ellipse) {
+          if (newWidth !== undefined) {
+            ellipse.setAttribute('cx', newWidth / 2);
+            ellipse.setAttribute('rx', newWidth / 2);
+          }
+          if (newHeight !== undefined) {
+            ellipse.setAttribute('cy', newHeight / 2);
+            ellipse.setAttribute('ry', newHeight / 2);
+          }
+        }
+      }
+    }
+    
+    // Update selection overlay - use standard method which reads from DOM
+    // Since we just updated container.style.width/height/left/top, updateSelectionOverlay will use correct values
+    this.updateSelectionOverlay();
+  }
+
+  /**
    * OPTIMIZATION: Update DOM directly during crop drag (no Registry update)
    * Used to prevent 60+ Registry updates per second during crop operation
    * @param {string} imageId - Image ID
@@ -3402,6 +3551,7 @@ class WhiteboardLayer {
     const canUpdateStyles = this._interactionManager?.canUpdateStyles(id) ?? true;
     const isDragging = this._interactionManager?.isDragging(id) || false;
     const isScaleResizing = this._interactionManager?.scaleResizeState?.id === id;
+    const isStretchResizing = this._interactionManager?.stretchResizeState?.id === id;
 
     // CRITICAL: During drag, skip DOM update - it's already updated directly in _updateDrag
     // Registry may have stale values during drag, but DOM is current
@@ -3420,6 +3570,16 @@ class WhiteboardLayer {
       // OPTIMIZATION: DOM already updated directly in _updateScaleResize()
       // Skip DOM update here to prevent redundant operations
       // Registry will be synced with DOM in _endScaleResize()
+      return;
+    }
+
+    // CRITICAL: During stretch resize, skip DOM update - it's already updated directly in _updateStretchResize
+    // Registry may have stale values during resize, but DOM is current
+    // Registry will be synced in _endStretchResize() with final width/height
+    if (isStretchResizing) {
+      // OPTIMIZATION: DOM already updated directly in _updateStretchResize()
+      // Skip DOM update here to prevent redundant operations
+      // Registry will be synced with DOM in _endStretchResize()
       return;
     }
 
@@ -4955,6 +5115,7 @@ class WhiteboardText extends WhiteboardObject {
             background: transparent;
             color: ${textColorRgba || this.color};
             padding: 0;
+            margin: 0 !important;
             font-size: ${this.fontSize}px;
             font-family: ${this.fontFamily};
             font-weight: ${this.fontWeight};
@@ -5188,7 +5349,9 @@ class WhiteboardText extends WhiteboardObject {
     return {
       scalable: true,
       draggable: true,
-      freezable: false
+      freezable: false,
+      stretchX: true,  // Text can be stretched horizontally (width)
+      stretchY: false  // Text height is auto-calculated
     };
   }
 
@@ -11777,7 +11940,8 @@ class InteractionManager {
     this.editingId = null; // ID of the text being edited (single source of truth)
     this.dragState = null; // { id, startX, startY, objStartX, objStartY }
     this.panState = null; // { startX, startY, pivotX, pivotY }
-    this.widthResizeState = null; // { id, startX, startWidth }
+    this.widthResizeState = null; // { id, startX, startWidth } - DEPRECATED, use stretchResizeState
+    this.stretchResizeState = null; // { id, direction, startX, startY, startWidth, startHeight, startObjX, startObjY }
     this.scaleResizeState = null; // { id, startX, startScale, currentScale }
     this.unfreezeHoldState = null; // { iconElement, containerId, imageId, holdTimer, startTime }
 
@@ -12004,20 +12168,20 @@ class InteractionManager {
     this.dragState = null;
     this.panState = null;
     this.widthResizeState = null;
-    this.scaleResizeState = null;
+    this.stretchResizeState = null;
     this.scaleResizeState = null;
   }
 
   /**
    * Get all object states in one place
-   * DRY: DRY: single source of truth for all states
+   * DRY: single source of truth for all states
    */
   getObjectState(id) {
     return {
       isDragging: this.dragState?.id === id,
       isEditing: this.editingId === id,
       isSelected: this.selectedId === id,
-      isResizing: this.widthResizeState?.id === id || this.scaleResizeState?.id === id,
+      isResizing: this.widthResizeState?.id === id || this.stretchResizeState?.id === id || this.scaleResizeState?.id === id,
       isPanning: this.panState !== null
     };
   }
@@ -12408,17 +12572,26 @@ class InteractionManager {
     if (this.scaleResizeState) {
       e.preventDefault();
       e.stopPropagation();
-      e.stopImmediatePropagation();
+      // NOTE: Don't use stopImmediatePropagation - it blocks AlignmentGuides
       this._updateScaleResize(e);
       return;
     }
 
-    // Handle Width Resize (priority over drag)
+    // Handle Width Resize (legacy - priority over drag)
     if (this.widthResizeState) {
       e.preventDefault();
       e.stopPropagation();
-      e.stopImmediatePropagation();
+      // NOTE: Don't use stopImmediatePropagation - it blocks AlignmentGuides
       this._updateWidthResize(e);
+      return;
+    }
+    
+    // Handle Stretch Resize (unified width/height resize)
+    if (this.stretchResizeState) {
+      e.preventDefault();
+      e.stopPropagation();
+      // NOTE: Don't use stopImmediatePropagation - it blocks AlignmentGuides
+      this._updateStretchResize(e);
       return;
     }
 
@@ -12435,7 +12608,7 @@ class InteractionManager {
     if (!this.layer) return;
 
     // Don't change cursor if resize operations are active
-    if (this.widthResizeState || this.scaleResizeState) {
+    if (this.widthResizeState || this.stretchResizeState || this.scaleResizeState) {
       return;
     }
 
@@ -12534,6 +12707,9 @@ class InteractionManager {
     }
     if (this.widthResizeState) {
       this._endWidthResize();
+    }
+    if (this.stretchResizeState) {
+      this._endStretchResize();
     }
     if (this.dragState) {
       this._endDrag();
@@ -13096,6 +13272,7 @@ class InteractionManager {
         objectId: classified.object.id,
         objectType: classified.object.type,
         handleType: classified.handleType,
+        stretchDirection: classified.stretchDirection,
         method: 'elementFromPoint-handle'
       };
       console.log('[HitTest Debug]', debugInfo);
@@ -13104,6 +13281,7 @@ class InteractionManager {
         object: classified.object,
         element: classified.element,
         handleType: classified.handleType,
+        stretchDirection: classified.stretchDirection, // For stretch handles
         handleElement: classified.handleElement
       };
     }
@@ -13244,15 +13422,31 @@ class InteractionManager {
       };
     }
     
+    // Check for stretch handles (SVG overlay squares for width/height resize)
+    // Note: For SVG elements, check classList directly since closest() may not work reliably
+    const stretchHandle = element.classList?.contains('wbe-stretch-handle') ? element : element.closest?.('.wbe-stretch-handle');
+    if (stretchHandle) {
+      const direction = stretchHandle.getAttribute('data-stretch-direction');
+      return {
+        type: 'stretch',
+        handleType: 'stretch',
+        stretchDirection: direction, // 'left', 'right', 'top', 'bottom'
+        handleElement: stretchHandle,
+        isSvgOverlay: true
+      };
+    }
+    
     // Check for scale handles (SVG overlay or DOM handles)
-    const scaleHandle = element.closest('.wbe-image-resize-handle') ||
-                        element.closest('.wbe-selection-overlay-handle');
+    // IMPORTANT: Check after stretch handles since stretch handles also have wbe-selection-overlay-handle class
+    // Note: For SVG elements, check classList directly since closest() may not work reliably
+    const scaleHandle = element.classList?.contains('wbe-scale-handle') ? element : 
+                        (element.closest?.('.wbe-scale-handle') || element.closest?.('.wbe-image-resize-handle'));
     if (scaleHandle) {
       return {
         type: 'scale',
         handleType: 'scale',
         handleElement: scaleHandle,
-        isSvgOverlay: scaleHandle.classList.contains('wbe-selection-overlay-handle')
+        isSvgOverlay: scaleHandle.classList?.contains('wbe-scale-handle')
       };
     }
     
@@ -13320,6 +13514,24 @@ class InteractionManager {
             return {
               type: 'handle',
               handleType: 'scale',
+              object: obj,
+              element: container
+            };
+          }
+        }
+      }
+      
+      // For stretch handles (width/height resize)
+      if (handleInfo.type === 'stretch') {
+        const selectedId = this.layer?._selectionOverlaySelectedId;
+        if (selectedId) {
+          const obj = this.registry.get(selectedId);
+          if (obj) {
+            const container = this.layer?.getObjectContainer(selectedId);
+            return {
+              type: 'handle',
+              handleType: 'stretch',
+              stretchDirection: handleInfo.stretchDirection,
               object: obj,
               element: container
             };
@@ -13731,8 +13943,8 @@ class InteractionManager {
       canvasZoom
     } = this.widthResizeState;
     if (!this.layer) return;
-    const textElement = this.layer.getTextElement(id);
-    if (!textElement) return;
+    const obj = this.registry.get(id);
+    if (!obj) return;
 
     // Keep cursor as ew-resize during resize (on board to override any other cursor logic)
     this.layer.applyBoardCursor('ew-resize');
@@ -13740,13 +13952,22 @@ class InteractionManager {
     const deltaX = (e.clientX - startX) / canvasZoom;
     const newWidth = Math.max(50, startWidth + deltaX);
 
-    // Update Registry (Single Source of Truth) - Layer will update DOM automatically
-    this.registry.update(id, {
-      textWidth: newWidth
-    }, 'local');
-
-    // Update selection overlay position during resize
-    this.layer?.updateSelectionOverlay();
+    // OPTIMIZATION: Update DOM directly during width resize (no Registry update)
+    // This prevents jitter from multiple Registry updates and conflicts with _updateObjectElement
+    // Registry will be updated once in _endWidthResize with final value
+    const objScale = obj.scale ?? 1;
+    if (this.layer) {
+      this.layer._updateDOMDuringStretch(
+        id,
+        undefined, // newX - not changing position during width resize
+        newWidth,
+        undefined, // newY - not changing position during width resize
+        undefined, // newHeight - not changing height
+        true, // isText - width resize is only for texts
+        objScale
+      );
+      // NOTE: Overlay is updated directly in _updateDOMDuringStretch, no need to call updateSelectionOverlay
+    }
 
     // Store in widthResizeState for final update
     this.widthResizeState.currentWidth = newWidth;
@@ -13791,6 +14012,245 @@ class InteractionManager {
       }
     }
   }
+  // ========== STRETCH RESIZE (width/height) ==========
+  
+  /**
+   * Start stretch resize operation
+   * @param {string} id - Object ID
+   * @param {string} direction - 'left', 'right', 'top', 'bottom'
+   * @param {MouseEvent} e - Mouse event
+   */
+  _startStretchResize(id, direction, e) {
+    const obj = this.registry.get(id);
+    if (!obj) return;
+    
+    const caps = obj.getCapabilities?.() || {};
+    const isHorizontal = direction === 'left' || direction === 'right';
+    const isVertical = direction === 'top' || direction === 'bottom';
+    
+    if (isHorizontal && !caps.stretchX) return;
+    if (isVertical && !caps.stretchY) return;
+    
+    // Frozen objects cannot be resized
+    if (obj.isFrozen?.()) return;
+    
+    // Hide panels during resize
+    this._hideAllPanels();
+    
+    // Disable Foundry mass-select controls
+    FoundryAPIAdapter.disableMassSelect();
+    
+    const canvasZoom = getCanvasScale();
+    const objScale = obj.scale ?? 1;
+    
+    // Get current dimensions
+    // For texts: use textWidth (base width before scale transform)
+    // For shapes: use width/height directly
+    const container = this.layer?.getObjectContainer(id);
+    const isText = obj.type === 'text';
+    const currentWidth = isText 
+      ? (obj.textWidth ?? parseFloat(container?.style.width) ?? 100)
+      : (obj.width ?? parseFloat(container?.style.width) ?? 100);
+    const currentHeight = obj.height ?? parseFloat(container?.style.height) ?? 100;
+    
+    this.stretchResizeState = {
+      id,
+      direction,
+      startX: e.clientX,
+      startY: e.clientY,
+      startWidth: currentWidth,
+      startHeight: currentHeight,
+      startObjX: obj.x,
+      startObjY: obj.y,
+      canvasZoom,
+      objScale,  // Store object scale for delta calculation
+      isText     // Store type for update logic
+    };
+    
+    // Set cursor
+    const cursor = isHorizontal ? 'ew-resize' : 'ns-resize';
+    this.layer?.applyBoardCursor(cursor);
+  }
+  
+  /**
+   * Update stretch resize during drag
+   * @param {MouseEvent} e - Mouse event
+   */
+  _updateStretchResize(e) {
+    if (!this.stretchResizeState) return;
+    
+    const { id, direction, startX, startY, startWidth, startHeight, startObjX, startObjY, canvasZoom, objScale, isText } = this.stretchResizeState;
+    const obj = this.registry.get(id);
+    if (!obj) return;
+    
+    // Calculate delta in world coordinates
+    // Both texts and shapes use scale - divide by objScale because width/textWidth is base size
+    // Mouse delta is in visual coordinates, but base dimensions are before scale
+    let visualDeltaX = (e.clientX - startX) / canvasZoom;
+    let visualDeltaY = (e.clientY - startY) / canvasZoom;
+    
+    // Apply snap offset from AlignmentGuides (if available)
+    const snapOffset = this.stretchResizeState._snapOffset || 0;
+    if (snapOffset !== 0) {
+      if (direction === 'right' || direction === 'left') {
+        visualDeltaX += snapOffset;
+      } else {
+        visualDeltaY += snapOffset;
+      }
+    }
+    
+    const deltaX = visualDeltaX / objScale;
+    const deltaY = visualDeltaY / objScale;
+    
+    const updates = {};
+    const MIN_SIZE = 20;
+    
+    switch (direction) {
+      case 'right':
+        // Increase width (visually left edge stays fixed)
+        const newWidthRight = Math.max(MIN_SIZE, startWidth + deltaX);
+        if (isText) {
+          updates.textWidth = newWidthRight;
+          // CRITICAL: Text uses transform-origin: center with scale
+          // Formula: xCompensation = deltaCenter * (scale - 1)
+          const deltaCenterRight = (newWidthRight - startWidth) / 2;
+          updates.x = startObjX + deltaCenterRight * (objScale - 1);
+        } else {
+          // Shapes also use transform-origin: center
+          updates.width = newWidthRight;
+          const deltaCenterRightShape = (newWidthRight - startWidth) / 2;
+          updates.x = startObjX + deltaCenterRightShape * (objScale - 1);
+        }
+        break;
+        
+      case 'left':
+        // Decrease width from left (visually right edge stays fixed)
+        const newWidthLeft = Math.max(MIN_SIZE, startWidth - deltaX);
+        if (isText) {
+          updates.textWidth = newWidthLeft;
+          const deltaCenterLeft = (newWidthLeft - startWidth) / 2;
+          const centerCompensation = deltaCenterLeft * (objScale - 1);
+          const visualDeltaX = (e.clientX - startX) / canvasZoom;
+          updates.x = startObjX + centerCompensation + visualDeltaX;
+        } else {
+          // Shapes: same compensation + visual delta
+          updates.width = newWidthLeft;
+          const deltaCenterLeftShape = (newWidthLeft - startWidth) / 2;
+          const centerCompShape = deltaCenterLeftShape * (objScale - 1);
+          const visualDeltaXShape = (e.clientX - startX) / canvasZoom;
+          updates.x = startObjX + centerCompShape + visualDeltaXShape;
+        }
+        break;
+        
+      case 'bottom':
+        // Increase height (visually top edge stays fixed)
+        const newHeightBottom = Math.max(MIN_SIZE, startHeight + deltaY);
+        updates.height = newHeightBottom;
+        // Shapes use transform-origin: center - compensate Y
+        const deltaCenterBottom = (newHeightBottom - startHeight) / 2;
+        updates.y = startObjY + deltaCenterBottom * (objScale - 1);
+        break;
+        
+      case 'top':
+        // Decrease height from top (visually bottom edge stays fixed)
+        const newHeightTop = Math.max(MIN_SIZE, startHeight - deltaY);
+        updates.height = newHeightTop;
+        const deltaCenterTop = (newHeightTop - startHeight) / 2;
+        const centerCompTop = deltaCenterTop * (objScale - 1);
+        const visualDeltaYTop = (e.clientY - startY) / canvasZoom;
+        updates.y = startObjY + centerCompTop + visualDeltaYTop;
+        break;
+    }
+    
+    // OPTIMIZATION: Update DOM directly during stretch (no Registry update)
+    // This prevents jitter from multiple Registry updates
+    // Registry will be updated once in _endStretchResize with final values
+    const effectiveWidth = isText ? updates.textWidth : updates.width;
+    const effectiveHeight = updates.height;
+    
+    if (this.layer) {
+      this.layer._updateDOMDuringStretch(
+        id,
+        updates.x,
+        effectiveWidth,
+        updates.y,
+        effectiveHeight,
+        isText,
+        objScale  // Pass scale for overlay calculation
+      );
+      // NOTE: Overlay is updated directly in _updateDOMDuringStretch, no need to call updateSelectionOverlay
+    }
+    
+    // Store current values for final update
+    this.stretchResizeState.currentWidth = effectiveWidth ?? startWidth;
+    this.stretchResizeState.currentHeight = effectiveHeight ?? startHeight;
+    this.stretchResizeState.currentX = updates.x ?? startObjX;
+    this.stretchResizeState.currentY = updates.y ?? startObjY;
+  }
+  
+  /**
+   * End stretch resize operation
+   */
+  _endStretchResize() {
+    if (!this.stretchResizeState) return;
+    
+    const { id, currentWidth, currentHeight, currentX, currentY } = this.stretchResizeState;
+    
+    // Clear state BEFORE updating Registry
+    this.stretchResizeState = null;
+    
+    // Enable Foundry mass-select controls
+    FoundryAPIAdapter.enableMassSelect();
+    
+    // Final update to Registry
+    const obj = this.registry.get(id);
+    const isText = obj?.type === 'text';
+    
+    const updates = {};
+    // For texts: use textWidth, not width
+    if (currentWidth !== undefined) {
+      if (isText) {
+        updates.textWidth = currentWidth;
+      } else {
+        updates.width = currentWidth;
+      }
+    }
+    if (currentHeight !== undefined) updates.height = currentHeight;
+    if (currentX !== undefined) updates.x = currentX;
+    if (currentY !== undefined) updates.y = currentY;
+    
+    if (Object.keys(updates).length > 0) {
+      this.registry.update(id, updates, 'local');
+    }
+    
+    // Update selection overlay with final dimensions
+    this.layer?.updateSelectionOverlay();
+    
+    // Reset cursor
+    this.layer?.applyBoardCursor('');
+    
+    // Show panel if object is still selected
+    if (this.selectedId === id) {
+      const selectedObj = this.registry.get(id);
+      if (selectedObj) {
+        requestAnimationFrame(() => {
+          if (this.selectedId === id) {
+            this._showPanelForObject(selectedObj);
+          }
+        });
+      }
+    }
+  }
+  
+  /**
+   * Check if object is being stretch-resized
+   * @param {string} id - Object ID
+   * @returns {boolean}
+   */
+  isStretching(id) {
+    return this.stretchResizeState?.id === id;
+  }
+
   _startScaleResize(id, e) {
     const obj = this.registry.get(id);
     // DRY: unified scale handling for all objects (built-in + custom types)
@@ -14088,11 +14548,91 @@ class InteractionManager {
    */
   _createTextAt(screenX, screenY, autoEdit = false) {
     // Use last text style for new text objects
+    // Scale inversely to canvas zoom so text appears same size on screen
+    // At zoom out (scale < 1): enlarge text so it's visible
+    // At zoom in (scale >= 1): keep scale=1, don't shrink text
+    const canvasScale = canvas?.stage?.scale?.x || 1;
+    const objectScale = Math.max(1, 1 / canvasScale);
+    
     return this._createObjectAt('text', screenX, screenY, {
       text: "",
       autoEdit,
-      ...this.lastTextStyle
+      ...this.lastTextStyle,
+      scale: objectScale  // Must be after lastTextStyle to override any saved scale
     });
+  }
+
+  /**
+   * Create text at screen center (for toolbar button)
+   * Creates text with placeholder, selects it, deselects everything else
+   */
+  _createTextAtScreenCenter() {
+    // Deselect current selection
+    if (this.selectedId) {
+      this.registry.update(this.selectedId, { selected: false }, 'local');
+      this.selectedId = null;
+    }
+    this.massSelection?.clear();
+    
+    // Screen center (same positioning as fate-card)
+    const centerX = window.innerWidth / 2;
+    const centerY = window.innerHeight / 2;
+    
+    // Scale inversely to canvas zoom
+    const canvasScale = canvas?.stage?.scale?.x || 1;
+    const objectScale = Math.max(1, 1 / canvasScale);
+    
+    // Create text with placeholder
+    const obj = this._createObjectAt('text', centerX, centerY, {
+      text: "Double click to edit",
+      ...this.lastTextStyle,
+      scale: objectScale
+    });
+    
+    // Object is already selected by _createObjectAt
+    this.layer?.updateSelectionOverlay();
+    
+    return obj;
+  }
+
+  /**
+   * Upload image via file picker (for toolbar button)
+   * Opens native file picker, user selects image, creates WBE image object
+   */
+  _uploadImageFromFilePicker() {
+    // Create hidden file input
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.style.display = 'none';
+    
+    input.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      
+      // Check if it's an image
+      if (!file.type.startsWith('image/')) {
+        ui?.notifications?.warn?.('Selected file is not an image');
+        return;
+      }
+      
+      // Deselect current selection
+      if (this.selectedId) {
+        this.registry.update(this.selectedId, { selected: false }, 'local');
+        this.selectedId = null;
+      }
+      this.massSelection?.clear();
+      
+      // Use existing paste handler (works for any image file)
+      await this._handleImagePasteFromClipboard(file);
+      
+      // Cleanup
+      input.remove();
+    });
+    
+    // Trigger file picker
+    document.body.appendChild(input);
+    input.click();
   }
 
   /**
@@ -16814,6 +17354,43 @@ class Whiteboard {
       if (savedToggleState) {
         window.WBEToolbar?.setToggleState('wbe-mass-selection', true);
       }
+      
+      // Register "Create Text" button in toolbar
+      const im = this.interaction; // Capture reference for callbacks
+      registerTool({
+        id: 'wbe-create-text',
+        title: 'Create Text',
+        icon: 'fa-solid fa-font',
+        group: 'create',
+        type: 'button',
+        onClick: () => {
+          im._createTextAtScreenCenter();
+        }
+      });
+      
+      // Register "Add Image" menu in toolbar
+      registerTool({
+        id: 'wbe-add-image',
+        title: 'Add Image',
+        icon: 'fa-solid fa-image',
+        group: 'create',
+        type: 'menu',
+        submenu: [
+          {
+            type: 'info',
+            icon: 'fa-solid fa-circle-info',
+            text: 'You can paste images with Ctrl+V'
+          },
+          {
+            type: 'button',
+            icon: 'fa-solid fa-folder-open',
+            text: 'Open File Picker',
+            onClick: () => {
+              im._uploadImageFromFilePicker();
+            }
+          }
+        ]
+      });
       
       // LEGACY: Keep old injector for backwards compatibility (can be removed later)
       // MassSelectionToolInjector.register(this.interaction.massSelection);
