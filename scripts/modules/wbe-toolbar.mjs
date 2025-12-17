@@ -121,6 +121,15 @@ const TOOLBAR_STYLES = `
   border-color: rgba(76, 175, 80, 0.7);
 }
 
+/* Help button - slightly golden/yellow tint */
+#wbe-toolbar .wbe-tool-btn[data-tool-id="wbe-help"] {
+  color: rgba(255, 215, 100, 0.9);
+}
+
+#wbe-toolbar .wbe-tool-btn[data-tool-id="wbe-help"]:hover {
+  color: #ffd700;
+}
+
 #wbe-toolbar .wbe-tool-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -551,7 +560,7 @@ function deactivateTool(toolId) {
 }
 
 // Group order for consistent toolbar layout
-const GROUP_ORDER = ['selection', 'create', 'shapes', 'objects', 'default'];
+const GROUP_ORDER = ['help', 'selection', 'create', 'shapes', 'objects', 'default'];
 
 /**
  * Перерендерить тулбар

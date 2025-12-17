@@ -57,6 +57,30 @@ export const PanelImmunityHandler = {
       return false;
     }
     
+    // Check Foundry UI elements (application windows, dialogs, etc.)
+    // Note: Foundry uses both .app AND .application classes for different windows
+    if (target.closest('.app') || 
+        target.closest('.application') ||  // form-based windows like SceneConfig
+        target.closest('.sheet') ||         // character sheets, item sheets, etc.
+        target.closest('.window-app') || 
+        target.closest('.dialog') ||
+        target.closest('.filepicker') ||
+        target.closest('.notification') ||
+        target.closest('#context-menu') ||
+        target.closest('.context-menu') ||
+        target.closest('#ui-left') ||
+        target.closest('#ui-right') ||
+        target.closest('#ui-top') ||
+        target.closest('#ui-bottom')) {
+      return true;
+    }
+    
+    // Check WBE modals
+    if (target.closest('#wbe-help-modal') ||
+        target.closest('.wbe-modal')) {
+      return true;
+    }
+    
     // Check registered UI selectors (extensible - modules register via Whiteboard.registerUISelector)
     const uiSelectors = window.Whiteboard?.getUISelectors?.();
     if (uiSelectors) {

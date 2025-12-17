@@ -156,6 +156,12 @@ MIT
 
 ## Changelog
 
+### v0.8.2
+
+- **Help button** — added `i` icon in toolbar with tips modal (hotkeys, browser security info)
+- **Bug fixes** — fixed drag sensitivity, Foundry UI click-through, line-height live update
+- **Changes** — Fate Cards prototype disabled by default
+
 ### v0.8a.1
 
 **New Features:**

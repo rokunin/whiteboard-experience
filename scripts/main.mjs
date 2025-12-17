@@ -49,6 +49,8 @@ Hooks.once("ready", async () => {
     window.Whiteboard.registerUISelector('.wbe-rotation-subpanel');
     // Mass selection panel (NOT bounding box - that needs to handle drag)
     window.Whiteboard.registerUISelector('.wbe-mass-selection-panel');
+    // Help modal
+    window.Whiteboard.registerUISelector('#wbe-help-modal');
   }
   console.log(`whiteboard-experience | Initialized`);
 });
@@ -506,7 +508,7 @@ function registerModuleSettings() {
     scope: 'world',
     config: true,
     type: Boolean,
-    default: true,
+    default: false,
     requiresReload: true
   });
 
@@ -765,6 +767,269 @@ function sanitizeHtml(html) {
 
   cleanElement(temp);
   return temp.innerHTML;
+}
+
+// ==========================================
+// WBE Help Modal
+// ==========================================
+
+/**
+ * Show WBE Help Modal with tips and hotkeys
+ */
+function showWBEHelpModal() {
+  // Remove existing modal if any
+  const existingModal = document.getElementById('wbe-help-modal');
+  if (existingModal) {
+    existingModal.remove();
+    return; // Toggle behavior - close if already open
+  }
+
+  // Create modal overlay
+  const overlay = document.createElement('div');
+  overlay.id = 'wbe-help-modal';
+  overlay.innerHTML = `
+    <style>
+      #wbe-help-modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10000;
+        animation: wbe-fade-in 0.2s ease;
+      }
+      @keyframes wbe-fade-in {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      .wbe-help-content {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        border: 1px solid rgba(100, 149, 237, 0.3);
+        border-radius: 12px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.05);
+        max-width: 600px;
+        max-height: 80vh;
+        overflow-y: auto;
+        padding: 24px;
+        color: #e0e0e0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        animation: wbe-scale-in 0.2s ease;
+      }
+      @keyframes wbe-scale-in {
+        from { transform: scale(0.95); opacity: 0; }
+        to { transform: scale(1); opacity: 1; }
+      }
+      .wbe-help-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 20px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid rgba(100, 149, 237, 0.2);
+      }
+      .wbe-help-title {
+        font-size: 20px;
+        font-weight: 600;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .wbe-help-title i {
+        color: #6495ed;
+      }
+      .wbe-help-close {
+        background: rgba(255, 100, 100, 0.2);
+        border: 1px solid rgba(255, 100, 100, 0.3);
+        border-radius: 6px;
+        color: #ff6b6b;
+        width: 28px;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      .wbe-help-close:hover {
+        background: rgba(255, 100, 100, 0.4);
+        color: #fff;
+      }
+      .wbe-help-section {
+        margin-bottom: 18px;
+      }
+      .wbe-help-section-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #6495ed;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .wbe-help-grid {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 6px 16px;
+        font-size: 13px;
+      }
+      .wbe-help-key {
+        background: rgba(100, 149, 237, 0.15);
+        border: 1px solid rgba(100, 149, 237, 0.3);
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-family: 'SF Mono', Consolas, monospace;
+        font-size: 11px;
+        color: #87ceeb;
+        text-align: center;
+        white-space: nowrap;
+      }
+      .wbe-help-desc {
+        color: #b0b0b0;
+        line-height: 1.6;
+      }
+      .wbe-help-tip {
+        background: rgba(76, 175, 80, 0.1);
+        border-left: 3px solid #4caf50;
+        padding: 10px 12px;
+        margin-top: 8px;
+        border-radius: 0 6px 6px 0;
+        font-size: 12px;
+        color: #a5d6a7;
+      }
+      .wbe-help-tip i {
+        color: #4caf50;
+        margin-right: 6px;
+      }
+    </style>
+    <div class="wbe-help-content">
+      <div class="wbe-help-header">
+        <div class="wbe-help-title">
+          <i class="fa-solid fa-circle-question"></i>
+          Whiteboard Experience - Quick Guide
+        </div>
+        <button class="wbe-help-close" title="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      
+      <div class="wbe-help-tip" style="margin-bottom: 16px; background: rgba(255, 193, 7, 0.1); border-left-color: #ffc107;">
+        <i class="fa-solid fa-shield-halved" style="color: #ffc107;"></i>
+        <strong>Browser Security:</strong> Copying images from Google, Pinterest, etc. is often blocked by browser security. 
+        Use <strong>Print Screen</strong> (or Win+Shift+S) to capture any image, then paste it here with Ctrl+V. Or copy images from your images folder with Ctrl+C and paste it here with Ctrl+V.
+      </div>
+      
+      <div class="wbe-help-section">
+        <div class="wbe-help-section-title">
+          <i class="fa-solid fa-plus"></i> Create, Copy & Delete
+        </div>
+        <div class="wbe-help-grid">
+          <span class="wbe-help-key">Ctrl+V</span>
+          <span class="wbe-help-desc">Paste image from clipboard</span>
+          <span class="wbe-help-key">T</span>
+          <span class="wbe-help-desc">Create text (click to place, right-click to exit)</span>
+          <span class="wbe-help-key">S</span>
+          <span class="wbe-help-desc">Draw rectangle (square)</span>
+          <span class="wbe-help-key">C</span>
+          <span class="wbe-help-desc">Draw circle</span>
+          <span class="wbe-help-key">F</span>
+          <span class="wbe-help-desc">Freehand drawing</span>
+          <span class="wbe-help-key">Ctrl+C</span>
+          <span class="wbe-help-desc">Copy selected object (text, image, shape)</span>
+          <span class="wbe-help-key">Ctrl+V</span>
+          <span class="wbe-help-desc">Paste object at cursor</span>
+          <span class="wbe-help-key">Delete</span>
+          <span class="wbe-help-desc">Delete selected objects</span>
+        </div>
+      </div>
+      
+      <div class="wbe-help-section">
+        <div class="wbe-help-section-title">
+          <i class="fa-solid fa-hand-pointer"></i> Selection & Editing
+        </div>
+        <div class="wbe-help-grid">
+          <span class="wbe-help-key">Click</span>
+          <span class="wbe-help-desc">Select object</span>
+          <span class="wbe-help-key">Double-click</span>
+          <span class="wbe-help-desc">Edit text / Edit shape text</span>
+          <span class="wbe-help-key">Shift+Enter</span>
+          <span class="wbe-help-desc">New line (while editing text)</span>
+          <span class="wbe-help-key">Shift+Click</span>
+          <span class="wbe-help-desc">Add/remove from selection</span>
+          <span class="wbe-help-key">Shift+Drag</span>
+          <span class="wbe-help-desc">Box select multiple objects</span>
+          <span class="wbe-help-key">Drag corner</span>
+          <span class="wbe-help-desc">Resize shapes and text</span>
+        </div>
+      </div>
+      
+      <div class="wbe-help-section">
+        <div class="wbe-help-section-title">
+          <i class="fa-solid fa-layer-group"></i> Z-Order & Organization
+        </div>
+        <div class="wbe-help-grid">
+          <span class="wbe-help-key">PageUp</span>
+          <span class="wbe-help-desc">Bring forward</span>
+          <span class="wbe-help-key">PageDown</span>
+          <span class="wbe-help-desc">Send backward</span>
+          <span class="wbe-help-key">Shift+PageUp</span>
+          <span class="wbe-help-desc">Bring to front</span>
+          <span class="wbe-help-key">Shift+PageDown</span>
+          <span class="wbe-help-desc">Send to back</span>
+          <span class="wbe-help-key"><i class="fa-solid fa-lock" style="font-size:10px"></i> Freeze</span>
+          <span class="wbe-help-desc">Lock object from editing (in style panel)</span>
+          <span class="wbe-help-key">Long click <i class="fa-solid fa-lock" style="font-size:10px"></i></span>
+          <span class="wbe-help-desc">Unfreeze object - zoom in and hold the tiny lock icon ~1 sec)</span>
+        </div>
+      </div>
+      
+      <div class="wbe-help-section">
+        <div class="wbe-help-section-title">
+          <i class="fa-solid fa-arrows-up-down-left-right"></i> Navigation
+        </div>
+        <div class="wbe-help-grid">
+          <span class="wbe-help-key">Right-drag</span>
+          <span class="wbe-help-desc">Pan canvas</span>
+          <span class="wbe-help-key">Scroll</span>
+          <span class="wbe-help-desc">Zoom in/out</span>
+        </div>
+      </div>
+      
+      <div class="wbe-help-tip">
+        <i class="fa-solid fa-lightbulb"></i>
+        <strong>Tip:</strong> Alignment guides appear automatically when dragging or resizing objects near other objects!
+      </div>
+    </div>
+  `;
+
+  // Close on overlay click
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      overlay.remove();
+    }
+  });
+
+  // Close button
+  overlay.querySelector('.wbe-help-close').addEventListener('click', () => {
+    overlay.remove();
+  });
+
+  // Close on Escape
+  const handleEscape = (e) => {
+    if (e.key === 'Escape') {
+      overlay.remove();
+      document.removeEventListener('keydown', handleEscape);
+    }
+  };
+  document.addEventListener('keydown', handleEscape);
+
+  document.body.appendChild(overlay);
 }
 
 // ==========================================
@@ -3685,7 +3950,7 @@ class WhiteboardLayer {
       // Elegant: use field-to-style mapping instead of many ifs
       
       // Determine which fields correspond to text styles
-      const textStyleFields = new Set(['color', 'colorOpacity', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textAlign', 'textWidth', 'backgroundColor', 'backgroundColorOpacity', 'borderColor', 'borderOpacity', 'borderWidth']);
+      const textStyleFields = new Set(['color', 'colorOpacity', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textAlign', 'textWidth', 'lineHeight', 'backgroundColor', 'backgroundColorOpacity', 'borderColor', 'borderOpacity', 'borderWidth']);
       
       // Check if changes contain at least one style field (or changes = null for full update)
       const hasStyleChanges = !changes || Object.keys(changes).some(key => textStyleFields.has(key));
@@ -5187,6 +5452,38 @@ class WhiteboardText extends WhiteboardObject {
         }
       }
     });
+
+    // CRITICAL: Handle Enter key to prevent event bubbling to global handlers
+    // This prevents "Uncaught (in promise) undefined" errors from other modules
+    // (e.g., useKeyboardSelection.ts in FoundryVTT quick search)
+    textSpan.addEventListener('keydown', (e) => {
+      if (textSpan.contentEditable === "true") {
+        // Enter without Shift: finish editing
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation(); // CRITICAL: Prevent bubbling to global handlers
+          e.stopImmediatePropagation(); // CRITICAL: Prevent other handlers on same element
+          
+          // Blur the element to trigger blur handler (which finishes editing)
+          // Wrap in try-catch to prevent "Uncaught (in promise) undefined" errors
+          try {
+            textSpan.blur();
+          } catch (error) {
+            console.error('[WhiteboardText] Error during blur:', error);
+            // Blur handler should still fire, but if it doesn't, the error is logged
+            // The blur handler will handle finishing editing
+          }
+          return false;
+        }
+        // Shift+Enter: new line (let browser handle it, but prevent bubbling)
+        if (e.key === 'Enter' && e.shiftKey) {
+          e.stopPropagation(); // Prevent bubbling to global handlers
+          e.stopImmediatePropagation(); // CRITICAL: Prevent other handlers on same element
+          // Don't preventDefault - let browser insert newline
+          return true;
+        }
+      }
+    }, true); // Use capture phase to handle before other handlers
 
     // Blur handler to finish editing
     // CRITICAL: Don't finish editing if blur was caused by clicking on panel
@@ -11926,7 +12223,7 @@ class InteractionManager {
   static MAX_SCALE = 20.0; // Maximum scale
 
   // Constants for drag operations
-  static DRAG_SENSITIVITY = 1.2; // Sensitivity for single object drag (1.0 = 1:1 movement)
+  static DRAG_SENSITIVITY = 1.0; // Sensitivity for single object drag (1.0 = 1:1 movement)
   static MASS_DRAG_SENSITIVITY = 1.0; // Sensitivity for mass drag (1.0 = 1:1 movement)
   static KEYBOARD_MOVE_STEP = 1; // Normal step for arrow keys (1px)
   static KEYBOARD_MOVE_STEP_LARGE = 10; // Large step with Shift held (10px)
@@ -12267,6 +12564,19 @@ class InteractionManager {
   // --- Event Handlers ---
 
   _handleKeyDown(e) {
+    // PRIORITY 0: Ignore Enter key in contentEditable elements
+    // This prevents conflicts with other Foundry modules that listen to Enter on window
+    // The textSpan handler will handle Enter itself (both regular and Shift+Enter)
+    const target = e.target;
+    const isEditable = target.isContentEditable || 
+                       target.getAttribute('contenteditable') === 'true' || 
+                       target.tagName === 'INPUT' || 
+                       target.tagName === 'TEXTAREA';
+    
+    if (isEditable && e.key === 'Enter') {
+      return; // Let the textSpan handler deal with it
+    }
+    
     // PRIORITY 1: Mass Selection keyboard shortcuts
     // Must be BEFORE single-object handling!
     if (this.massSelection) {
@@ -13369,12 +13679,33 @@ class InteractionManager {
     if (element.closest('#ui-left') || 
         element.closest('#ui-right') || 
         element.closest('#ui-top') || 
+        element.closest('#ui-bottom') || 
         element.closest('.wbe-text-styling-panel') || 
         element.closest('.wbe-image-control-panel') || 
         element.closest('.wbe-color-subpanel') || 
         element.closest('.wbe-rotation-subpanel') || 
         element.closest('.wbe-image-resize-handle') || 
         element.closest('.wbe-mass-selection-box')) {
+      return true;
+    }
+    
+    // Check for Foundry application windows and dialogs
+    // Note: Foundry uses both .app AND .application classes for different windows
+    if (element.closest('.app') || 
+        element.closest('.application') ||  // form-based windows like SceneConfig
+        element.closest('.sheet') ||         // character sheets, item sheets, etc.
+        element.closest('.window-app') || 
+        element.closest('.dialog') || 
+        element.closest('.filepicker') ||
+        element.closest('.notification') ||
+        element.closest('#context-menu') ||
+        element.closest('.context-menu')) {
+      return true;
+    }
+    
+    // Check for WBE help modal and other WBE modals
+    if (element.closest('#wbe-help-modal') ||
+        element.closest('.wbe-modal')) {
       return true;
     }
     
@@ -14867,7 +15198,7 @@ class InteractionManager {
         // Delete empty text objects (user didn't type anything)
         if (!newText || newText.trim() === '') {
           console.log(`${MODULE_ID} | Deleting empty text: ${id}`);
-          this.registry.delete(id);
+          this.registry.unregister(id, 'local');
           if (this.selectedId === id) {
             this.selectedId = null;
           }
@@ -16030,11 +16361,17 @@ class FoundryPersistenceAdapter {
     }
     try {
       // Refresh cache via updateSource - this will load the latest data from the database
-      await canvas.scene.updateSource({});
+      // CRITICAL: updateSource may reject with undefined in some browsers (Firefox on Linux)
+      // Wrap in Promise.resolve to ensure we always have a proper error object
+      const result = await Promise.resolve(canvas.scene.updateSource({}));
       console.log(`[Persistence] Refreshed flag cache for ${flagKey}`);
+      return result;
     } catch (error) {
-      console.error(`[Persistence] Failed to refreshFlagCache for ${flagKey}:`, error);
-      // // Do not throw an error - this is not critical
+      // Handle undefined errors - some browsers may reject promises with undefined
+      const errorMessage = error === undefined ? 'updateSource rejected with undefined' : error;
+      console.error(`[Persistence] Failed to refreshFlagCache for ${flagKey}:`, errorMessage);
+      // Do not throw an error - this is not critical, cache refresh failure doesn't break functionality
+      return undefined;
     }
   }
 }
@@ -16104,7 +16441,12 @@ class PersistenceController {
     }
     this._saveTimeout = setTimeout(() => {
       this._saveTimeout = null;
-      this._saveAll();
+      // CRITICAL: Handle async errors - _saveAll() is async and may reject
+      // Without this, unhandled rejections cause "Uncaught (in promise) undefined" errors
+      this._saveAll().catch(error => {
+        console.error(`[Persistence] Failed to saveAll (from _scheduleSave):`, error);
+        // Don't rethrow - saving failures are logged but don't break the app
+      });
     }, this._saveDelay);
   }
 
@@ -16273,9 +16615,19 @@ class PersistenceController {
       await Promise.all(savePromises);
 
       // Refresh cache for all types
+      // CRITICAL: Wrap refreshFlagCache calls to handle potential undefined rejections
+      // Some browsers (Firefox on Linux) may reject updateSource with undefined
       const refreshPromises = [];
       for (const flagKey of this.foundryAdapter.getStorageTypes().values()) {
-        refreshPromises.push(this.foundryAdapter.refreshFlagCache(flagKey));
+        const promise = this.foundryAdapter.refreshFlagCache(flagKey).catch(error => {
+          // refreshFlagCache already handles errors internally, but ensure we don't propagate undefined
+          if (error === undefined) {
+            console.warn(`[Persistence] refreshFlagCache rejected with undefined for ${flagKey}, continuing`);
+            return undefined;
+          }
+          throw error;
+        });
+        refreshPromises.push(promise);
       }
       await Promise.all(refreshPromises);
 
@@ -17390,6 +17742,18 @@ class Whiteboard {
             }
           }
         ]
+      });
+      
+      // Register "Help" button in toolbar (at top)
+      registerTool({
+        id: 'wbe-help',
+        title: 'Help & Tips',
+        icon: 'fa-solid fa-circle-question',
+        group: 'help', // Put at the top
+        type: 'button',
+        onClick: () => {
+          showWBEHelpModal();
+        }
       });
       
       // LEGACY: Keep old injector for backwards compatibility (can be removed later)
