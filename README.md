@@ -1,4 +1,4 @@
-[![Discord](https://img.shields.io/discord/1449774975815782575?logo=discord&label=Discord&color=5865F2)](https://discord.gg/mBM87up3bt) <br>
+[![Discord Widget](https://discord.com/api/guilds/1449774975815782575/widget.png?style=banner2)](https://discord.gg/mBM87up3bt)<br>
 ![Downloads](https://img.shields.io/github/downloads/rokunin/whiteboard-experience/total)
 
 # Whiteboard Experience, Foundry11+
