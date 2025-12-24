@@ -1,5 +1,5 @@
 [![Discord Widget](https://discord.com/api/guilds/1449774975815782575/widget.png?style=banner2)](https://discord.gg/mBM87up3bt)<br>
-![Downloads](https://img.shields.io/github/downloads/rokunin/whiteboard-experience/total)
+![Downloads](https://img.shields.io/github/downloads/rokunin/whiteboard-experience/total)<br>
 <a href='https://ko-fi.com/R6R71Q8I8O' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 # Whiteboard Experience, Foundry11+
 
