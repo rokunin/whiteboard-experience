@@ -128,12 +128,25 @@ export const EditImmunityHandler = {
       return false;
     }
     
-    return (
-      target.isContentEditable ||
-      target.getAttribute('contenteditable') === 'true' ||
-      target.tagName === 'INPUT' ||
-      target.tagName === 'TEXTAREA'
-    );
+    // Check if target itself is editable
+    if (target.isContentEditable ||
+        target.getAttribute('contenteditable') === 'true' ||
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA') {
+      return true;
+    }
+    
+    // CRITICAL: Also block clicks on text containers while editing is active
+    // This prevents gizmos from appearing when clicking near (but not on) the editable span
+    // Check if click is inside a container marked as [data-editing]
+    if (typeof target.closest === 'function') {
+      const editingContainer = target.closest('[data-editing="true"]');
+      if (editingContainer) {
+        return true;
+      }
+    }
+    
+    return false;
   },
 
   /**
@@ -188,6 +201,17 @@ export const RightClickHandler = {
     
     // If shape tool is active, right click exits shape tool
     const activeTool = window.WBEToolbar?.getActiveTool?.();
+
+    // Cancel pending connector or deactivate connector tool
+    if (activeTool === 'wbe-connector') {
+      if (window.WBE_Connectors?.pendingFrom) {
+        window.WBE_Connectors.cancelPending();
+      } else {
+        window.WBEToolbar.deactivateAllTools();
+      }
+      return true;
+    }
+
     if (activeTool?.startsWith('wbe-shape-')) {
       window.WBEToolbar.deactivateAllTools();
       return true;
@@ -603,6 +627,98 @@ export const TextModeCreateHandler = {
 };
 
 /**
+ * ConnectorAnchorHandler (priority 685)
+ *
+ * Handles clicks on connector anchor dots (to create connections)
+ * and midpoint handles (to start bend/skew drag).
+ * Only active when connector tool is enabled.
+ */
+export const ConnectorAnchorHandler = {
+  name: 'connectorAnchor',
+  priority: 1801,
+
+  canHandle(ctx) {
+    if (ctx.button !== 0) return false;
+    // Allow midpoint handle drag even when tool is disabled
+    // But anchor clicks (for creating connections) require tool to be active
+    const target = ctx.target;
+    if (!target?.classList?.contains('bezier-interactive')) return false;
+    
+    // Midpoint handle can be dragged anytime
+    if (target.dataset.connectorHandle) {
+      return true;
+    }
+    
+    // Anchor dots require connector tool to be active
+    if (window.WBEToolbar?.getActiveTool?.() !== 'wbe-connector') return false;
+    return true;
+  },
+
+  handle(ctx) {
+    const t = ctx.target;
+    // Midpoint handle: when creating a new connector, complete to this connector's "to" anchor
+    if (t.dataset.connectorHandle) {
+      if (window.WBE_Connectors?.pendingFrom) {
+        const registry = window.Whiteboard?.interaction?.registry;
+        const conn = registry?.get(t.dataset.connectorId);
+        if (conn?.to) {
+          window.WBE_Connectors.onAnchorClick(conn.to.objectId, conn.to.side);
+          ctx.consume();
+          return true;
+        }
+      }
+      window.WBE_Connectors?.startMidpointDrag(t.dataset.connectorId);
+      ctx.consume();
+      return true;
+    }
+    // Anchor dot click (create connection)
+    if (t.dataset.objId && t.dataset.side) {
+      window.WBE_Connectors?.onAnchorClick(t.dataset.objId, t.dataset.side);
+      ctx.consume();
+      return true;
+    }
+    return false;
+  }
+};
+
+/**
+ * ConnectorClickHandler (priority 680)
+ *
+ * Handles clicks on connector curves (SVG path) for selection.
+ * Only active when connector tool is enabled.
+ */
+export const ConnectorClickHandler = {
+  name: 'connectorClick',
+  priority: 1802,
+
+  canHandle(ctx) {
+    if (ctx.button !== 0) return false;
+    if (window.WBEToolbar?.getActiveTool?.() !== 'wbe-connector') return false;
+    const connectorId = ctx.target?.dataset?.connectorId;
+    if (!connectorId) return false;
+    const tagName = ctx.target?.tagName?.toLowerCase();
+    return tagName === 'path' || tagName === 'polygon';
+  },
+
+  handle(ctx) {
+    const connectorId = ctx.target.dataset.connectorId;
+    // When creating a new connector, click on path/arrow completes connection to this connector's "to" anchor
+    if (window.WBE_Connectors?.pendingFrom) {
+      const registry = window.Whiteboard?.interaction?.registry;
+      const conn = registry?.get(connectorId);
+      if (conn?.to && window.WBE_Connectors.pendingFrom.objId !== conn.to.objectId) {
+        window.WBE_Connectors.onAnchorClick(conn.to.objectId, conn.to.side);
+        ctx.consume();
+        return true;
+      }
+    }
+    window.WBE_Connectors?.selectConnector(connectorId);
+    ctx.consume();
+    return true;
+  }
+};
+
+/**
  * ShapeDrawHandler (priority 660)
  * 
  * Handles shape drawing when a shape tool is active in WBE Toolbar.
@@ -700,6 +816,8 @@ export function getMediumPriorityMouseDownHandlers() {
     MassSelectionDragHandler,
     MassSelectionClearHandler,
     ShiftClickAddHandler,
+    ConnectorAnchorHandler,
+    ConnectorClickHandler,
     ShapeDrawHandler,
     MassSelectionStartHandler,
     TextModeCreateHandler
@@ -1057,19 +1175,25 @@ export const ObjectDragHandler = {
       return false;
     }
     
-    // Check if object is locked (e.g., image in crop mode on another client)
-    if (obj.isLocked?.()) {
-      const layer = ctx.layer;
-      if (layer) {
-        const container = layer.getObjectContainer(obj.id);
-        if (container?.dataset.lockedBy && container.dataset.lockedBy !== game.user.id) {
-          return false;
-        }
-      }
+    // Authoritative lock (ANY object type): refuse drag if another user holds this object.
+    // Uses the LockManager view (single source of truth) with a DOM data-lockedBy fallback.
+    // NOTE: this must NOT be gated behind obj.isLocked() (which is image-only) — that was the
+    // bug that let non-owners drag locked text/shapes.
+    const lockManager = ctx.im?.socketController?.lockManager;
+    const lockContainer = ctx.layer?.getObjectContainer(obj.id);
+    if (lockManager?.isLockedByOther(obj.id) ||
+        (lockContainer?.dataset.lockedBy && lockContainer.dataset.lockedBy !== game.user?.id)) {
+      return false;
     }
     
     // Skip frozen objects - they allow pan/zoom through them
     if (obj.isFrozen?.()) {
+      return false;
+    }
+    
+    // Skip connectors - they are not draggable as regular objects
+    // Connector curve editing is handled by ConnectorAnchorHandler
+    if (obj.type === 'connector') {
       return false;
     }
     

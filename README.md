@@ -135,7 +135,7 @@ Click thumbnails to view full size:
 - Freeze images from the style panel
 
 ## Compatibility
-- Foundry VTT v11 - v13
+- Foundry VTT v11 to v14
 
 ## Installation
 
@@ -144,7 +144,6 @@ Click thumbnails to view full size:
 3. Enable the module in your world
 
 ## TODO
-- [ ] Undo / Redo lib
 - [ ] Vector Line Shape Tool
 - [ ] Place DOM layer under Foundry Canvas option
 
@@ -155,6 +154,32 @@ MIT
 ---
 
 ## Changelog
+
+### v0.9.0
+
+**New**
+- Undo and redo for everything on the board: Ctrl+Z and Ctrl+Shift+Z.
+- Connectors (B): curved lines between two objects. They follow the objects when you move them, and you can bend them by dragging the middle point.
+- Hide From Players: GMs can hide any object. Players don't see it and click straight through it.
+- Hold `Alt` to see through the board at 20% opacity, so you can find Foundry tokens or tiles hidden underneath it. Objects stay put while you do this.
+- Only one person can edit a text at a time. If someone else is typing in it, you get a message instead of both edits fighting.
+- Debug snapshot button on the toolbar: saves the board state to a file you can attach to a bug report.
+
+**Fixed**
+- Crop handles stay on the edges of the image after you drag them or zoom the canvas, and keep their size.
+- Text objects no longer throw errors while resizing.
+- Lots of smaller fixes.
+
+**Changed**
+- Tested on Foundry v14. Still works from v11.
+
+**Known issues**
+- Shift+Enter while editing text adds an extra blank line to the saved text.
+- Clicking the Crop button a second time does not leave crop mode. Click outside the image instead.
+- Ctrl+Z right after dragging a crop handle does not undo the crop.
+- Creating an object and switching scenes within about 300 ms of each other can lose that object. Workaround: wait a moment after creating something before you change scenes.
+- If the GM hides an object at the same moment a player is dragging it, the hide can be lost. Workaround: avoid hiding an object while someone else is actively moving it.
+- Rare: a GM undo at the same moment a player edits a different field on the same object can overwrite the player's change. Hard to reproduce consistently.
 
 ### v0.8.2
 

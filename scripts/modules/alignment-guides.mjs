@@ -30,6 +30,7 @@ class AlignmentGuides {
     this.svg = null;
     this.layer = null;
     this.enabled = true;
+    this.spacingEnabled = false;  // Toggle for blue spacing guides only
     this._boundMouseMove = null;
     this._boundMouseUp = null;
   }
@@ -943,7 +944,7 @@ class AlignmentGuides {
    * Размер засечек компенсируется зумом для постоянного размера на экране
    */
   _drawSpacingGuides(horizontal, vertical) {
-    if (!this.svg) return;
+    if (!this.svg || !this.spacingEnabled) return;
     
     const scale = this._getCanvasScale();
     // Засечки должны быть ~6px на экране независимо от зума
@@ -1189,6 +1190,13 @@ class AlignmentGuides {
   setEnabled(enabled) {
     this.enabled = enabled;
     if (!enabled) this.clear();
+  }
+
+  /**
+   * Toggle blue spacing guides only (keeps magenta alignment guides)
+   */
+  setSpacingEnabled(enabled) {
+    this.spacingEnabled = enabled;
   }
 }
 

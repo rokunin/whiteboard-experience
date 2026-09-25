@@ -10,6 +10,12 @@ window.WbeLogger = WbeLogger;
 // Fractional indexing for z-index management (external utility, pure functions)
 import { rankBetween, rankAfter, rankBefore } from './modules/fractional-index.mjs';
 
+// Undo/Redo manager (Unified Diff Pattern)
+import { UndoRedoManager } from './modules/undo-redo-manager.mjs';
+
+// Authoritative object locking (activeGM arbitrates; see specs/authoritative-lock-design.md)
+import { LockManager } from './modules/lock-manager.mjs';
+
 // ==========================================
 // FOUNDRY HOOKS - Bootstrap
 // ==========================================
@@ -66,8 +72,14 @@ import './modules/alignment-guides.mjs';
 // Shapes (primitives) - auto-initializes via Hooks.once('ready')
 import './modules/shapes.mjs';
 
+// Connectors (bezier curves) - auto-initializes via Hooks.once('ready')
+import './modules/connectors.mjs';
+
 // WBE Floating Toolbar - независимый от Foundry тулбар
 import { initToolbar, registerTool } from './modules/wbe-toolbar.mjs';
+
+// WBE Snapshot - debug state capture system
+import { WbeSnapshot } from './modules/wbe-snapshot.mjs';
 
 // ==========================================
 // Pickr - Color Picker Library (@simonwep/pickr)
@@ -402,6 +414,29 @@ const SOCKET_NAME = `module.${MODULE_ID}`;
 const ZINDEX_TEXT_COLOR_PICKER = 20100;
 const ZINDEX_GM_WARNING_INDICATOR = 30003; // Above SELECTION_INDICATOR (30001)
 
+/**
+ * Server-synchronized timestamp for conflict resolution.
+ *
+ * WHY: Sync conflict resolution compares timestamps across clients (see Registry.update).
+ * Using each client's local `Date.now()` is unsafe because clients' system clocks can be
+ * skewed relative to each other, so a legitimately-newer edit from a client with a slow
+ * clock could be wrongly discarded as "stale" (and vice-versa).
+ *
+ * `game.time.serverTime` is derived from the Foundry server clock plus a measured offset,
+ * so it is consistent across all connected clients regardless of their local system time.
+ * We fall back to `Date.now()` only when the game clock is not yet available (early init/tests).
+ *
+ * IMPORTANT: This must be used for BOTH the outgoing socket payload timestamp AND the local
+ * fallback in Registry.update, otherwise the two sides would be measured on different clocks
+ * and the comparison would be meaningless.
+ *
+ * @returns {number} Milliseconds on the shared server-synchronized clock.
+ */
+function wbeSyncNow() {
+  const t = game?.time?.serverTime;
+  return typeof t === 'number' ? t : Date.now();
+}
+
 // Default constants
 const DEFAULT_TEXT_COLOR = "#000000";
 const DEFAULT_BACKGROUND_COLOR = "transparent";
@@ -440,6 +475,74 @@ const DEFAULT_FONT_SIZE = 16;
 // Resize handle offset constants (half the handle size: 12px / 2)
 const RESIZE_HANDLE_OFFSET_X = -6;
 const RESIZE_HANDLE_OFFSET_Y = -6;
+
+// ==========================================
+// WBE Settings API (localStorage-based, per-user)
+// ==========================================
+
+const WBE_SETTINGS_KEY = 'wbe-settings';
+
+/**
+ * Default values for WBE settings
+ */
+const WBE_SETTINGS_DEFAULTS = {
+  createObjectsHidden: false,  // GM-only: create new objects as hidden
+};
+
+/**
+ * Get a WBE setting value
+ * @param {string} key - Setting key
+ * @returns {*} Setting value or default
+ */
+function getWBESetting(key) {
+  try {
+    const stored = localStorage.getItem(WBE_SETTINGS_KEY);
+    if (!stored) return WBE_SETTINGS_DEFAULTS[key];
+    
+    const settings = JSON.parse(stored);
+    return settings[key] !== undefined ? settings[key] : WBE_SETTINGS_DEFAULTS[key];
+  } catch (e) {
+    // Corrupted localStorage - return default
+    console.warn(`${MODULE_ID} | Failed to read setting "${key}":`, e.message);
+    return WBE_SETTINGS_DEFAULTS[key];
+  }
+}
+
+/**
+ * Set a WBE setting value (GM only for certain settings)
+ * @param {string} key - Setting key
+ * @param {*} value - Setting value
+ * @returns {boolean} Success
+ */
+function setWBESetting(key, value) {
+  // Validate key exists in defaults
+  if (!(key in WBE_SETTINGS_DEFAULTS)) {
+    console.warn(`${MODULE_ID} | Unknown setting key: "${key}"`);
+    return false;
+  }
+  
+  try {
+    const stored = localStorage.getItem(WBE_SETTINGS_KEY);
+    const settings = stored ? JSON.parse(stored) : {};
+    settings[key] = value;
+    localStorage.setItem(WBE_SETTINGS_KEY, JSON.stringify(settings));
+    return true;
+  } catch (e) {
+    console.error(`${MODULE_ID} | Failed to save setting "${key}":`, e.message);
+    return false;
+  }
+}
+
+/**
+ * Clear all WBE settings (for testing/reset)
+ */
+function clearWBESettings() {
+  try {
+    localStorage.removeItem(WBE_SETTINGS_KEY);
+  } catch (e) {
+    console.warn(`${MODULE_ID} | Failed to clear settings:`, e.message);
+  }
+}
 
 // Default Google Fonts (popular, support Latin + Cyrillic)
 const DEFAULT_GOOGLE_FONTS = [
@@ -769,6 +872,226 @@ function sanitizeHtml(html) {
   return temp.innerHTML;
 }
 
+/**
+ * Safe parseFloat with NaN filtering
+ * CRITICAL: parseFloat("") returns NaN, which is NOT caught by ?? operator
+ * This utility ensures NaN is replaced with defaultValue
+ * @param {any} value - Value to parse
+ * @param {number} defaultValue - Fallback value if parsing fails or returns NaN
+ * @returns {number} Parsed number or defaultValue
+ */
+function safeParseFloat(value, defaultValue) {
+  const parsed = parseFloat(value);
+  return Number.isNaN(parsed) ? defaultValue : parsed;
+}
+
+// ==========================================
+// WBE Settings Popup (GM only)
+// ==========================================
+
+/**
+ * Show WBE Settings Popup with GM-only settings
+ */
+function showWBESettingsPopup() {
+  // Only GM can access settings
+  if (!game.user?.isGM) return;
+  
+  // Remove existing popup if any (toggle behavior)
+  const existingPopup = document.getElementById('wbe-settings-popup');
+  if (existingPopup) {
+    existingPopup.remove();
+    return;
+  }
+
+  // Get current settings
+  const createHidden = getWBESetting('createObjectsHidden');
+
+  // Create popup overlay
+  const overlay = document.createElement('div');
+  overlay.id = 'wbe-settings-popup';
+  overlay.innerHTML = `
+    <style>
+      #wbe-settings-popup {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10000;
+        animation: wbe-settings-fade-in 0.15s ease;
+      }
+      @keyframes wbe-settings-fade-in {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      .wbe-settings-content {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        border: 1px solid rgba(100, 149, 237, 0.3);
+        border-radius: 10px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        min-width: 320px;
+        max-width: 400px;
+        padding: 20px;
+        color: #e0e0e0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      }
+      .wbe-settings-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 16px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+      }
+      .wbe-settings-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .wbe-settings-title i {
+        color: rgba(100, 149, 237, 0.9);
+      }
+      .wbe-settings-close {
+        background: none;
+        border: none;
+        color: rgba(255,255,255,0.5);
+        font-size: 18px;
+        cursor: pointer;
+        padding: 4px 8px;
+        border-radius: 4px;
+        transition: all 0.15s;
+      }
+      .wbe-settings-close:hover {
+        color: #fff;
+        background: rgba(255,255,255,0.1);
+      }
+      .wbe-settings-option {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px;
+        background: rgba(255,255,255,0.05);
+        border-radius: 8px;
+        margin-bottom: 8px;
+      }
+      .wbe-settings-option:last-child {
+        margin-bottom: 0;
+      }
+      .wbe-settings-label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .wbe-settings-label-text {
+        font-size: 14px;
+        color: #fff;
+      }
+      .wbe-settings-label-desc {
+        font-size: 11px;
+        color: rgba(255,255,255,0.5);
+      }
+      .wbe-settings-toggle {
+        position: relative;
+        width: 44px;
+        height: 24px;
+        background: rgba(255,255,255,0.2);
+        border-radius: 12px;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      .wbe-settings-toggle.active {
+        background: rgba(76, 175, 80, 0.7);
+      }
+      .wbe-settings-toggle::after {
+        content: '';
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 20px;
+        height: 20px;
+        background: #fff;
+        border-radius: 50%;
+        transition: transform 0.2s;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      }
+      .wbe-settings-toggle.active::after {
+        transform: translateX(20px);
+      }
+      .wbe-settings-section-title {
+        font-size: 11px;
+        color: rgba(255,255,255,0.4);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 8px;
+      }
+    </style>
+    <div class="wbe-settings-content">
+      <div class="wbe-settings-header">
+        <div class="wbe-settings-title">
+          <i class="fa-solid fa-gear"></i>
+          WBE Settings
+        </div>
+        <button class="wbe-settings-close" title="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      
+      <div class="wbe-settings-section-title">Hidden Objects</div>
+      
+      <div class="wbe-settings-option">
+        <div class="wbe-settings-label">
+          <span class="wbe-settings-label-text">Create objects as hidden</span>
+          <span class="wbe-settings-label-desc">New objects will be hidden from players by default</span>
+        </div>
+        <div class="wbe-settings-toggle ${createHidden ? 'active' : ''}" data-setting="createObjectsHidden"></div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+
+  // Event handlers
+  const closeBtn = overlay.querySelector('.wbe-settings-close');
+  closeBtn.addEventListener('click', () => overlay.remove());
+
+  // Click outside to close
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      overlay.remove();
+    }
+  });
+
+  // Escape to close
+  const escHandler = (e) => {
+    if (e.key === 'Escape') {
+      overlay.remove();
+      document.removeEventListener('keydown', escHandler);
+    }
+  };
+  document.addEventListener('keydown', escHandler);
+
+  // Toggle handlers
+  const toggles = overlay.querySelectorAll('.wbe-settings-toggle');
+  toggles.forEach(toggle => {
+    toggle.addEventListener('click', () => {
+      const settingKey = toggle.dataset.setting;
+      const newValue = !toggle.classList.contains('active');
+      
+      setWBESetting(settingKey, newValue);
+      toggle.classList.toggle('active', newValue);
+      
+      console.log(`${MODULE_ID} | Setting "${settingKey}" changed to ${newValue}`);
+    });
+  });
+}
+
 // ==========================================
 // WBE Help Modal
 // ==========================================
@@ -811,8 +1134,8 @@ function showWBEHelpModal() {
         border: 1px solid rgba(100, 149, 237, 0.3);
         border-radius: 12px;
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.05);
-        max-width: 600px;
-        max-height: 80vh;
+        max-width: 1000px;
+        max-height: 100vh;
         overflow-y: auto;
         padding: 24px;
         color: #e0e0e0;
@@ -1157,6 +1480,20 @@ class ZIndexModel {
    */
   getRank(objectId) {
     return this.objectRank.get(objectId)?.rank || '';
+  }
+
+  /**
+   * Set rank for object (used by undo/redo)
+   * @param {string} objectId - Object ID
+   * @param {string} rank - New rank value
+   * @returns {boolean} true if successful
+   */
+  setRank(objectId, rank) {
+    const entry = this.objectRank.get(objectId);
+    if (!entry) return false;
+    entry.rank = rank;
+    this._dirty = true;
+    return true;
   }
 
   /**
@@ -1588,7 +1925,7 @@ class ObjectRegistry {
   register(obj, source = 'local') {
     // Set timestamp on creation (if not already set)
     if (!obj._lastModified) {
-      obj._lastModified = Date.now();
+      obj._lastModified = wbeSyncNow(); // Server-synchronized clock (see wbeSyncNow)
       obj._lastModifiedSource = source;
     }
     
@@ -1601,6 +1938,12 @@ class ObjectRegistry {
       obj.rank = this.zIndexModel.getRank(obj.id);
     }
     
+    // UNDO-REDO: Save old z-index values BEFORE adding new object and syncing
+    const oldZIndexValues = {};
+    this.objects.forEach((o, objId) => {
+      oldZIndexValues[objId] = { zIndex: o.zIndex, rank: o.rank };
+    });
+    
     this.objects.set(obj.id, obj);
     
     // CRITICAL: Sync ALL z-indexes after adding new object
@@ -1610,7 +1953,15 @@ class ObjectRegistry {
     
     // Notify Layer about batch z-index update if any objects changed
     if (changedIds.length > 0) {
-      this._notify(null, 'zIndexBatchUpdate', null, source, { changedIds });
+      // UNDO-REDO: Build oldValues map for changed objects only
+      const oldValues = {};
+      changedIds.forEach(changedId => {
+        if (oldZIndexValues[changedId]) {
+          oldValues[changedId] = oldZIndexValues[changedId];
+        }
+        // New object won't have oldValues - that's expected
+      });
+      this._notify(null, 'zIndexBatchUpdate', null, source, { changedIds, oldValues });
     }
     
     // Set update callback for objects that support it
@@ -1623,9 +1974,12 @@ class ObjectRegistry {
   }
   unregister(id, source = 'local') {
     if (this.objects.has(id)) {
+      // UNDO-REDO: Save object data BEFORE deletion for undo restore
+      const deletedObj = this.objects.get(id);
       this.objects.delete(id);
       this.zIndexModel.remove(id); // Remove from z-index management
-      this._notify(id, 'deleted', null, source);
+      // Pass deleted object data to notify (needed for undo restore)
+      this._notify(id, 'deleted', deletedObj, source);
     }
   }
   update(id, changes, source = 'local', metadata = {}) {
@@ -1644,7 +1998,9 @@ class ObjectRegistry {
       }
 
       // // RACE CONDITION PROTECTION: timestamp check
-      const timestamp = metadata.timestamp || Date.now();
+      // Use server-synchronized time so local and remote timestamps are comparable
+      // across clients with skewed system clocks (see wbeSyncNow).
+      const timestamp = metadata.timestamp || wbeSyncNow();
       const objTimestamp = obj._lastModified || 0;
       
       // // If this is a remote change and older than current - ignore
@@ -1682,12 +2038,18 @@ class ObjectRegistry {
 
         // Apply only allowed changes
         if (Object.keys(allowedChanges).length > 0) {
+          // UNDO-REDO: Save old values BEFORE applying changes
+          const oldValues = {};
+          for (const key in allowedChanges) {
+            oldValues[key] = obj[key];
+          }
+          
           Object.assign(obj, allowedChanges);
           obj._lastModified = timestamp;
           obj._lastModifiedSource = source;
           // During drag: notify Layer for DOM updates, but SocketController will skip socket emit
           // Socket will be updated only once in _endDrag() with final position
-          this._notify(id, 'updated', obj, source, allowedChanges);
+          this._notify(id, 'updated', obj, source, allowedChanges, oldValues);
         }
         // If no allowed changes, silently ignore (don't notify)
         return;
@@ -1706,10 +2068,26 @@ class ObjectRegistry {
           console.warn(`[Registry] Attempt to overwrite method '${key}' via update() - ignored`);
         }
       }
+      
+      // UNDO-REDO: Save old values BEFORE applying changes
+      const oldValues = {};
+      for (const key in safeChanges) {
+        oldValues[key] = obj[key];
+      }
+      
       Object.assign(obj, safeChanges);
       obj._lastModified = timestamp;
       obj._lastModifiedSource = source;
-      this._notify(id, 'updated', obj, source, safeChanges);
+      
+      // CRITICAL: If rank was updated (typically from remote socket), sync ZIndexModel
+      // This ensures local ZIndexModel stays in sync with remote z-index changes
+      if ('rank' in safeChanges && this.zIndexModel && this.zIndexModel.has(id)) {
+        this.zIndexModel.setRank(id, safeChanges.rank);
+        // Recalculate all z-indexes to ensure consistency
+        this._syncAllZIndexes();
+      }
+      
+      this._notify(id, 'updated', obj, source, safeChanges, oldValues);
     }
   }
   get(id) {
@@ -1818,12 +2196,18 @@ class ObjectRegistry {
    * Internal: apply group z-index changes
    */
   _applyGroupZIndexChanges(changes) {
+    // UNDO-REDO: Save old z-index values BEFORE any changes
+    const oldZIndexValues = {};
+    this.objects.forEach((o, objId) => {
+      oldZIndexValues[objId] = { zIndex: o.zIndex, rank: o.rank };
+    });
+    
     // Update ranks in objects
     for (const change of changes) {
       const obj = this.objects.get(change.objectId);
       if (obj) {
         obj.rank = change.newRank;
-        obj._lastModified = Date.now();
+        obj._lastModified = wbeSyncNow(); // Server-synchronized clock (see wbeSyncNow)
         obj._lastModifiedSource = 'local';
       }
     }
@@ -1831,16 +2215,31 @@ class ObjectRegistry {
     // Sync all z-indexes and notify
     const changedIds = this._syncAllZIndexes();
     if (changedIds.length > 0) {
-      this._notify(null, 'zIndexBatchUpdate', null, 'local', { changedIds });
-    }
-    
-    // Notify about each changed object for persistence
-    for (const change of changes) {
-      const obj = this.objects.get(change.objectId);
-      if (obj) {
-        this._notify(change.objectId, 'updated', obj, 'local', { zIndex: obj.zIndex, rank: change.newRank });
+      // UNDO-REDO: Build oldValues map for changed objects
+      const oldValues = {};
+      changedIds.forEach(changedId => {
+        if (oldZIndexValues[changedId]) {
+          oldValues[changedId] = oldZIndexValues[changedId];
+        }
+      });
+      this._notify(null, 'zIndexBatchUpdate', null, 'local', { changedIds, oldValues });
+      
+      // CRITICAL: Notify about ALL changed objects for socket sync (not just the group objects)
+      // When group moves, non-group objects' z-indexes shift too - all must be synced
+      for (const changedId of changedIds) {
+        const changedObj = this.objects.get(changedId);
+        if (changedObj) {
+          const changedObjOldValues = oldZIndexValues[changedId] || {};
+          this._notify(changedId, 'updated', changedObj, 'local', { zIndex: changedObj.zIndex, rank: changedObj.rank }, changedObjOldValues);
+        }
       }
     }
+    
+    // UNDO-REDO: Emit zIndexChanged event for undo/redo tracking
+    // changes array already has { objectId, oldRank, newRank } from ZIndexModel
+    this._notify(null, 'zIndexChanged', null, 'local', {
+      changes: changes.map(c => ({ id: c.objectId, oldRank: c.oldRank, newRank: c.newRank }))
+    });
   }
 
   /**
@@ -1871,11 +2270,17 @@ class ObjectRegistry {
    * DOM updates are handled by Layer via batch notification (zIndexBatchUpdate)
    */
   _applyZIndexChange(id, result) {
+    // UNDO-REDO: Save old z-index values BEFORE any changes
+    const oldZIndexValues = {};
+    this.objects.forEach((o, objId) => {
+      oldZIndexValues[objId] = { zIndex: o.zIndex, rank: o.rank };
+    });
+    
     const obj = this.objects.get(id);
     if (obj) {
       // Only update rank here - z-index will be synced by _syncAllZIndexes()
       obj.rank = result.newRank;
-      obj._lastModified = Date.now();
+      obj._lastModified = wbeSyncNow(); // Server-synchronized clock (see wbeSyncNow)
       obj._lastModifiedSource = 'local';
     }
     
@@ -1887,14 +2292,32 @@ class ObjectRegistry {
     // CRITICAL: Notify Layer about batch z-index update for ALL changed objects
     // This ensures DOM is updated for all objects, not just the moved one
     if (changedIds.length > 0) {
-      this._notify(null, 'zIndexBatchUpdate', null, 'local', { changedIds });
+      // UNDO-REDO: Build oldValues map for changed objects
+      const oldValues = {};
+      changedIds.forEach(changedId => {
+        if (oldZIndexValues[changedId]) {
+          oldValues[changedId] = oldZIndexValues[changedId];
+        }
+      });
+      this._notify(null, 'zIndexBatchUpdate', null, 'local', { changedIds, oldValues });
+      
+      // CRITICAL: Notify about ALL changed objects for socket sync (not just the moved one)
+      // When object A moves, object B's z-index shifts too - both must be synced to other clients
+      for (const changedId of changedIds) {
+        const changedObj = this.objects.get(changedId);
+        if (changedObj) {
+          const changedObjOldValues = oldZIndexValues[changedId] || {};
+          this._notify(changedId, 'updated', changedObj, 'local', { zIndex: changedObj.zIndex, rank: changedObj.rank }, changedObjOldValues);
+        }
+      }
     }
     
-    // Also notify about the moved object for persistence (rank changed)
-    // Use obj.zIndex after sync (it's now accurate) instead of result.newZIndex
-    if (obj) {
-      this._notify(id, 'updated', obj, 'local', { zIndex: obj.zIndex, rank: result.newRank });
-    }
+    // UNDO-REDO: Emit zIndexChanged event for undo/redo tracking
+    // This is separate from zIndexBatchUpdate which is for DOM updates
+    const oldRank = oldZIndexValues[id]?.rank || '';
+    this._notify(null, 'zIndexChanged', null, 'local', {
+      changes: [{ id, oldRank, newRank: result.newRank }]
+    });
   }
 
   /**
@@ -1947,13 +2370,15 @@ class ObjectRegistry {
     this.listeners.add(callback);
     return () => this.listeners.delete(callback);
   }
-  _notify(id, type, data, source, changes = null) {
+  // UNDO-REDO: Added oldValues parameter for undo support
+  _notify(id, type, data, source, changes = null, oldValues = null) {
     this.listeners.forEach(cb => cb({
       id,
       type,
       data,
       source,
-      changes
+      changes,
+      oldValues  // For undo: previous values before update
     }));
   }
 }
@@ -2129,8 +2554,17 @@ class WhiteboardLayer {
       // SPECIAL CASE: In crop mode, container is FULL size, so we need to pass dims.left/top
       // In normal mode, container is shrunk to visible area, so dims.left/top should be 0
       if (obj.isCropping) {
-        // Crop mode: container = full size, gizmos need offset
-        CropGizmoManager.updateRectHandlesPosition(handles, dims, canvasScale);
+        // Crop mode: the container is full size on entry, but _endCropDrag shrinks it to the
+        // visible area after the first handle drag. Detect which layout is live instead of
+        // assuming full size, otherwise handles land crop-offset pixels away from the edges.
+        const cw = parseFloat(container.style.width) || 0;
+        const ch = parseFloat(container.style.height) || 0;
+        const shrunk = Math.abs(cw - dims.width) < 1 && Math.abs(ch - dims.height) < 1;
+        CropGizmoManager.updateRectHandlesPosition(
+          handles,
+          shrunk ? { width: dims.width, height: dims.height, left: 0, top: 0 } : dims,
+          canvasScale
+        );
       } else {
         // Normal mode: container = visible area, no offset needed
         CropGizmoManager.updateRectHandlesPosition(handles, { width: dims.width, height: dims.height, left: 0, top: 0 }, canvasScale);
@@ -2413,6 +2847,45 @@ class WhiteboardLayer {
       this._applyElementStyles(this.element, {
         cursor
       });
+    }
+  }
+
+  /**
+   * Set passthrough mode - layer becomes transparent and non-interactive
+   * Used when holding the passthrough hotkey to interact with Foundry VTT underneath
+   * @param {boolean} enabled - Whether passthrough mode is enabled
+   */
+  setPassthroughMode(enabled) {
+    if (!this.element) return;
+    
+    // Inject CSS rule once for passthrough mode
+    if (!this._passthroughStyleInjected) {
+      const style = document.createElement('style');
+      style.textContent = `
+        .wbe-passthrough-mode,
+        .wbe-passthrough-mode * {
+          pointer-events: none !important;
+        }
+      `;
+      document.head.appendChild(style);
+      this._passthroughStyleInjected = true;
+    }
+    
+    if (enabled) {
+      this.element.classList.add('wbe-passthrough-mode');
+      this.element.style.opacity = '0.2';
+      // Also hide selection overlay
+      if (this._selectionOverlay) {
+        this._selectionOverlay.style.display = 'none';
+      }
+    } else {
+      this.element.classList.remove('wbe-passthrough-mode');
+      this.element.style.opacity = '';
+      // Restore selection overlay if object is selected
+      if (this._selectionOverlay && this._selectionOverlaySelectedId) {
+        this._selectionOverlay.style.display = '';
+        this.updateSelectionOverlay();
+      }
     }
   }
 
@@ -2811,7 +3284,9 @@ class WhiteboardLayer {
       // Get dimensions - same logic as updateSelectionOverlay
       const baseWidth = parseFloat(container.style.width) || container.offsetWidth;
       const baseHeight = parseFloat(container.style.height) || container.offsetHeight;
-      const scale = obj.scale !== undefined ? obj.scale : 1;
+      // Read scale from DOM transform (more accurate during operations)
+      const transformMatch = container.style.transform?.match(/scale\(([^)]+)\)/);
+      const scale = transformMatch ? parseFloat(transformMatch[1]) : (obj.scale !== undefined ? obj.scale : 1);
       
       // Types that use transform: scale() for scaling
       const usesTransformScale = obj.usesTransformScale?.() ?? (obj.type === 'text');
@@ -2893,16 +3368,49 @@ class WhiteboardLayer {
     };
     this._hookCallbacks.canvasTearDown = () => {
       this._stopContinuousSync();
-      
+
+      // Release every authoritative lock this client holds, and clear local edit/crop
+      // runtime state, BEFORE the registry (and its objects) are torn down below.
+      // Otherwise the requester-side renew heartbeat (lock-manager.mjs _onGranted's
+      // setInterval) keeps running across the scene switch and, since the GM is both
+      // requester and sole arbiter, keeps re-granting the lock to itself in the
+      // arbiter's own table forever - it never reaches its TTL/reap sweep. Mirrors the
+      // isHeldBySelf-based release already used on the GM-hide path (~4476-4482
+      // ish, drifts with edits) instead of relying on _endEditText/_deselect, whose
+      // DOM/registry lookups no longer resolve once the scene has torn down.
+      const lockManager = this._interactionManager?.socketController?.lockManager;
+      if (lockManager?.heldObjectIds) {
+        for (const heldId of lockManager.heldObjectIds()) {
+          lockManager.releaseLock(heldId);
+        }
+      }
+      if (this._interactionManager) {
+        this._interactionManager.editingId = null;
+      }
+      // Exit crop state: drop stale handle-DOM references for the outgoing scene so a
+      // later canvasPan doesn't try to reposition handles whose containers are gone.
+      this._cropHandles.clear();
+
       // Clear registry WITHOUT socket events (data is already saved in scene flags)
       // This prevents old scene objects from appearing on new scene
       this._clearRegistryForSceneChange();
-      
+
       this._destroyLayer();
     };
     Hooks.on("canvasReady", this._hookCallbacks.canvasReady);
     Hooks.on("canvasTearDown", this._hookCallbacks.canvasTearDown);
-    
+
+    // Crop handles counter-scale by 1/canvasScale to keep a constant on-screen size;
+    // recompute them on pan/zoom, otherwise they grow and shrink with the camera.
+    // Deferred one frame: getCanvasScale() reads stage.worldTransform, which PIXI updates on render.
+    this._hookCallbacks.canvasPanCrop = () => {
+      if (!this._cropHandles.size) return;
+      requestAnimationFrame(() => {
+        for (const imageId of this._cropHandles.keys()) this.updateCropHandlesPosition(imageId);
+      });
+    };
+    Hooks.on("canvasPan", this._hookCallbacks.canvasPanCrop);
+
     // Fallback: ensure layer exists when canvas is ready
     // This handles edge cases like scene deletion where canvasReady might not fire
     this._hookCallbacks.renderSceneNavigation = () => {
@@ -3148,6 +3656,62 @@ class WhiteboardLayer {
       [data-tool="wbeMassSelection"] {
         position: relative;
       }
+      
+      /* Hidden Objects - GM-only visibility (reduced opacity + dashed outline) */
+      .wbe-object-hidden {
+        opacity: 0.5 !important;
+        outline: 2px dashed rgba(255, 100, 100, 0.6) !important;
+        outline-offset: 2px;
+      }
+      
+      /* Hidden indicator icon (positioned in top-right corner, like freeze is on left) */
+      .wbe-hidden-indicator {
+        position: absolute;
+        top: -20px;
+        right: -5px;
+        width: 20px;
+        height: 20px;
+        background: rgba(255, 100, 100, 0.85);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        color: white;
+        pointer-events: none;
+        z-index: 1000;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+      }
+      
+      /* Hide button in panels (GM only) */
+      .wbe-hide-btn {
+        all: unset;
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #f5f5f5;
+        border: 1px solid #ddd;
+        transition: background 0.15s, border-color 0.15s;
+      }
+      .wbe-hide-btn:hover {
+        background: #eee;
+        border-color: #ccc;
+      }
+      .wbe-hide-btn.wbe-hidden-active {
+        background: rgba(255, 100, 100, 0.15);
+        border-color: rgba(255, 100, 100, 0.4);
+      }
+      .wbe-hide-btn i {
+        font-size: 12px;
+        color: #666;
+      }
+      .wbe-hide-btn.wbe-hidden-active i {
+        color: rgb(200, 80, 80);
+      }
     `;
     document.head.appendChild(style);
   }
@@ -3182,6 +3746,10 @@ class WhiteboardLayer {
     if (this._hookCallbacks.canvasTearDown) {
       Hooks.off("canvasTearDown", this._hookCallbacks.canvasTearDown);
       this._hookCallbacks.canvasTearDown = null;
+    }
+    if (this._hookCallbacks.canvasPanCrop) {
+      Hooks.off("canvasPan", this._hookCallbacks.canvasPanCrop);
+      this._hookCallbacks.canvasPanCrop = null;
     }
     if (this._hookCallbacks.renderSceneNavigation) {
       Hooks.off("renderSceneNavigation", this._hookCallbacks.renderSceneNavigation);
@@ -3267,12 +3835,26 @@ class WhiteboardLayer {
     } else if (type === 'deleted') {
       const el = document.getElementById(id);
       if (el) el.remove();
+      
+      // CRITICAL: Deselect if deleted object was selected
+      // This cleans up: selection overlay, panels, and interaction state
+      // Handles remote deletion (via socket) where InteractionManager doesn't know about deletion
+      if (this._interactionManager?.selectedId === id) {
+        this._interactionManager._deselect();
+      }
     } else if (type === 'updated') {
       this._updateObjectElement(id, data, changes);
       // Update selection overlay if this object is selected
       if (this._selectionOverlaySelectedId === id) {
         this.updateSelectionOverlay();
       }
+      // Keep crop handles on the crop edges when a cropping image changes from outside the
+      // crop drag itself (undo/redo, remote update, scale change).
+      if (data?.type === 'image' && data.isCropping && this._cropHandles.has(id)) {
+        this.updateCropHandlesPosition(id);
+      }
+      // Keep active panels in sync with object geometry after model updates (e.g. undo/redo)
+      this._interactionManager?.handleRegistryObjectUpdate(id, changes);
     } else if (type === 'zIndexBatchUpdate') {
       // CRITICAL: Update ALL objects' z-index in DOM (not just changed ones)
       // With fractional indexing, moving one object shifts z-index of others
@@ -3326,6 +3908,12 @@ class WhiteboardLayer {
     this.registry.getAll().forEach(obj => this._renderObject(obj));
   }
   _renderObject(obj) {
+    // Skip rendering hidden objects for Players (GM can see them)
+    const isGM = game.user?.isGM;
+    if (obj.hidden && !isGM) {
+      return; // Don't render for players
+    }
+    
     if (!this.element || document.getElementById(obj.id)) {
       return;
     }
@@ -3364,6 +3952,14 @@ class WhiteboardLayer {
     if (obj.isFrozen?.()) {
         this._updateObjectElement(obj.id, obj, {
           frozen: true
+        });
+      }
+    
+    // CRITICAL: Apply hidden styling after render (for objects created with hidden=true)
+    // This ensures red border and eye-slash icon are shown for hidden objects (GM only)
+    if (obj.hidden && game.user?.isGM) {
+        this._updateObjectElement(obj.id, obj, {
+          hidden: true
         });
       }
       });
@@ -3418,14 +4014,26 @@ class WhiteboardLayer {
     if (newY !== undefined) container.style.top = `${newY}px`;
     
     // Update size (base dimensions, before scale)
-    if (newWidth !== undefined) container.style.width = `${newWidth}px`;
+    // For texts: ensure container is never smaller than min-content (longest word)
+    let finalWidth = newWidth;
+    if (isText && newWidth !== undefined) {
+      const textSpan = container.querySelector('.wbe-text-background-span');
+      if (textSpan) {
+        const minContentWidth = this._getTextMinContentWidth(textSpan);
+        if (minContentWidth > newWidth) {
+          finalWidth = minContentWidth;
+        }
+      }
+    }
+    
+    if (finalWidth !== undefined) container.style.width = `${finalWidth}px`;
     if (newHeight !== undefined) container.style.height = `${newHeight}px`;
     
     // For texts, also update the text element width
-    if (isText && newWidth !== undefined) {
+    if (isText && finalWidth !== undefined) {
       const textElement = container.querySelector('.wbe-canvas-text');
       if (textElement) {
-        textElement.style.width = `${newWidth}px`;
+        textElement.style.width = `${finalWidth}px`;
       }
     }
     
@@ -3466,6 +4074,32 @@ class WhiteboardLayer {
     // Update selection overlay - use standard method which reads from DOM
     // Since we just updated container.style.width/height/left/top, updateSelectionOverlay will use correct values
     this.updateSelectionOverlay();
+  }
+
+  /**
+   * Get min-content width for text (width of longest word)
+   * Uses clone with display: inline-block + width: min-content
+   * This preserves original inline display while measuring true minimum
+   * @param {HTMLElement} textSpan - Text span element
+   * @returns {number} Minimum content width in pixels
+   */
+  _getTextMinContentWidth(textSpan) {
+    const clone = textSpan.cloneNode(true);
+    Object.assign(clone.style, {
+      position: 'fixed',
+      visibility: 'hidden',
+      top: '-9999px',
+      left: '-9999px',
+      display: 'inline-block',
+      width: 'min-content',
+      whiteSpace: 'pre-wrap'
+    });
+    
+    document.body.appendChild(clone);
+    const width = clone.getBoundingClientRect().width;
+    clone.remove();
+    
+    return Math.ceil(width);
   }
 
   /**
@@ -3808,8 +4442,90 @@ class WhiteboardLayer {
   }
 
   _updateObjectElement(id, obj, changes = null) {
-    const container = document.getElementById(id);
+    let container = document.getElementById(id);
+    
+    // === HIDDEN OBJECTS HANDLING ===
+    // Hidden objects are completely removed from Player's DOM (not just invisible)
+    const isGM = game.user?.isGM;
+    
+    if (obj.hidden && !isGM) {
+      // Player: completely remove hidden object from DOM
+      if (container) {
+        container.remove();
+      }
+      // Also remove from mass selection if selected (socket update from GM hiding object)
+      if (this._interactionManager?.massSelection?.selectedIds?.has(id)) {
+        this._interactionManager.massSelection.selectedIds.delete(id);
+        this._interactionManager.massSelection.view?.updateIndicator(
+          this._interactionManager.massSelection.selectedIds.size
+        );
+        this._interactionManager.massSelection._updateBoundingBox?.();
+      }
+      // Also clear single selection if this was the selected object (socket update
+      // from GM hiding object) - mirrors the mass-selection cleanup just above,
+      // since from this client's perspective a hidden object is gone just like a
+      // deleted one. Cleared directly (not via _deselect(), which would call
+      // registry.update() on this same still-registered-but-hidden object and
+      // recursively re-enter this method through _handleRegistryChange).
+      // CRITICAL: clear selectedId BEFORE the registry.update() below. registry.update()
+      // re-enters this method (via _handleRegistryChange), and that re-entrant call must
+      // see selectedId !== id so it returns early instead of looping. `selected` itself is
+      // a UI-only field (see UI_ONLY_PROPS in _handleLocalChange) and never reaches the
+      // socket, so setting it false here is safe and purely local: without it, if the GM
+      // later unhides the object, _renderObject (~3922) would re-render it as selected
+      // (handles/border) even though this client deselected it.
+      if (this._interactionManager?.selectedId === id) {
+        this._interactionManager.selectedId = null;
+        this.registry.update(id, { selected: false }, 'local');
+        this._interactionManager.layer?.hideSelectionOverlay?.();
+        this._interactionManager._hideAllPanels?.();
+        // Reset the board cursor the way _deselect() does (~15851): this is WhiteboardLayer
+        // itself, so call applyBoardCursor directly rather than through interactionManager.layer.
+        this.applyBoardCursor?.('');
+      }
+      // If the player was editing this text when the GM hid it, editing state and the
+      // authoritative text lock would otherwise stay stuck forever: _endEditText (~16141)
+      // returns early because getTextSpan/getObjectContainer can't find the (now-removed)
+      // DOM container. Clear editingId and release the lock directly instead.
+      //
+      // NOTE: editingId can no longer be trusted to detect "was editing" at this point -
+      // the container.remove() above, if the textSpan was focused/contentEditable, already
+      // fired a synchronous native 'blur' event (see WhiteboardText's textSpan blur
+      // listener, ~6225), whose handler clears editingId via _editEndCallback but does NOT
+      // release the authoritative lock. So release based on isHeldBySelf (unaffected by
+      // that blur side effect) rather than editingId, and clear editingId defensively in
+      // case that blur didn't fire (e.g. text wasn't actually contentEditable yet).
+      if (this._interactionManager?.editingId === id) {
+        this._interactionManager.editingId = null;
+      }
+      const lockManager = this._interactionManager?.socketController?.lockManager;
+      if (lockManager?.isHeldBySelf?.(id)) {
+        lockManager.releaseLock(id);
+      }
+      return; // Don't render for players
+    }
+    
+    // If object was just unhidden and container doesn't exist (Player side), create it
+    // obj.hidden is the NEW value (already updated), so if it's false and 'hidden' was changed,
+    // the object was just unhidden
+    if (!container && changes && 'hidden' in changes && !obj.hidden) {
+      // Object was unhidden - need to render it for Player
+      this._renderObject(obj);
+      container = document.getElementById(id);
+    }
+    
     if (!container) return;
+    
+    // GM: Handle hidden state styling (reduced opacity + indicator icon)
+    if (changes === null || 'hidden' in changes) {
+      if (obj.hidden && isGM) {
+        container.classList.add('wbe-object-hidden');
+        this._ensureHiddenIndicator(container);
+      } else {
+        container.classList.remove('wbe-object-hidden');
+        this._removeHiddenIndicator(container);
+      }
+    }
 
     // Check if object can be updated - protect DOM from style changes during drag/edit/resize
     // This check must be BEFORE position update to prevent layout recalculation from changing width
@@ -4930,6 +5646,31 @@ class WhiteboardLayer {
   // SVG selection overlay handle is now used instead (updated via updateSelectionOverlay)
 
   /**
+   * Ensure hidden indicator icon exists on container (GM only)
+   * Positioned in top-right corner (freeze icon is on left)
+   * @param {HTMLElement} container - Object container element
+   */
+  _ensureHiddenIndicator(container) {
+    if (!container || container.querySelector('.wbe-hidden-indicator')) return;
+    
+    const indicator = document.createElement('div');
+    indicator.className = 'wbe-hidden-indicator';
+    indicator.innerHTML = '<i class="fas fa-eye-slash"></i>';
+    indicator.title = 'Hidden from players';
+    container.appendChild(indicator);
+  }
+
+  /**
+   * Remove hidden indicator icon from container
+   * @param {HTMLElement} container - Object container element
+   */
+  _removeHiddenIndicator(container) {
+    if (!container) return;
+    const indicator = container.querySelector('.wbe-hidden-indicator');
+    if (indicator) indicator.remove();
+  }
+
+  /**
    * Centralized method for applying styles to DOM elements
    * This helps maintain Single Source of Truth by centralizing style updates
    */
@@ -4953,8 +5694,30 @@ class WhiteboardObject {
     this.zIndex = data.zIndex !== undefined ? data.zIndex : 0; // SSOT: zIndex stored in model, not DOM
     this.rank = data.rank || ''; // Fractional index for z-order (set by Registry)
     // Timestamp to prevent race conditions during concurrent updates
-    this._lastModified = data._lastModified || Date.now();
+    this._lastModified = data._lastModified || wbeSyncNow(); // Server-synchronized clock (see wbeSyncNow)
     this._lastModifiedSource = data._lastModifiedSource || 'local'; // For debugging
+    // Hidden state - GM-only visibility control
+    // Coerce to boolean to handle legacy data, string values, null, undefined
+    this.hidden = this._coerceBoolean(data.hidden, false);
+    // Frozen state - prevents interaction with the object
+    this.frozen = this._coerceBoolean(data.frozen, false);
+  }
+
+  /**
+   * Coerce value to boolean with default fallback
+   * Handles: undefined, null, "true"/"false" strings, numbers
+   * @param {any} value - Value to coerce
+   * @param {boolean} defaultValue - Default if value is undefined/null
+   * @returns {boolean}
+   */
+  _coerceBoolean(value, defaultValue) {
+    if (value === undefined || value === null) return defaultValue;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      if (value === 'true') return true;
+      if (value === 'false') return false;
+    }
+    return Boolean(value);
   }
   /**
    * Polymorphic methods for generic object handling
@@ -5300,6 +6063,8 @@ class WhiteboardObject {
       type: this.type,
       zIndex: this.zIndex,
       rank: this.rank, // Fractional index for z-order (saved to DB)
+      hidden: this.hidden, // GM-only visibility control
+      frozen: this.frozen, // Lock state - prevents interaction
       _lastModified: this._lastModified,
       _lastModifiedSource: this._lastModifiedSource
     };
@@ -5361,9 +6126,10 @@ class WhiteboardText extends WhiteboardObject {
             left: ${this.x}px;
             top: ${this.y}px;
             transform: scale(${scale}) rotate(${this.rotation || 0}deg);
-            transform-origin: center;
+            transform-origin: center center;
             cursor: inherit;
             user-select: none;
+            width: max-content;
         `;
 
     // Text element for content (no border - border is handled by permanentBorder)
@@ -5390,9 +6156,8 @@ class WhiteboardText extends WhiteboardObject {
             min-width: 100px;
             min-height: ${this.fontSize}px;
             ${widthStyle}
-            overflow-wrap: break-word;
-            word-wrap: break-word;
-            word-break: break-word;
+            overflow-wrap: normal;
+            word-break: normal;
             overflow: hidden;
             line-height: ${this.lineHeight};
         `;
@@ -5509,56 +6274,21 @@ class WhiteboardText extends WhiteboardObject {
           return; // Don't finish editing
         }
         
-        // Save HTML markup with sanitization (like in Miro)
-        // If HTML exists - save innerHTML, otherwise textContent for plain text
-        const content = textSpan.innerHTML.trim();
-        // Check if content is just <br>, zero-width space, or nbsp (empty placeholder) - save as empty string
-        if (content === '<br>' || content === '<br/>' || content === '<br />' || content === '\u200B' || content === '​' || content === '&nbsp;' || content === '\u00A0' || content === ' ') {
-          this.text = '';
-        } else if (content && /<[a-z][\s\S]*>/i.test(content)) {
-          // HTML markup detected - save with sanitization
-          this.text = sanitizeHtml(content);
-        } else {
-          // Plain text - save as is
-          this.text = textSpan.textContent.trim();
-        }
-        textSpan.contentEditable = "false";
-
-        // Restore pointer-events
-        const container = document.getElementById(this.id);
-        const textElement = container?.querySelector('.wbe-canvas-text');
-        if (textElement) {
-          textElement.style.pointerEvents = "none";
-        }
-        textSpan.style.pointerEvents = "";
-
-        // Explicitly disable resize and reset all states after editing
-        textSpan.style.resize = "none";
-        textSpan.style.userSelect = "none";
-        textSpan.style.webkitUserSelect = "none";
-        textSpan.style.mozUserSelect = "none";
-        textSpan.style.msUserSelect = "none";
-
-        // Clear selection state
-        const selection = window.getSelection();
-        if (selection) {
-          selection.removeAllRanges();
-        }
-
-        // Ensure the element lost focus
-        if (document.activeElement === textSpan) {
-          textSpan.blur();
-        }
-
-        // Notify InteractionManager about the end of editing
+        // Route every blur-driven end of editing (Enter, or a click InteractionManager
+        // itself doesn't intercept) through the SAME end-of-edit path as a normal
+        // deselect-driven end of edit: InteractionManager._endEditText, wired in via
+        // setEditEndCallback (see _startEditText, ~16123-16131). Do NOT duplicate the
+        // save/cleanup logic here - a second, independent copy of it is what let lock
+        // release, data-editing/lockedBy, empty-text deletion and the undo diff's
+        // captured "old" text drift out of sync with _endEditText (see
+        // docs/known-bugs.md "Text editing"). _endEditText reads textSpan directly
+        // while contentEditable is still "true" (nothing here flips it before the
+        // callback runs), so it sees exactly the same live content this listener used
+        // to save itself, and only then releases the lock / clears the DOM flags /
+        // deletes an emptied object / updates the registry.
         if (this._editEndCallback) {
           this._editEndCallback(this.id);
         }
-
-        // Notify registry of change via callback
-        this._notifyUpdate({
-          text: this.text
-        });
       }
     });
 
@@ -5622,8 +6352,10 @@ class WhiteboardText extends WhiteboardObject {
       ...super.toJSON(),
       text: this.text,
       color: this.color,
+      colorOpacity: this.colorOpacity,
       fontSize: this.fontSize,
       backgroundColor: this.backgroundColor,
+      backgroundColorOpacity: this.backgroundColorOpacity,
       fontFamily: this.fontFamily,
       fontWeight: this.fontWeight,
       fontStyle: this.fontStyle,
@@ -5746,8 +6478,7 @@ class WhiteboardImage extends WhiteboardObject {
     this.shadowOpacity = data.shadowOpacity !== undefined ? data.shadowOpacity : DEFAULT_SHADOW_OPACITY;
     this.shadowOffsetX = data.shadowOffsetX !== undefined ? data.shadowOffsetX : 4;
     this.shadowOffsetY = data.shadowOffsetY !== undefined ? data.shadowOffsetY : 4;
-    // Lock state
-    this.frozen = data.frozen !== undefined ? data.frozen : false;
+    // NOTE: frozen is inherited from WhiteboardObject base class
   }
 
   /**
@@ -6134,8 +6865,7 @@ class WhiteboardImage extends WhiteboardObject {
           shadowOpacity: this.shadowOpacity,
           shadowOffsetX: this.shadowOffsetX,
           shadowOffsetY: this.shadowOffsetY,
-      // Lock state
-          frozen: this.frozen,
+      // NOTE: frozen is included via super.toJSON()
       // Base dimensions
           baseWidth: this.baseWidth,
           baseHeight: this.baseHeight
@@ -6168,6 +6898,17 @@ class WhiteboardImage extends WhiteboardObject {
       return;
     }
 
+    // Acquire an authoritative lock BEFORE mutating anything. Abort if denied/timed out.
+    // (When there is no active GM, requestLock resolves true immediately — lock-free editing.)
+    if (socketController?.lockManager) {
+      const granted = await socketController.lockManager.requestLock(this.id, 'image');
+      if (!granted) {
+        console.warn(`[WhiteboardImage] enterCropMode: lock denied for ${this.id}`);
+        ui?.notifications?.info?.('This image is being edited by another user.');
+        return;
+      }
+    }
+
     // Reset rotation before entering crop mode (crop doesn't support rotated images)
     // This is KISS approach - crop always works in non-rotated coordinate system
     if (this.rotation && this.rotation !== 0) {
@@ -6181,26 +6922,6 @@ class WhiteboardImage extends WhiteboardObject {
     registry.update(this.id, {
       isCropping: true
     }, 'local');
-
-    // Send socket lock message (if socketController is available)
-    if (socketController) {
-      socketController.emit('imageLock', {
-        imageId: this.id,
-        userId: game.user.id,
-        userName: game.user.name
-      });
-    } else {
-      // Fallback: send directly via game.socket
-      if (game.socket) {
-        game.socket.emit(SOCKET_NAME, {
-          action: 'imageLock',
-          imageId: this.id,
-          sceneId: canvas.scene?.id,
-          userId: game.user.id,
-          userName: game.user.name
-        });
-      }
-    }
 
     // Mark container as cropping
     container.setAttribute('data-cropping', 'true');
@@ -6247,11 +6968,11 @@ class WhiteboardImage extends WhiteboardObject {
     }
 
     // // Create gizmos depending on mask type
+    // NOTE: gizmos are positioned further below, AFTER the container has been expanded to
+    // full image size by the mask-type block. Positioning them here used the container's
+    // pre-crop (shrunk-to-visible) size from a previous crop session and left them stranded
+    // crop-offset pixels away from the edges once the container grew to full size.
     const handles = layer.createCropHandles(this.id, this.maskType || 'rect');
-    if (handles) {
-      // // Update gizmo positions
-      layer.updateCropHandlesPosition(this.id);
-    }
 
     // // Update clip-path
     layer.updateImageClipPath(this.id);
@@ -6413,6 +7134,11 @@ class WhiteboardImage extends WhiteboardObject {
       }
     }
 
+    // // Update gizmo positions now that the container is at its final crop-mode size
+    if (handles) {
+      layer.updateCropHandlesPosition(this.id);
+    }
+
     // // Update panel position after updating border in crop mode
     if (window.wbeImageControlPanelUpdate) {
       window.wbeImageControlPanelUpdate();
@@ -6453,21 +7179,8 @@ class WhiteboardImage extends WhiteboardObject {
     // registry.update() → _handleRegistryChange() → _scheduleSave() → _saveAll()
     // All crop data is already included in toJSON() and will be saved automatically
 
-    // Send socket message about unlocking
-    if (socketController) {
-      socketController.emit('imageUnlock', {
-        imageId: this.id
-      });
-    } else {
-      // Fallback: send directly via game.socket
-      if (game.socket) {
-        game.socket.emit(SOCKET_NAME, {
-          action: 'imageUnlock',
-          imageId: this.id,
-          sceneId: canvas.scene?.id
-        });
-      }
-    }
+    // Release the authoritative lock (arbiter broadcasts lockReleased to all clients).
+    socketController?.lockManager?.releaseLock(this.id);
 
     // Remove cropping flags
     container.removeAttribute('data-cropping');
@@ -8163,6 +8876,19 @@ class TextStylingPanel {
       });
     };
     const panel = this.view.render(null, openSubpanel);
+    
+    // Add hide button (GM only) - allows GM to hide objects from players
+    if (game.user?.isGM) {
+      const hideBtn = BasePanelView.makeHideButton(obj.hidden, (updateBtn) => {
+        const currentObj = this.registry.get(textId);
+        if (!currentObj) return;
+        const newHidden = !currentObj.hidden;
+        this.registry.update(textId, { hidden: newHidden }, 'local');
+        updateBtn(newHidden);
+      });
+      this.view.toolbar.appendChild(hideBtn);
+    }
+    
     document.body.appendChild(panel);
 
     // 4. Setup position manager (with direct view reference)
@@ -8196,6 +8922,12 @@ class TextStylingPanel {
     }
     this.controller = null;
     this.currentTextId = null;
+  }
+
+  updatePosition() {
+    if (this.positionManager) {
+      this.positionManager.update();
+    }
   }
 
   // Check if click is inside panel or subpanel (for use by InteractionManager)
@@ -9234,6 +9966,38 @@ class BasePanelView {
     if (isFrozen) {
       this.setButtonActive(btn, true);
     }
+    return btn;
+  }
+
+  /**
+   * Create hide/show toggle button for GM (hidden objects feature)
+   * Static method - can be used by any panel without view instance
+   * @param {boolean} isHidden - Current hidden state
+   * @param {Function} onToggle - Callback when toggled, receives (updateButtonFn)
+   * @returns {HTMLElement} Button element
+   */
+  static makeHideButton(isHidden, onToggle) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wbe-hide-btn';
+    
+    // Helper to update button state
+    const updateButton = (hidden) => {
+      btn.title = hidden ? 'Show to players' : 'Hide from players';
+      btn.innerHTML = hidden 
+        ? '<i class="fas fa-eye"></i>' 
+        : '<i class="fas fa-eye-slash"></i>';
+      btn.classList.toggle('wbe-hidden-active', hidden);
+    };
+    
+    // Set initial state
+    updateButton(isHidden);
+    
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onToggle(updateButton);
+    });
+    
     return btn;
   }
 
@@ -10555,6 +11319,19 @@ class ImageControlPanel {
       });
     };
     const panel = this.view.render(openSubpanel);
+    
+    // Add hide button (GM only) - allows GM to hide objects from players
+    if (game.user?.isGM) {
+      const hideBtn = BasePanelView.makeHideButton(obj.hidden, (updateBtn) => {
+        const currentObj = this.registry.get(imageId);
+        if (!currentObj) return;
+        const newHidden = !currentObj.hidden;
+        this.registry.update(imageId, { hidden: newHidden }, 'local');
+        updateBtn(newHidden);
+      });
+      this.view.toolbar.appendChild(hideBtn);
+    }
+    
     document.body.appendChild(panel);
 
     // 4. Setup initial state for Lock button (icon and active state based on frozen)
@@ -10847,9 +11624,11 @@ class MassSelectionView {
       const x = parseFloat(container.style.left) || 0;
       const y = parseFloat(container.style.top) || 0;
       
-      // Get object from registry to check type and scale
+      // Get object from registry to check type
       const obj = this.layer?.registry?.get(container.id);
-      const scale = obj?.scale !== undefined ? obj.scale : 1;
+      // Read scale from DOM transform (more accurate during operations)
+      const transformMatch = container.style.transform?.match(/scale\(([^)]+)\)/);
+      const scale = transformMatch ? parseFloat(transformMatch[1]) : (obj?.scale !== undefined ? obj.scale : 1);
       const borderWidth = obj?.borderWidth || obj?.strokeWidth || 0;
       
       // Get base dimensions
@@ -11244,6 +12023,11 @@ class MassSelectionController {
 
     this.isDragging = false;
 
+    // UNDO-REDO: Start batch for mass operation (all updates = 1 undo step)
+    if (window.Whiteboard?.undoRedo) {
+      window.Whiteboard.undoRedo.startBatch();
+    }
+
     // Commit final positions to Registry
     // We saved start positions from Registry (obj.x/obj.y), so just add total delta
     let dragDeltaX = 0, dragDeltaY = 0;
@@ -11319,6 +12103,11 @@ class MassSelectionController {
 
     this.startPositions.clear();
     FoundryAPIAdapter.enableMassSelect();
+    
+    // UNDO-REDO: End batch
+    if (window.Whiteboard?.undoRedo) {
+      window.Whiteboard.undoRedo.endBatch();
+    }
   }
 
   // ========== Group Scale ==========
@@ -11395,7 +12184,12 @@ class MassSelectionController {
 
     const { pivotX, pivotY, startData } = this.scaleState;
 
-    // Update each object using polymorphic applyGroupScale
+    // Store current values for commit in endGroupScale
+    if (!this.scaleState.currentValues) {
+      this.scaleState.currentValues = new Map();
+    }
+
+    // Update each object - DOM directly, no Registry during operation
     for (const id of this.selectedIds) {
       const obj = this.registry.get(id);
       const start = startData.get(id);
@@ -11423,8 +12217,18 @@ class MassSelectionController {
         };
       }
 
-      // Update registry (will trigger DOM update)
-      this.registry.update(id, newValues, 'local');
+      // Store for commit
+      this.scaleState.currentValues.set(id, newValues);
+
+      // Update DOM directly (no Registry during operation)
+      const container = this.layer?.getObjectContainer(id);
+      if (container) {
+        container.style.left = `${newValues.x}px`;
+        container.style.top = `${newValues.y}px`;
+        if (newValues.scale !== undefined) {
+          container.style.transform = `scale(${newValues.scale})`;
+        }
+      }
     }
 
     // Update bounding box
@@ -11437,9 +12241,26 @@ class MassSelectionController {
   endGroupScale() {
     if (!this.isScaling) return;
 
+    const { currentValues } = this.scaleState || {};
+    
     this.isScaling = false;
+    
+    // Commit final values to Registry (batch for undo)
+    if (currentValues && currentValues.size > 0) {
+      if (window.Whiteboard?.undoRedo) {
+        window.Whiteboard.undoRedo.startBatch();
+      }
+      
+      for (const [id, values] of currentValues) {
+        this.registry.update(id, values, 'local');
+      }
+      
+      if (window.Whiteboard?.undoRedo) {
+        window.Whiteboard.undoRedo.endBatch();
+      }
+    }
+    
     this.scaleState = null;
-
     FoundryAPIAdapter.enableMassSelect();
   }
 
@@ -11587,8 +12408,11 @@ class MassSelectionController {
       this.interactionManager._deselect();
     }
 
+    const isGM = game.user?.isGM;
     for (const obj of this.registry.getAll()) {
       if (obj.frozen) continue;
+      // Players cannot select hidden objects (they don't exist in Player's DOM)
+      if (obj.hidden && !isGM) continue;
       this.selectedIds.add(obj.id);
       this.registry.update(obj.id, { selected: true, massSelected: true }, 'local');
     }
@@ -11751,11 +12575,30 @@ class MassSelectionController {
   deleteSelected() {
     if (this.selectedIds.size === 0) return;
 
-    const idsToDelete = [...this.selectedIds];
+    // Object types can veto deletion for the current user (e.g. fate-card: GM only)
+    const allIds = [...this.selectedIds];
+    const idsToDelete = allIds.filter(id => {
+      const obj = this.registry.get(id);
+      return !(obj?.canDelete && obj.canDelete(game.user) === false);
+    });
+    const vetoed = allIds.length - idsToDelete.length;
+    if (vetoed > 0) {
+      ui.notifications?.warn(`${vetoed} object(s) can only be deleted by a GM and were kept.`);
+    }
     this.clear();
+
+    // UNDO-REDO: Start batch for mass delete (all deletes = 1 undo step)
+    if (window.Whiteboard?.undoRedo) {
+      window.Whiteboard.undoRedo.startBatch();
+    }
 
     for (const id of idsToDelete) {
       this.registry.unregister(id, 'local');
+    }
+
+    // UNDO-REDO: End batch
+    if (window.Whiteboard?.undoRedo) {
+      window.Whiteboard.undoRedo.endBatch();
     }
   }
 
@@ -11902,6 +12745,11 @@ class MassSelectionController {
 
     const newIds = [];
 
+    // UNDO-REDO: Start batch for mass paste (all creates = 1 undo step)
+    if (window.Whiteboard?.undoRedo) {
+      window.Whiteboard.undoRedo.startBatch();
+    }
+
     for (const data of objectsToPaste) {
       const newId = `wbe-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       
@@ -11934,6 +12782,11 @@ class MassSelectionController {
         this.registry.register(obj, 'local');
         newIds.push(newId);
       }
+    }
+
+    // UNDO-REDO: End batch
+    if (window.Whiteboard?.undoRedo) {
+      window.Whiteboard.undoRedo.endBatch();
     }
 
     // Select new objects
@@ -12299,7 +13152,9 @@ class InteractionManager {
       wheel: null,
       click: null,
       dblclick: null,
-      keydown: null
+      keydown: null,
+      keyup: null,
+      blur: null
     };
 
     // Mass selection controller (will be initialized in init())
@@ -12340,6 +13195,8 @@ class InteractionManager {
     this._boundHandlers.click = this._handleClick.bind(this);
     this._boundHandlers.dblclick = this._handleDblClick.bind(this);
     this._boundHandlers.keydown = this._handleKeyDown.bind(this);
+    this._boundHandlers.keyup = this._handleKeyUp.bind(this);
+    this._boundHandlers.blur = this._handleWindowBlur.bind(this);
     this._boundHandlers.copy = this._handleCopy.bind(this);
     this._boundHandlers.paste = this._handlePaste.bind(this);
     window.addEventListener('mousedown', this._boundHandlers.mousedown, true);
@@ -12352,6 +13209,8 @@ class InteractionManager {
     window.addEventListener('click', this._boundHandlers.click, true);
     window.addEventListener('dblclick', this._boundHandlers.dblclick, true);
     window.addEventListener('keydown', this._boundHandlers.keydown, true);
+    window.addEventListener('keyup', this._boundHandlers.keyup, true);
+    window.addEventListener('blur', this._boundHandlers.blur, true);
     // CRITICAL: Listen to copy/paste on window with capture to intercept all events
     window.addEventListener('copy', this._boundHandlers.copy, true);
     window.addEventListener('paste', this._boundHandlers.paste, true);
@@ -12421,6 +13280,12 @@ class InteractionManager {
     if (this._boundHandlers.keydown) {
       window.removeEventListener('keydown', this._boundHandlers.keydown, true);
     }
+    if (this._boundHandlers.keyup) {
+      window.removeEventListener('keyup', this._boundHandlers.keyup, true);
+    }
+    if (this._boundHandlers.blur) {
+      window.removeEventListener('blur', this._boundHandlers.blur, true);
+    }
     if (this._boundHandlers.copy) {
       window.removeEventListener('copy', this._boundHandlers.copy, true);
     }
@@ -12442,6 +13307,8 @@ class InteractionManager {
       click: null,
       dblclick: null,
       keydown: null,
+      keyup: null,
+      blur: null,
       copy: null,
       paste: null
     };
@@ -12563,6 +13430,13 @@ class InteractionManager {
 
   // --- Event Handlers ---
 
+  _setPassthroughModeEnabled(enabled) {
+    this._isPassthroughMode = enabled;
+    if (this.layer) {
+      this.layer.setPassthroughMode(enabled);
+    }
+  }
+
   _handleKeyDown(e) {
     // PRIORITY 0: Ignore Enter key in contentEditable elements
     // This prevents conflicts with other Foundry modules that listen to Enter on window
@@ -12575,6 +13449,39 @@ class InteractionManager {
     
     if (isEditable && e.key === 'Enter') {
       return; // Let the textSpan handler deal with it
+    }
+    
+    // PRIORITY 0.3: Z key - enable passthrough mode (layer becomes transparent and non-interactive)
+    // This allows interacting with Foundry VTT underneath the whiteboard
+    // Use e.code for keyboard-layout independence (works with any language layout)
+    if (e.code === 'KeyZ' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !isEditable && !this._isPassthroughMode) {
+      this._setPassthroughModeEnabled(true);
+      return;
+    }
+    
+    // PRIORITY 0.5: Undo/Redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y)
+    // CRITICAL: Do NOT intercept when editing text - let browser handle native undo
+    // Use e.code for keyboard layout independence (works with Russian layout too)
+    if ((e.ctrlKey || e.metaKey) && !isEditable) {
+      // Undo: Ctrl+Z (without Shift)
+      if (e.code === 'KeyZ' && !e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (window.Whiteboard?.undoRedo?.canUndo()) {
+          window.Whiteboard.undoRedo.undo();
+        }
+        return;
+      }
+      
+      // Redo: Ctrl+Shift+Z or Ctrl+Y
+      if ((e.code === 'KeyZ' && e.shiftKey) || e.code === 'KeyY') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (window.Whiteboard?.undoRedo?.canRedo()) {
+          window.Whiteboard.undoRedo.redo();
+        }
+        return;
+      }
     }
     
     // PRIORITY 1: Mass Selection keyboard shortcuts
@@ -12732,6 +13639,12 @@ class InteractionManager {
           return;
         }
 
+        // Object types can veto deletion for the current user (e.g. fate-card: GM only)
+        const selectedObj = this.registry.get(this.selectedId);
+        if (selectedObj?.canDelete && selectedObj.canDelete(game.user) === false) {
+          return;
+        }
+
         // Delete the selected object
         e.preventDefault();
         e.stopPropagation();
@@ -12804,6 +13717,28 @@ class InteractionManager {
       return;
     }
   }
+  
+  /**
+   * Handle keyup events
+   * Used for Z-key passthrough mode release
+   * @param {KeyboardEvent} e - Keyboard event
+   * @private
+   */
+  _handleKeyUp(e) {
+    // Z released - disable passthrough mode
+    if (e.code === 'KeyZ' && this._isPassthroughMode) {
+      this._setPassthroughModeEnabled(false);
+      return;
+    }
+  }
+
+  _handleWindowBlur() {
+    // Safety reset if keyup is missed due to focus loss
+    if (this._isPassthroughMode) {
+      this._setPassthroughModeEnabled(false);
+    }
+  }
+  
   /**
    * Handle mousedown events using HandlerResolver
    * 
@@ -12815,6 +13750,8 @@ class InteractionManager {
    * @private
    */
   _handleMouseDown(e) {
+    // Passthrough mode - let events pass to Foundry VTT
+    if (this._isPassthroughMode) return;
     try {
       // Create EventContext for unified access to event data
       const ctx = new EventContext(e, this);
@@ -12833,6 +13770,9 @@ class InteractionManager {
     }
   }
   _handleMouseMove(e) {
+    // Passthrough mode - let events pass to Foundry VTT
+    if (this._isPassthroughMode) return;
+    
     // Save mouse position for paste (center under cursor)
     this.lastMouseX = e.clientX;
     this.lastMouseY = e.clientY;
@@ -12978,6 +13918,9 @@ class InteractionManager {
     }
   }
   _handleMouseUp(e) {
+    // Passthrough mode - let events pass to Foundry VTT
+    if (this._isPassthroughMode) return;
+    
     // Handle unfreeze icon mouse up (must be checked before other operations)
     if (this.unfreezeHoldState && e.button === 0) {
       this._handleUnfreezeIconMouseUp(e);
@@ -13164,6 +14107,9 @@ class InteractionManager {
     }
   }
   _handleWheel(_e) {
+    // Passthrough mode - let events pass to Foundry VTT
+    if (this._isPassthroughMode) return;
+    
     // Hide all panels during zoom
     this._hideAllPanels();
 
@@ -13199,6 +14145,9 @@ class InteractionManager {
     // Don't preventDefault - let Foundry handle zoom
   }
   _handleClick(e) {
+    // Passthrough mode - let events pass to Foundry VTT
+    if (this._isPassthroughMode) return;
+    
     // Handle panel closing (architectural fix: centralized event handling)
     // Check if styling panel is open and should be closed
     if (this.stylingPanel.panel) {
@@ -13222,6 +14171,9 @@ class InteractionManager {
     }
   }
   _handleDblClick(e) {
+    // Passthrough mode - let events pass to Foundry VTT
+    if (this._isPassthroughMode) return;
+    
     // Handle Text Editing (double click on editable object)
     const target = this._hitTest(e.clientX, e.clientY);
     if (target.type === 'object' && target.object) {
@@ -14016,6 +14968,8 @@ class InteractionManager {
   }
 
   _startDrag(id, e) {
+    // Authoritative lock: never drag an object locked by another user.
+    if (this.socketController?.lockManager?.isLockedByOther(id)) return;
     const obj = this.registry.get(id);
     if (obj) {
       // Hide styling panel during drag (standardized for all object types)
@@ -14255,11 +15209,22 @@ class InteractionManager {
     // Save canvas zoom for delta normalization
     const canvasZoom = getCanvasScale();
     
+    // Cache min-content width (longest word) at start to prevent position drift
+    const container = this.layer?.getObjectContainer(id);
+    let minContentWidth = 100; // Default minimum
+    if (container && this.layer) {
+      const textSpan = container.querySelector('.wbe-text-background-span');
+      if (textSpan) {
+        minContentWidth = this.layer._getTextMinContentWidth(textSpan);
+      }
+    }
+    
     this.widthResizeState = {
       id,
       startX: e.clientX,
       startWidth: textElement.offsetWidth,
-      canvasZoom
+      canvasZoom,
+      minContentWidth
     };
 
     // Change cursor (on board to override any other cursor logic)
@@ -14271,7 +15236,8 @@ class InteractionManager {
       id,
       startX,
       startWidth,
-      canvasZoom
+      canvasZoom,
+      minContentWidth
     } = this.widthResizeState;
     if (!this.layer) return;
     const obj = this.registry.get(id);
@@ -14281,7 +15247,8 @@ class InteractionManager {
     this.layer.applyBoardCursor('ew-resize');
     // CRITICAL: Normalize deltaX by canvas zoom for consistent behavior at any zoom level
     const deltaX = (e.clientX - startX) / canvasZoom;
-    const newWidth = Math.max(50, startWidth + deltaX);
+    // Use cached minContentWidth as minimum (width of longest word)
+    const newWidth = Math.max(minContentWidth, startWidth + deltaX);
 
     // OPTIMIZATION: Update DOM directly during width resize (no Registry update)
     // This prevents jitter from multiple Registry updates and conflicts with _updateObjectElement
@@ -14380,9 +15347,19 @@ class InteractionManager {
     const container = this.layer?.getObjectContainer(id);
     const isText = obj.type === 'text';
     const currentWidth = isText 
-      ? (obj.textWidth ?? parseFloat(container?.style.width) ?? 100)
-      : (obj.width ?? parseFloat(container?.style.width) ?? 100);
-    const currentHeight = obj.height ?? parseFloat(container?.style.height) ?? 100;
+      ? (obj.textWidth ?? safeParseFloat(container?.style.width, 100))
+      : (obj.width ?? safeParseFloat(container?.style.width, 100));
+    const currentHeight = obj.height ?? safeParseFloat(container?.style.height, 100);
+    
+    // For texts: cache min-content width (longest word) at start
+    // This prevents position drift when width is clamped during resize
+    let minContentWidth = 20; // Default MIN_SIZE for shapes
+    if (isText && container) {
+      const textSpan = container.querySelector('.wbe-text-background-span');
+      if (textSpan && this.layer) {
+        minContentWidth = this.layer._getTextMinContentWidth(textSpan);
+      }
+    }
     
     this.stretchResizeState = {
       id,
@@ -14395,7 +15372,8 @@ class InteractionManager {
       startObjY: obj.y,
       canvasZoom,
       objScale,  // Store object scale for delta calculation
-      isText     // Store type for update logic
+      isText,    // Store type for update logic
+      minContentWidth  // Cached min width for texts
     };
     
     // Set cursor
@@ -14410,7 +15388,7 @@ class InteractionManager {
   _updateStretchResize(e) {
     if (!this.stretchResizeState) return;
     
-    const { id, direction, startX, startY, startWidth, startHeight, startObjX, startObjY, canvasZoom, objScale, isText } = this.stretchResizeState;
+    const { id, direction, startX, startY, startWidth, startHeight, startObjX, startObjY, canvasZoom, objScale, isText, minContentWidth } = this.stretchResizeState;
     const obj = this.registry.get(id);
     if (!obj) return;
     
@@ -14439,7 +15417,9 @@ class InteractionManager {
     switch (direction) {
       case 'right':
         // Increase width (visually left edge stays fixed)
-        const newWidthRight = Math.max(MIN_SIZE, startWidth + deltaX);
+        // For texts: use cached minContentWidth instead of MIN_SIZE
+        const minWidthRight = isText ? minContentWidth : MIN_SIZE;
+        const newWidthRight = Math.max(minWidthRight, startWidth + deltaX);
         if (isText) {
           updates.textWidth = newWidthRight;
           // CRITICAL: Text uses transform-origin: center with scale
@@ -14456,7 +15436,9 @@ class InteractionManager {
         
       case 'left':
         // Decrease width from left (visually right edge stays fixed)
-        const newWidthLeft = Math.max(MIN_SIZE, startWidth - deltaX);
+        // For texts: use cached minContentWidth instead of MIN_SIZE
+        const minWidthLeft = isText ? minContentWidth : MIN_SIZE;
+        const newWidthLeft = Math.max(minWidthLeft, startWidth - deltaX);
         if (isText) {
           updates.textWidth = newWidthLeft;
           const deltaCenterLeft = (newWidthLeft - startWidth) / 2;
@@ -14785,10 +15767,43 @@ class InteractionManager {
       }
     });
   }
+
+  /**
+   * Sync active panels after Registry updates object geometry.
+   * @param {string} id - Updated object id
+   * @param {Object|null} changes - Applied changes from Registry
+   */
+  handleRegistryObjectUpdate(id, changes = null) {
+    const geometryKeys = ['x', 'y', 'scale', 'textWidth', 'baseWidth', 'baseHeight', 'crop', 'circleRadius', 'circleOffset', 'rotation'];
+    const hasGeometryChange = !!changes && geometryKeys.some(key => key in changes);
+    if (!hasGeometryChange) return;
+
+    // Single-object panel reposition
+    if (this.selectedId === id) {
+      const obj = this.registry.get(id);
+      if (obj) {
+        const panel = this.panels[obj.type];
+        if (panel?.updatePosition) {
+          panel.updatePosition();
+        }
+      }
+    }
+
+    // Mass-selection panel reposition
+    if (this.massSelection?.selectedIds?.has(id) && this.massSelection.selectedIds.size >= 2) {
+      this.massSelection._updateBoundingBox();
+    }
+  }
+
   _select(id) {
     const obj = this.registry.get(id);
     // Frozen objects cannot be selected
     if (obj && obj.isFrozen?.()) {
+      return;
+    }
+
+    // Authoritative lock: a non-owner cannot select an object locked by someone else.
+    if (this.socketController?.lockManager?.isLockedByOther(id)) {
       return;
     }
 
@@ -15055,22 +16070,34 @@ class InteractionManager {
     ui?.notifications?.info?.('Style applied');
   }
 
-  _startEditText(id) {
+  async _startEditText(id) {
     const obj = this.registry.get(id);
     if (!obj || obj.type !== 'text') return;
 
     const container = this.layer?.getObjectContainer(id);
     if (!container) return;
     
-    // Check if text is locked by another user
-    if (container.dataset.lockedBy && container.dataset.lockedBy !== game.user?.id) {
-      console.warn(`[InteractionManager] Text ${id} is locked by ${container.dataset.lockedBy}, cannot edit`);
+    // Check if text is locked by another user (authoritative view + DOM fallback).
+    if (this.socketController?.lockManager?.isLockedByOther(id) ||
+        (container.dataset.lockedBy && container.dataset.lockedBy !== game.user?.id)) {
+      console.warn(`[InteractionManager] Text ${id} is locked by another user, cannot edit`);
       return;
     }
 
     // Finish previous editing if any
     if (this.editingId && this.editingId !== id) {
       this._endEditText(this.editingId);
+    }
+
+    // Acquire an authoritative lock before entering edit mode. Abort if denied/timed out.
+    // (When there is no active GM, requestLock resolves true immediately — lock-free editing.)
+    if (this.socketController?.lockManager) {
+      const granted = await this.socketController.lockManager.requestLock(id, 'text');
+      if (!granted) {
+        console.warn(`[InteractionManager] Text ${id} lock denied, cannot edit`);
+        ui?.notifications?.info?.('This text is being edited by another user.');
+        return;
+      }
     }
     const textElement = this.layer?.getTextElement(id);
     if (!textElement) return;
@@ -15079,27 +16106,23 @@ class InteractionManager {
 
     // Set editingId (single source of truth)
     this.editingId = id;
-    
-    // Send lock notification to other clients
-    if (this.socketController) {
-      this.socketController.emit('textLock', {
-        textId: id,
-        userId: game.user?.id,
-        userName: game.user?.name
-      });
-    }
-    
-    // Mark container as editing (for lock checking)
+
+    // Mark container as editing (for lock checking). The networked lock is already held
+    // (acquired above via lockManager.requestLock).
     container.setAttribute('data-editing', 'true');
     container.dataset.lockedBy = game.user?.id;
 
-    // Set callback to notify on editing completion
+    // Set callback to notify on editing completion. Route every blur (Enter, or a click
+    // WBE's own handlers don't intercept) through the single, authoritative end-of-edit
+    // path: _endEditText. It reads the still-live textSpan (contentEditable is still
+    // "true" when this fires - see the blur listener above), so it saves the same
+    // content the old duplicate blur-only save logic did, but this path also releases
+    // the lock, clears data-editing/lockedBy, restores the click-target, deletes an
+    // emptied text, and clears editingId before touching the model so the undo diff's
+    // captured "old" value is correct (see docs/known-bugs.md "Text editing").
     if (obj.setEditEndCallback) {
       obj.setEditEndCallback(id => {
-        // Clear editingId on blur editing completion
-        if (this.editingId === id) {
-          this.editingId = null;
-        }
+        this._endEditText(id);
       });
     }
 
@@ -15142,10 +16165,18 @@ class InteractionManager {
     console.log(`${MODULE_ID} | Started editing text: ${id}`);
   }
   _endEditText(id) {
+    const container = this.layer?.getObjectContainer(id);
     const textSpan = this.layer?.getTextSpan(id);
     if (!textSpan) return;
     const textElement = this.layer?.getTextElement(id);
     if (!textElement) return;
+    
+    // CRITICAL: Check if this text was actually being edited
+    // Use contentEditable OR data-editing — whichever is still set.
+    // data-editing can be cleared early by a bounced socket textUnlock message, so
+    // contentEditable is the more reliable source of truth here.
+    const wasEditing = textSpan.contentEditable === 'true' ||
+      container?.getAttribute('data-editing') === 'true';
     if (textSpan.contentEditable === "true") {
       // Save HTML markup with sanitization (like in Miro)
       // If HTML exists - save innerHTML, otherwise textContent for plain text
@@ -15198,9 +16229,23 @@ class InteractionManager {
         // Delete empty text objects (user didn't type anything)
         if (!newText || newText.trim() === '') {
           console.log(`${MODULE_ID} | Deleting empty text: ${id}`);
+          // BUGFIX: release lock BEFORE returning, otherwise lock hangs forever
+          if (wasEditing) {
+            this.socketController?.lockManager?.releaseLock(id);
+          }
+          if (container) {
+            container.removeAttribute('data-editing');
+            delete container.dataset.lockedBy;
+          }
           this.registry.unregister(id, 'local');
           if (this.selectedId === id) {
             this.selectedId = null;
+          }
+          // BUGFIX: this early return skipped the editingId clear below, so an edit
+          // ending on an emptied text (e.g. via Enter, routed here through
+          // _editEndCallback) left editingId stuck pointing at the just-deleted id.
+          if (this.editingId === id) {
+            this.editingId = null;
           }
           this.layer?.hideSelectionOverlay();
           return; // Exit early - no need to update deleted object
@@ -15217,25 +16262,28 @@ class InteractionManager {
           updateData.textWidth = currentWidth;
         }
         
+        // UNDO-REDO: Clear editingId BEFORE update so UndoRedoManager records this change
+        if (this.editingId === id) {
+          this.editingId = null;
+        }
+        
         this.registry.update(id, updateData, 'local');
       }
       console.log(`${MODULE_ID} | Finished editing text: ${id}`);
-    }
-
-    // Clear editingId (single source of truth)
-    if (this.editingId === id) {
-      this.editingId = null;
+    } else {
+      // Clear editingId even if contentEditable was not "true"
+      if (this.editingId === id) {
+        this.editingId = null;
+      }
     }
     
-    // Send unlock notification to other clients
-    if (this.socketController) {
-      this.socketController.emit('textUnlock', {
-        textId: id
-      });
+    // Release the authoritative lock (arbiter broadcasts lockReleased to all clients).
+    // CRITICAL: release even if editingId was already cleared by blur callback.
+    if (wasEditing) {
+      this.socketController?.lockManager?.releaseLock(id);
     }
     
     // Remove editing flags from container
-    const container = this.layer?.getObjectContainer(id);
     if (container) {
       container.removeAttribute('data-editing');
       delete container.dataset.lockedBy;
@@ -15301,6 +16349,12 @@ class InteractionManager {
       // All new objects are created selected
       ...options // Allows passing specific data (text, src, width, height, etc.)
     };
+
+    // 2b. Apply "create objects as hidden" setting (GM only)
+    // Players CANNOT create hidden objects - this setting is ignored for non-GM users
+    if (game.user?.isGM && getWBESetting('createObjectsHidden')) {
+      objData.hidden = true;
+    }
 
     // 3. Object creation via factory
     const obj = InteractionManager._createObjectFromType(type, objData);
@@ -15876,25 +16930,25 @@ class InteractionManager {
    * Fetches the image and passes to _handleImagePasteFromClipboard
    */
   async _handleImageUrlPaste(imageUrl) {
+    console.log('[InteractionManager] Fetching image from URL:', imageUrl.substring(0, 80));
+
+    // Method 1: Try fetch (works if server allows CORS)
     try {
-      console.log('[InteractionManager] Fetching image from URL:', imageUrl.substring(0, 80));
-      
-      // Method 1: Try fetch (works if server allows CORS)
-      try {
-        const response = await fetch(imageUrl);
-        if (response.ok) {
-          const blob = await response.blob();
-          if (blob.type.startsWith('image/')) {
-            const file = new File([blob], 'pasted-image.png', { type: blob.type });
-            await this._handleImagePasteFromClipboard(file);
-            return;
-          }
+      const response = await fetch(imageUrl);
+      if (response.ok) {
+        const blob = await response.blob();
+        if (blob.type.startsWith('image/')) {
+          const file = new File([blob], 'pasted-image.png', { type: blob.type });
+          await this._handleImagePasteFromClipboard(file);
+          return;
         }
-      } catch (fetchError) {
-        console.log('[InteractionManager] Fetch failed, trying canvas method:', fetchError.message);
       }
-      
-      // Method 2: Try loading via img + canvas (works if server sends CORS headers for images)
+    } catch (fetchError) {
+      console.log('[InteractionManager] Fetch failed, trying canvas method:', fetchError.message);
+    }
+
+    // Method 2: Try loading via img + canvas (works if server sends CORS headers for images)
+    try {
       const blob = await new Promise((resolve, reject) => {
         const img = new Image();
         img.crossOrigin = 'anonymous'; // Request CORS
@@ -15921,14 +16975,52 @@ class InteractionManager {
         img.onerror = () => reject(new Error('Image failed to load with CORS'));
         img.src = imageUrl;
       });
-      
+
       const file = new File([blob], 'pasted-image.png', { type: 'image/png' });
       await this._handleImagePasteFromClipboard(file);
-      
+      return;
+    } catch (corsError) {
+      console.log('[InteractionManager] Canvas CORS method failed, falling back to direct URL:', corsError.message);
+    }
+
+    // Method 3: Fallback - use direct URL (no CORS canvas) and keep external source
+    try {
+      const dimensions = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+        img.onerror = () => reject(new Error('Image failed to load without CORS'));
+        img.src = imageUrl;
+      });
+
+      const canvasZoom = getCanvasScale();
+      const finalScale = 1 / canvasZoom;
+      const screenX = this.lastMouseX ?? canvas.stage.x + canvas.stage.width / 2;
+      const screenY = this.lastMouseY ?? canvas.stage.y + canvas.stage.height / 2;
+      const scaledWidth = dimensions.width * finalScale;
+      const scaledHeight = dimensions.height * finalScale;
+
+      const t = canvas.stage.worldTransform;
+      const det = t.a * t.d - t.b * t.c;
+      const worldX = (t.d * (screenX - t.tx) - t.c * (screenY - t.ty)) / det;
+      const worldY = (t.a * (screenY - t.ty) - t.b * (screenX - t.tx)) / det;
+
+      const centeredX = worldX - scaledWidth / 2;
+      const centeredY = worldY - scaledHeight / 2;
+
+      this._createObjectAt('image', screenX, screenY, {
+        src: imageUrl,
+        width: dimensions.width,
+        height: dimensions.height,
+        baseWidth: dimensions.width,
+        baseHeight: dimensions.height,
+        x: centeredX,
+        y: centeredY,
+        scale: finalScale
+      });
+      return;
     } catch (error) {
       console.error('[InteractionManager] Failed to paste image from URL:', error);
-      // CORS blocks fetching cross-origin images - this is a browser security limitation
-      ui.notifications?.warn?.('Cannot paste this image (blocked by CORS). Right-click → "Save image as..." → drag to whiteboard.');
+      ui.notifications?.warn?.('Cannot paste this image. The source blocks loading or access.');
     }
   }
 
@@ -16276,7 +17368,8 @@ class FoundryPersistenceAdapter {
    * @param {Object} data - Data to save
    */
   async saveByType(serializationKey, data) {
-    if (!game.user?.isGM) return;
+    // SSOT: Only activeGM saves (prevents duplicate writes with multiple GMs)
+    if (game.user !== game.users?.activeGM) return;
     const flagKey = this._storageTypes.get(serializationKey);
     if (!flagKey) {
       console.warn(`[Persistence] Unknown storage type: ${serializationKey}`);
@@ -16333,7 +17426,8 @@ class FoundryPersistenceAdapter {
    * For example: unsetFlag(scope, "images.objectId") will remove objectId from images: unsetFlag(scope, "images.objectId") unsetFlag(scope, "images.objectId") will remove objectId from images images
    */
   async deleteObjectFromFlag(objectId, flagKey) {
-    if (!game.user?.isGM) return; // Only GM can remove
+    // SSOT: Only activeGM deletes (prevents duplicate operations with multiple GMs)
+    if (game.user !== game.users?.activeGM) return;
     if (!canvas?.scene) {
       console.warn(`[Persistence] No scene available, skipping deleteObjectFromFlag`);
       return;
@@ -16392,27 +17486,44 @@ class PersistenceController {
   }
 
   /**
-   * * Initialization: subscribe to Registry changes: subscribe to Registry changes Registry
+   * Initialization: subscribe to Registry changes and activeGM handover
    */
   init() {
-    // // Subscribe to Registry changes for automatic saving
+    // Subscribe to Registry changes for automatic saving
     this.registry.subscribe(this._handleRegistryChange.bind(this));
-    console.log(`[Persistence] Initialized`);
+    
+    // SSOT: Handle activeGM handover when a GM disconnects
+    // If we become the new activeGM, trigger a catch-up save to persist any unsaved data
+    Hooks.on('userConnected', (user, connected) => {
+      if (!connected && user.isGM) {
+        // A GM disconnected - check if we're now the activeGM
+        if (game.user === game.users?.activeGM) {
+          console.log('[Persistence] Became activeGM after GM disconnect, scheduling catch-up save');
+          this._scheduleSave();
+        }
+      }
+    });
+    
+    console.log(`[Persistence] Initialized (SSOT: activeGM writes only)`);
   }
 
   /**
-   * * Handle Registry changes for automatic saving
+   * Handle Registry changes for automatic saving
    * 
-   * * ARCHITECTURE::
-   * - * - Players: only send socket messages, DO NOT trigger saving: Players only send socket messages, DO NOT trigger saving, DO NOT trigger saving
-   * - GM: * - GM: saves all changes (both local and remote from players via socket) (GM saves all changes (both local and remote from players via socket) local, and remote from players via socket)
+   * ARCHITECTURE (SSOT - Single Source of Truth):
+   * - Players: only send socket messages, DO NOT trigger saving
+   * - activeGM: the ONE designated GM who saves all changes to database
+   * - Other GMs: receive socket updates but do NOT save (prevents duplicate writes)
    */
   _handleRegistryChange({ id, type, source }) {
+    // Skip 'init' source - these are objects loaded from DB, not user actions
+    if (source === 'init') return;
+    
     // For deletion - do not check _isLoading (deletion is not blocked by loading)
     if (type === 'deleted') {
-      // Only GM deletes from the database
-      if (game.user?.isGM) {
-        console.log(`[Persistence] Delete request: id=${id}, source=${source}, isGM=${game.user?.isGM}`);
+      // SSOT: Only activeGM deletes from the database
+      if (game.user === game.users?.activeGM) {
+        console.log(`[Persistence] Delete request: id=${id}, source=${source}, isActiveGM=true`);
         this._deleteFromDB(id);
       }
       return;
@@ -16421,13 +17532,13 @@ class PersistenceController {
     // For created/updated - check _isLoading
     if (this._isLoading) return;
 
-    // CRITICAL: Save only on GM
-    // Players MUST NOT trigger saving (only send socket messages)
-    if (!game.user?.isGM) return;
+    // SSOT: Only activeGM saves to database
+    // This ensures single writer even with multiple GM users connected
+    if (game.user !== game.users?.activeGM) return;
 
-    // GM saves all changes:
+    // ActiveGM saves all changes:
     // - source='local': own actions (creation, editing)
-    // - source='remote': player actions (received via socket and applied to Registry)
+    // - source='remote': player/other GM actions (received via socket and applied to Registry)
     // Debounced saving of all objects
     this._scheduleSave();
   }
@@ -16465,12 +17576,13 @@ class PersistenceController {
       }
     }
 
-    // Cancel any scheduled save
-    if (this._saveTimeout) {
-      clearTimeout(this._saveTimeout);
-      this._saveTimeout = null;
-    }
-
+    // NOTE: Do NOT cancel the shared _saveTimeout here. It may belong to a
+    // completely unrelated object's pending update, and _saveAll's _isDeleting
+    // guard below already reschedules instead of dropping it if it fires while
+    // we're mid-delete. This object is safe from resurrection regardless: it
+    // was already removed from registry.objects synchronously by
+    // ObjectRegistry.unregister() before this method ever runs, so any save
+    // - now or later - snapshots a registry that no longer contains it.
     this._isDeleting = true;
 
     try {
@@ -16569,7 +17681,8 @@ class PersistenceController {
    * Uses toJSON() from objects (SSOT: Registry) toJSON() from objects (SSOT: Registry)
    */
   async _saveAll() {
-    if (!game.user?.isGM) return; // Only GM saves
+    // SSOT: Only activeGM saves (single writer architecture)
+    if (game.user !== game.users?.activeGM) return;
 
     // Protection against parallel saves
     if (this._isSaving) {
@@ -16577,9 +17690,13 @@ class PersistenceController {
       return;
     }
 
-    // CRITICAL: Do not save during deletion to avoid overwriting the deletion
+    // CRITICAL: Do not save during deletion to avoid overwriting the deletion.
+    // Reschedule instead of dropping this save outright - it may carry a pending
+    // update (e.g. for a different object) that must not be lost just because a
+    // delete happened to be in flight when the debounce timer fired.
     if (this._isDeleting) {
-      console.log(`[Persistence] Deletion in progress, skipping save to avoid race condition`);
+      console.log(`[Persistence] Deletion in progress, rescheduling save to avoid race condition`);
+      this._scheduleSave();
       return;
     }
 
@@ -16670,7 +17787,7 @@ class PersistenceController {
           Object.values(data).forEach(objData => {
             try {
               const obj = InteractionManager._createObjectFromType(objectType, objData);
-              this.registry.register(obj, 'local');
+              this.registry.register(obj, 'init');  // 'init' = loading from DB, not user action
               loaded++;
             } catch (e) {
               console.warn(`[Persistence] Failed to load ${objectType} ${objData.id}: ${e.message}`);
@@ -16741,7 +17858,7 @@ class PersistenceController {
       Object.values(pending).forEach(data => {
         try {
           const obj = InteractionManager._createObjectFromType(type, data);
-          this.registry.register(obj, 'local');
+          this.registry.register(obj, 'init');  // 'init' = loading from DB, not user action
           loaded++;
         } catch (e) {
           console.warn(`[Persistence] Failed to load pending ${type} ${data.id}: ${e.message}`);
@@ -16777,15 +17894,41 @@ class SocketController {
     this._lastGMStatusCheck = 0;
     this._lastGMStatus = null;
     this._gmCheckDebounceMs = 1000; // Check GM status at most once per second
+    this.lockManager = null; // Authoritative lock orchestration (created in init)
   }
   init() {
     // Subscribe to Registry
     this.registry.subscribe(this._handleLocalChange.bind(this));
 
+    // Authoritative locking: the activeGM arbitrates, everyone participates as requester.
+    this.lockManager = new LockManager({
+      emit: (action, data) => this.emit(action, data),
+      now: wbeSyncNow,
+      getSelfId: () => game.user?.id,
+      getSelfName: () => game.user?.name,
+      // We are the arbiter iff Foundry designates us as the (single) active GM.
+      isActiveGM: () => !!game.users?.activeGM && game.user === game.users.activeGM,
+      // An arbiter is reachable iff any active GM exists; otherwise editing is lock-free.
+      hasArbiter: () => !!game.users?.activeGM,
+      onLockApplied: (objectId, ownerId, ownerName) => this._applyLockVisual(objectId, ownerId, ownerName),
+      onLockCleared: (objectId) => this._clearLockVisual(objectId),
+    });
+
     // Listen to Socket
     console.log(`[Socket] Registering listener for ${SOCKET_NAME}`);
     game.socket.on(SOCKET_NAME, this._handleSocketMessage.bind(this));
-    
+
+    // Start arbiter reaper if we are the active GM, and (re)evaluate on connection changes.
+    this.lockManager.startArbiterIfNeeded();
+    Hooks.on('userConnected', (user, connected) => {
+      // If we (now) are the activeGM, make sure the reaper is running.
+      this.lockManager.startArbiterIfNeeded();
+      // Arbiter fast-path: free all locks held by a user who just disconnected.
+      if (!connected && user?.id) {
+        this.lockManager.handleUserDisconnected(user.id);
+      }
+    });
+
     // Initialize GM status for non-GM users
     if (!game.user?.isGM) {
       this._lastGMStatus = hasConnectedGM();
@@ -16807,7 +17950,7 @@ class SocketController {
       action: action,
       ...data,
       sceneId: canvas.scene?.id, // Scene ID to filter messages by scene
-      timestamp: Date.now(),
+      timestamp: wbeSyncNow(), // Server-synchronized clock (see wbeSyncNow)
       userId: game.user?.id
     };
     try {
@@ -16824,7 +17967,10 @@ class SocketController {
     source,
     changes
   }) {
-    if (source === 'remote') return; // Don't echo back
+    // Only broadcast LOCAL user actions
+    // 'remote' = received from another client (don't echo back)
+    // 'init' = loading from DB (don't broadcast existing objects)
+    if (source !== 'local') return;
 
     // UI-only properties that should NOT be sent to other clients
     // These are local UI state, not shared data
@@ -16901,7 +18047,7 @@ class SocketController {
       id: id,
       data: jsonData,
       sceneId: canvas.scene?.id, // Scene ID to filter messages by scene
-      timestamp: Date.now(), // Timestamp to prevent race conditions
+      timestamp: wbeSyncNow(), // Server-synchronized clock to prevent race conditions (see wbeSyncNow)
       userId: game.user?.id // For debugging
     };
     try {
@@ -16921,7 +18067,15 @@ class SocketController {
       userId
     } = payload;
 
-    // CRITICAL: Filter by scene - ignore messages from other scenes
+    // Authoritative lock protocol (lockRequest/lockGranted/lockDenied/lockRenew/lockRelease/
+    // lockReleased) is fully handled by the LockManager. Locks are keyed by object id, not by
+    // scene, so this MUST run before the scene filter below: a GM who is merely *viewing* a
+    // different scene (Scene#view(), not activate() - canvas.scene.id changes but the real
+    // active scene and every other client are untouched) must still arbitrate lock requests
+    // for the real active scene. If this consumed the message, stop here.
+    if (this.lockManager?.handleMessage(action, payload)) return;
+
+    // CRITICAL: Filter by scene - ignore object-sync messages from other scenes
     // This prevents cross-scene object pollution
     if (sceneId && canvas.scene?.id && sceneId !== canvas.scene.id) {
       console.log(`[Socket] Ignoring message from different scene: ${sceneId} (current: ${canvas.scene.id})`);
@@ -16965,10 +18119,9 @@ class SocketController {
       const container = document.getElementById(id);
       if (container) {
         const lockedBy = container.dataset.lockedBy;
-        const isCropping = container.getAttribute('data-cropping') === 'true';
-        const isEditing = container.getAttribute('data-editing') === 'true';
-        // Skip if: object is locked AND lock is not by us AND update is not from lock owner
-        if ((isCropping || isEditing) && lockedBy && lockedBy !== game.user?.id && userId !== lockedBy) {
+        // "Lock means lock" (spec §7b): a held lock blocks ALL remote mutations by non-owners.
+        // Skip if: object is locked AND lock is not by us AND update is not from the lock owner.
+        if (lockedBy && lockedBy !== game.user?.id && userId !== lockedBy) {
           console.log(`[Socket] Skipping update for locked object ${id} (locked by ${lockedBy}, update from ${userId})`);
           return;
         }
@@ -16988,27 +18141,11 @@ class SocketController {
       }
       // Pass metadata with timestamp to prevent race conditions
       this.registry.update(id, data, 'remote', {
-        timestamp: timestamp || Date.now(),
+        timestamp: timestamp || wbeSyncNow(), // Server-synchronized clock (see wbeSyncNow)
         userId: userId
       });
     } else if (action === 'deleted') {
       this.registry.unregister(id, 'remote');
-    } else if (action === 'imageLock') {
-      // Handle image lock for crop mode
-      const { imageId, userId: lockUserId, userName } = payload;
-      this._handleImageLock(imageId, lockUserId, userName);
-    } else if (action === 'imageUnlock') {
-      // Handle image unlock after crop mode
-      const { imageId } = payload;
-      this._handleImageUnlock(imageId);
-    } else if (action === 'textLock') {
-      // Handle text lock for edit mode
-      const { textId, userId: lockUserId, userName } = payload;
-      this._handleTextLock(textId, lockUserId, userName);
-    } else if (action === 'textUnlock') {
-      // Handle text unlock after edit mode
-      const { textId } = payload;
-      this._handleTextUnlock(textId);
     } else if (action === 'gmStatusChange') {
       // Handle GM status change (online/offline)
       // Update indicator on all clients when GM connects/disconnects
@@ -17019,191 +18156,71 @@ class SocketController {
   }
 
   /**
-   * Handle image lock (crop mode on another client) (crop mode on another client)
-   * @param {string} imageId - ID images
-   * @param {string} lockUserId - ID user, who locked
-   * @param {string} userName - User name, who locked
+   * Render another user's lock locally (LockManager onLockApplied callback). Type-agnostic:
+   * works for text, image, and shape containers alike (they all resolve via getObjectContainer
+   * = document.getElementById(id)). Sets `data-editing` so the existing mousedown handler blocks
+   * interaction with the locked object, and force-deselects it here if we had it selected.
+   * See specs/authoritative-lock-design.md §7b.
    */
-  _handleImageLock(imageId, lockUserId, userName) {
-    // Do not block your own locks
-    if (lockUserId === game.user?.id) {
-      return;
-    }
+  _applyLockVisual(objectId, ownerId, ownerName) {
+    if (ownerId === game.user?.id) return; // never render our own lock
+    const container = this.layer?.getObjectContainer(objectId);
+    if (!container) return;
 
-    const obj = this.registry.get(imageId);
-    if (!obj || obj.type !== 'image') {
-      console.warn(`[Socket] imageLock: image ${imageId} not found`);
-      return;
-    }
+    container.dataset.lockedBy = ownerId;
+    container.setAttribute('data-locked-by-name', ownerName || ownerId);
+    container.setAttribute('data-editing', 'true'); // blocks clicks via mousedown-handlers
+    container.classList.add('wbe-object-locked');
 
-    const container = this.layer?.getObjectContainer(imageId);
-    if (!container) {
-      console.warn(`[Socket] imageLock: container for ${imageId} not found`);
-      return;
-    }
-
-    // Set the lock
-    container.dataset.lockedBy = lockUserId;
-    container.setAttribute('data-locked-by-name', userName || lockUserId);
-
-    // Visually indicate the lock: add class and overlay
-    container.classList.add('wbe-image-locked');
-    
-    // Create overlay for visual lock indication
-    let lockOverlay = container.querySelector('.wbe-image-lock-overlay');
-    if (!lockOverlay) {
-      lockOverlay = document.createElement('div');
-      lockOverlay.className = 'wbe-image-lock-overlay';
+    if (!container.querySelector('.wbe-lock-overlay')) {
+      const lockOverlay = document.createElement('div');
+      lockOverlay.className = 'wbe-lock-overlay';
       lockOverlay.style.cssText = `
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.3);
-        pointer-events: none;
-        z-index: 1000;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0, 0, 0, 0.18); pointer-events: none; z-index: 1000;
       `;
-      // Lock icon instead of text
-      const lockIcon = document.createElement('i');
-      lockIcon.className = 'fas fa-lock';
-      lockIcon.style.cssText = `
-        color: white;
-        font-size: 24px;
-        filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+      const badge = document.createElement('div');
+      badge.className = 'wbe-lock-badge';
+      badge.style.cssText = `
+        position: absolute; top: -6px; left: -6px; width: 20px; height: 20px;
+        background: #4a9eff; border-radius: 50%; display: flex; align-items: center;
+        justify-content: center; gap: 1px; font-size: 7px; font-weight: 600; color: white;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.25); font-family: sans-serif; letter-spacing: 0;
+        line-height: 1; pointer-events: none;
       `;
-      lockOverlay.appendChild(lockIcon);
+      badge.title = ownerName || ownerId || '';
+      const pencil = document.createElement('i');
+      pencil.className = 'fas fa-pencil-alt';
+      pencil.style.cssText = 'font-size: 6px; color: white;';
+      const initialSpan = document.createElement('span');
+      initialSpan.textContent = (ownerName || ownerId || '?')[0].toUpperCase();
+      badge.appendChild(pencil);
+      badge.appendChild(initialSpan);
+      lockOverlay.appendChild(badge);
       container.appendChild(lockOverlay);
     }
 
-    console.log(`[Socket] Image ${imageId} locked by ${userName || lockUserId}`);
-
-    // If the image was selected on this client, deselect it
-    if (this.interactionManager?.selectedId === imageId) {
+    // If we had this object selected on this client, deselect it.
+    if (this.interactionManager?.selectedId === objectId) {
       this.interactionManager._deselect();
     }
+    console.log(`[Socket] ${objectId} locked by ${ownerName || ownerId}`);
   }
 
   /**
-   * Handle image unlock (exit crop mode on another client) (exit from crop mode on another client)
-   * @param {string} imageId - ID images
+   * Clear a lock's local rendering (LockManager onLockCleared callback). Type-agnostic;
+   * no-op if the container/overlay is absent.
    */
-  _handleImageUnlock(imageId) {
-    const container = this.layer?.getObjectContainer(imageId);
-    if (!container) {
-      return;
-    }
-
-    // Remove the lock
-    delete container.dataset.lockedBy;
-    container.removeAttribute('data-locked-by-name');
-    container.classList.remove('wbe-image-locked');
-
-    // Remove the visual overlay
-    const lockOverlay = container.querySelector('.wbe-image-lock-overlay');
-    if (lockOverlay) {
-      lockOverlay.remove();
-    }
-
-    console.log(`[Socket] Image ${imageId} unlocked`);
-  }
-
-  /**
-   * Handle text lock (edit mode on another client)
-   * @param {string} textId - ID of text object
-   * @param {string} lockUserId - ID of user who locked
-   * @param {string} userName - Name of user who locked
-   */
-  _handleTextLock(textId, lockUserId, userName) {
-    // Do not block your own locks
-    if (lockUserId === game.user?.id) {
-      return;
-    }
-
-    const obj = this.registry.get(textId);
-    if (!obj || obj.type !== 'text') {
-      console.warn(`[Socket] textLock: text ${textId} not found`);
-      return;
-    }
-
-    const container = this.layer?.getObjectContainer(textId);
-    if (!container) {
-      console.warn(`[Socket] textLock: container for ${textId} not found`);
-      return;
-    }
-
-    // Set the lock
-    container.dataset.lockedBy = lockUserId;
-    container.setAttribute('data-locked-by-name', userName || lockUserId);
-    container.setAttribute('data-editing', 'true');
-
-    // Visually indicate the lock: add class and overlay
-    container.classList.add('wbe-text-locked');
-    
-    // Create overlay for visual lock indication
-    let lockOverlay = container.querySelector('.wbe-text-lock-overlay');
-    if (!lockOverlay) {
-      lockOverlay = document.createElement('div');
-      lockOverlay.className = 'wbe-text-lock-overlay';
-      lockOverlay.style.cssText = `
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.3);
-        pointer-events: none;
-        z-index: 1000;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      `;
-      // Lock icon instead of text
-      const lockIcon = document.createElement('i');
-      lockIcon.className = 'fas fa-lock';
-      lockIcon.style.cssText = `
-        color: white;
-        font-size: 24px;
-        filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
-      `;
-      lockOverlay.appendChild(lockIcon);
-      container.appendChild(lockOverlay);
-    }
-
-    console.log(`[Socket] Text ${textId} locked by ${userName || lockUserId}`);
-
-    // If the text was selected on this client, deselect it
-    if (this.interactionManager?.selectedId === textId) {
-      this.interactionManager._deselect();
-    }
-  }
-
-  /**
-   * Handle text unlock (exit edit mode on another client)
-   * @param {string} textId - ID of text object
-   */
-  _handleTextUnlock(textId) {
-    const container = this.layer?.getObjectContainer(textId);
-    if (!container) {
-      return;
-    }
-
-    // Remove the lock
+  _clearLockVisual(objectId) {
+    const container = this.layer?.getObjectContainer(objectId);
+    if (!container) return;
     delete container.dataset.lockedBy;
     container.removeAttribute('data-locked-by-name');
     container.removeAttribute('data-editing');
-    container.classList.remove('wbe-text-locked');
-
-    // Remove the visual overlay
-    const lockOverlay = container.querySelector('.wbe-text-lock-overlay');
-    if (lockOverlay) {
-      lockOverlay.remove();
-    }
-
-    console.log(`[Socket] Text ${textId} unlocked`);
+    container.classList.remove('wbe-object-locked');
+    const lockOverlay = container.querySelector('.wbe-lock-overlay');
+    if (lockOverlay) lockOverlay.remove();
+    console.log(`[Socket] ${objectId} unlocked`);
   }
 }
 
@@ -17674,6 +18691,10 @@ class Whiteboard {
       this.socket.init();
       this.persistence.init();
       
+      // Initialize Undo/Redo manager
+      this.undoRedo = new UndoRedoManager(this.registry);
+      this.undoRedo.init();
+      
       // Initialize GM warning indicator
       _initGMWarningIndicator();
 
@@ -17756,6 +18777,42 @@ class Whiteboard {
         }
       });
       
+      // Register "Settings" button in toolbar (GM only)
+      if (game.user?.isGM) {
+        registerTool({
+          id: 'wbe-settings',
+          title: 'WBE Settings',
+          icon: 'fa-solid fa-gear',
+          group: 'settings',
+          type: 'button',
+          onClick: () => {
+            showWBESettingsPopup();
+          }
+        });
+      }
+      
+      // Register "Debug Snapshot" button in toolbar
+      registerTool({
+        id: 'wbe-snapshot',
+        title: 'Debug Snapshot',
+        icon: 'fa-solid fa-camera',
+        group: 'settings',
+        type: 'button',
+        onClick: async () => {
+          try {
+            const snapshot = await WbeSnapshot.captureAndDownload(Whiteboard);
+            const suspect = snapshot?.suspect;
+            const msg = suspect
+              ? `WBE Snapshot saved! Suspect: ${suspect.type} "${(suspect.registry?.text || suspect.registry?.src || suspect.id || '').substring(0, 30)}"`
+              : 'WBE Snapshot saved (no object selected)';
+            ui?.notifications?.info?.(msg);
+          } catch (error) {
+            console.error(`${MODULE_ID} | Snapshot failed:`, error);
+            ui?.notifications?.error?.('WBE Snapshot failed - check console');
+          }
+        }
+      });
+      
       // LEGACY: Keep old injector for backwards compatibility (can be removed later)
       // MassSelectionToolInjector.register(this.interaction.massSelection);
       
@@ -17819,25 +18876,35 @@ class Whiteboard {
     if (!this.registry) {
       throw new Error(`${MODULE_ID} | Registry is undefined in createText`);
     }
+    
+    // Build object data
+    const objData = { text, x, y };
+    
+    // Apply "create objects as hidden" setting (GM only)
+    // Players CANNOT create hidden objects
+    if (game.user?.isGM && getWBESetting('createObjectsHidden')) {
+      objData.hidden = true;
+    }
+    
     // DRY: Use factory instead of direct constructor
-    const obj = InteractionManager._createObjectFromType('text', {
-      text,
-      x,
-      y
-    });
+    const obj = InteractionManager._createObjectFromType('text', objData);
     this.registry.register(obj, 'local');
     return obj;
   }
   static createImage(src, x, y, width, height) {
     this._ensureInitialized();
+    
+    // Build object data
+    const objData = { src, x, y, width, height };
+    
+    // Apply "create objects as hidden" setting (GM only)
+    // Players CANNOT create hidden objects
+    if (game.user?.isGM && getWBESetting('createObjectsHidden')) {
+      objData.hidden = true;
+    }
+    
     // DRY: Use factory instead of direct constructor
-    const obj = InteractionManager._createObjectFromType('image', {
-      src,
-      x,
-      y,
-      width,
-      height
-    });
+    const obj = InteractionManager._createObjectFromType('image', objData);
     this.registry.register(obj, 'local');
     return obj;
   }
@@ -17961,6 +19028,11 @@ window.WBE_BasePanelView = BasePanelView;
 window.WBE_registerSettings = registerModuleSettings;
 window.WBE_loadGoogleFonts = _loadGoogleFonts;
 window.WBE_isFeatureEnabled = isFeatureEnabled;
+
+// Export WBE Settings API (localStorage-based, per-user settings)
+window.getWBESetting = getWBESetting;
+window.setWBESetting = setWBESetting;
+window.clearWBESettings = clearWBESettings;
 
 // Export ZIndexModel for testing (can be removed in production)
 window.ZIndexModel = ZIndexModel;

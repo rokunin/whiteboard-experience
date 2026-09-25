@@ -144,6 +144,9 @@ export const WbeLogger = {
   }
 };
 
-// Экспорт в глобальную область для доступа из тестов
-window.WbeLogger = WbeLogger;
+// Export to global scope for access from tests/console
+// Use globalThis guard for Node.js compatibility (unit tests)
+if (typeof window !== 'undefined') {
+  window.WbeLogger = WbeLogger;
+}
 

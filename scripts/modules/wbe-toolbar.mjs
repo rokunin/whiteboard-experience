@@ -238,8 +238,8 @@ const TOOLBAR_STYLES = `
   text-align: center;
 }
 
-/* Tooltip - hide for buttons with submenu */
-#wbe-toolbar .wbe-tool-btn[data-tooltip]:not(:has(.wbe-tool-submenu)):hover::after {
+/* Tooltip - hide for buttons with submenu or quick options panel */
+#wbe-toolbar .wbe-tool-btn[data-tooltip]:not(:has(.wbe-tool-submenu)):not(:has(.wbe-quick-options)):hover::after {
   content: attr(data-tooltip);
   position: absolute;
   left: 100%;
@@ -560,7 +560,7 @@ function deactivateTool(toolId) {
 }
 
 // Group order for consistent toolbar layout
-const GROUP_ORDER = ['help', 'selection', 'create', 'shapes', 'objects', 'default'];
+const GROUP_ORDER = ['help', 'selection', 'create', 'shapes', 'objects', 'settings', 'default'];
 
 /**
  * Перерендерить тулбар

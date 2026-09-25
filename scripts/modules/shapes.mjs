@@ -37,10 +37,42 @@ class ShapesManager {
     this.currentElement = null;
     this.freehandPoints = [];
 
+    // Last shape style - used when creating new shapes
+    // Persists user's formatting preferences across shape creations
+    this.lastShapeStyle = {
+      strokeColor: DEFAULT_STROKE_COLOR,
+      strokeWidth: DEFAULT_STROKE_WIDTH,
+      fillColor: DEFAULT_FILL_COLOR,
+      fillOpacity: 100,
+      // Text properties
+      textColor: '#ffffff',
+      textSize: 16,
+      textAlign: 'center',
+      fontFamily: 'Arial',
+      fontWeight: 'normal',
+      fontStyle: 'normal',
+      // Shadow properties
+      shadowColor: '#000000',
+      shadowOpacity: 0,
+      shadowOffsetX: 4,
+      shadowOffsetY: 4
+    };
+
     this._onMouseDown = this._onMouseDown.bind(this);
     this._onMouseMove = this._onMouseMove.bind(this);
     this._onMouseUp = this._onMouseUp.bind(this);
     this._onKeyDown = this._onKeyDown.bind(this);
+  }
+
+  /**
+   * Update lastShapeStyle with new values
+   * Called when user changes style in ShapePanel
+   * @param {Object} changes - Style properties to update
+   */
+  _updateLastShapeStyle(changes) {
+    if (this.lastShapeStyle && changes) {
+      Object.assign(this.lastShapeStyle, changes);
+    }
   }
 
   init(retryCount = 0) {
@@ -101,6 +133,95 @@ class ShapesManager {
       #whiteboard-experience-layer.wbe-shape-freehand,
       #whiteboard-experience-layer.wbe-shape-freehand * {
         cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath fill='white' stroke='black' stroke-width='1' d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z'/%3E%3C/svg%3E") 2 22, crosshair !important;
+      }
+
+      /* ========================================
+       * Quick Options Panel (freehand tool)
+       * Appears to the right of the active tool button
+       * ======================================== */
+      .wbe-quick-options {
+        position: absolute;
+        left: calc(100% + 6px);
+        top: 0;
+        
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 6px;
+        
+        background: rgba(30, 30, 30, 0.95);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 6px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+        
+        pointer-events: auto;
+        z-index: 101;
+      }
+
+      /* Color swatch button */
+      .wbe-quick-options .wbe-qo-color {
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.4);
+        cursor: pointer;
+        transition: border-color 0.15s;
+        flex-shrink: 0;
+      }
+      .wbe-quick-options .wbe-qo-color:hover {
+        border-color: rgba(255, 255, 255, 0.8);
+      }
+
+      /* Hidden native color input */
+      .wbe-quick-options .wbe-qo-color-input {
+        position: absolute;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      /* Separator line (horizontal in vertical layout) */
+      .wbe-quick-options .wbe-qo-sep {
+        width: 80%;
+        height: 1px;
+        background: rgba(255, 255, 255, 0.15);
+        flex-shrink: 0;
+      }
+
+      /* Thickness presets column */
+      .wbe-quick-options .wbe-qo-thickness-row {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+      }
+
+      /* Individual thickness dot */
+      .wbe-quick-options .wbe-qo-dot {
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.6);
+        cursor: pointer;
+        transition: all 0.15s;
+        flex-shrink: 0;
+        border: 1px solid transparent;
+      }
+      .wbe-quick-options .wbe-qo-dot:hover {
+        background: rgba(255, 255, 255, 0.9);
+      }
+      .wbe-quick-options .wbe-qo-dot.active {
+        background: #fff;
+        border-color: rgba(100, 149, 237, 0.9);
+        box-shadow: 0 0 4px rgba(100, 149, 237, 0.6);
+      }
+
+      /* Thickness label */
+      .wbe-quick-options .wbe-qo-label {
+        font-size: 9px;
+        color: rgba(255, 255, 255, 0.5);
+        margin-top: -2px;
+        user-select: none;
       }
     `;
     document.head.appendChild(style);
@@ -232,6 +353,11 @@ class ShapesManager {
     window.addEventListener('mousemove', this._onMouseMove);
     window.addEventListener('mouseup', this._onMouseUp);
 
+    // Show quick options panel for freehand (color + thickness)
+    if (toolType === SHAPE_TYPES.FREEHAND) {
+      this._showQuickOptions('wbe-shape-freehand');
+    }
+
     console.log(`[${MODULE_NAME}] Tool enabled: ${toolType}`);
   }
   
@@ -273,6 +399,9 @@ class ShapesManager {
     // Reset cursor via CSS class
     this._setCursorClass(null);
 
+    // Hide quick options panel
+    this._hideQuickOptions();
+
     window.removeEventListener('mousemove', this._onMouseMove);
     window.removeEventListener('mouseup', this._onMouseUp);
 
@@ -282,6 +411,139 @@ class ShapesManager {
     }
 
     console.log(`[${MODULE_NAME}] Tool disabled`);
+  }
+
+  // ==========================================
+  // Quick Options Panel (freehand/shape pre-draw settings)
+  // ==========================================
+
+  /**
+   * Thickness presets for the quick options panel.
+   * Each entry: [value in px, display diameter in px]
+   */
+  static THICKNESS_PRESETS = [
+    [1, 4],
+    [2, 6],
+    [4, 10],
+    [8, 14],
+    [16, 20]
+  ];
+
+  /**
+   * Show the quick options panel (color + thickness) next to the active tool button.
+   * Panel is positioned to the right of the toolbar button, like submenus.
+   * @param {string} toolId - The data-tool-id of the button to attach to
+   */
+  _showQuickOptions(toolId) {
+    // Clean up any existing panel
+    this._hideQuickOptions();
+
+    const btn = document.querySelector(`[data-tool-id="${toolId}"]`);
+    if (!btn) return;
+
+    // Suppress both Foundry and WBE tooltips while panel is shown
+    if (btn.dataset.tooltip) {
+      this._savedTooltip = btn.dataset.tooltip;
+      delete btn.dataset.tooltip;
+    }
+
+    const panel = document.createElement('div');
+    panel.className = 'wbe-quick-options';
+    panel.id = 'wbe-freehand-quick-options';
+
+    // --- Color swatch ---
+    const colorSwatch = document.createElement('div');
+    colorSwatch.className = 'wbe-qo-color';
+    colorSwatch.style.backgroundColor = this.lastShapeStyle.strokeColor;
+    colorSwatch.title = 'Stroke color';
+
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.className = 'wbe-qo-color-input';
+    colorInput.value = this.lastShapeStyle.strokeColor;
+
+    colorSwatch.addEventListener('click', (e) => {
+      e.stopPropagation();
+      colorInput.click();
+    });
+
+    colorInput.addEventListener('input', (e) => {
+      e.stopPropagation();
+      const color = e.target.value;
+      colorSwatch.style.backgroundColor = color;
+      this._updateLastShapeStyle({ strokeColor: color });
+    });
+
+    // Prevent panel clicks from deactivating tool or triggering canvas
+    panel.addEventListener('mousedown', (e) => e.stopPropagation());
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    panel.appendChild(colorSwatch);
+    panel.appendChild(colorInput);
+
+    // --- Separator ---
+    const sep = document.createElement('div');
+    sep.className = 'wbe-qo-sep';
+    panel.appendChild(sep);
+
+    // --- Thickness presets ---
+    const thicknessRow = document.createElement('div');
+    thicknessRow.className = 'wbe-qo-thickness-row';
+
+    const currentWidth = this.lastShapeStyle.strokeWidth;
+
+    for (const [value, diameter] of ShapesManager.THICKNESS_PRESETS) {
+      const dot = document.createElement('div');
+      dot.className = 'wbe-qo-dot';
+      if (value === currentWidth) dot.classList.add('active');
+      dot.style.width = `${diameter}px`;
+      dot.style.height = `${diameter}px`;
+      dot.title = `${value}px`;
+
+      dot.addEventListener('click', (e) => {
+        e.stopPropagation();
+        // Update active state
+        thicknessRow.querySelectorAll('.wbe-qo-dot').forEach(d => d.classList.remove('active'));
+        dot.classList.add('active');
+        // Update label
+        const label = panel.querySelector('.wbe-qo-label');
+        if (label) label.textContent = `${value}px`;
+        // Persist
+        this._updateLastShapeStyle({ strokeWidth: value });
+      });
+
+      thicknessRow.appendChild(dot);
+    }
+
+    panel.appendChild(thicknessRow);
+
+    // --- Thickness label ---
+    const label = document.createElement('span');
+    label.className = 'wbe-qo-label';
+    label.textContent = `${currentWidth}px`;
+    panel.appendChild(label);
+
+    btn.appendChild(panel);
+    this._quickOptionsPanel = panel;
+  }
+
+  /**
+   * Remove the quick options panel from DOM
+   */
+  _hideQuickOptions() {
+    // Restore tooltip on the button before removing panel
+    if (this._savedTooltip && this._quickOptionsPanel) {
+      const btn = this._quickOptionsPanel.parentElement;
+      if (btn) {
+        btn.dataset.tooltip = this._savedTooltip;
+      }
+    }
+    this._savedTooltip = null;
+
+    if (this._quickOptionsPanel) {
+      this._quickOptionsPanel.remove();
+      this._quickOptionsPanel = null;
+    }
   }
 
   _getWorldCoords(e) {
@@ -433,9 +695,9 @@ class ShapesManager {
     }
 
     if (this.currentElement) {
-      this.currentElement.setAttribute('stroke', DEFAULT_STROKE_COLOR);
-      this.currentElement.setAttribute('stroke-width', DEFAULT_STROKE_WIDTH);
-      this.currentElement.setAttribute('fill', DEFAULT_FILL_COLOR);
+      this.currentElement.setAttribute('stroke', this.lastShapeStyle.strokeColor);
+      this.currentElement.setAttribute('stroke-width', this.lastShapeStyle.strokeWidth);
+      this.currentElement.setAttribute('fill', this.lastShapeStyle.fillColor);
       // Smooth line caps and joins for freehand
       if (this.currentTool === SHAPE_TYPES.FREEHAND) {
         this.currentElement.setAttribute('stroke-linecap', 'round');
@@ -521,12 +783,10 @@ class ShapesManager {
       return;
     }
 
-    // Собираем данные для shape
+    // Собираем данные для shape с применением сохранённого стиля
     let shapeData = {
       shapeType: this.currentTool,
-      strokeColor: DEFAULT_STROKE_COLOR,
-      strokeWidth: DEFAULT_STROKE_WIDTH,
-      fillColor: DEFAULT_FILL_COLOR
+      ...this.lastShapeStyle  // Apply saved style from previous shapes
     };
 
     // Вычисляем world coordinates для левого верхнего угла
@@ -689,6 +949,8 @@ class ShapeView {
     this.selected = data.selected || false;
     this.rank = data.rank || data.zIndexRank || ''; // Support both old and new field name
     this.zIndex = data.zIndex;
+    // Hidden state - GM-only visibility control
+    this.hidden = this._coerceBoolean(data.hidden, false);
 
     // Text properties (for rect and circle shapes)
     this.text = data.text || '';
@@ -710,6 +972,23 @@ class ShapeView {
     this.svg = null;
     this.textElement = null;
     this.isEditing = false;
+  }
+
+  /**
+   * Coerce value to boolean with default fallback
+   * Handles: undefined, null, "true"/"false" strings, numbers
+   * @param {any} value - Value to coerce
+   * @param {boolean} defaultValue - Default if value is undefined/null
+   * @returns {boolean}
+   */
+  _coerceBoolean(value, defaultValue) {
+    if (value === undefined || value === null) return defaultValue;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      if (value === 'true') return true;
+      if (value === 'false') return false;
+    }
+    return Boolean(value);
   }
 
   // ==========================================
@@ -739,6 +1018,7 @@ class ShapeView {
       rotation: this.rotation,
       scale: this.scale,
       frozen: this.frozen,
+      hidden: this.hidden, // GM-only visibility control
       rank: this.rank, // Use 'rank' to match Registry expectations
       // Text properties
       text: this.text,
@@ -1261,7 +1541,7 @@ class ShapeView {
   /**
    * Enter text editing mode (double-click)
    */
-  startEditing() {
+  async startEditing() {
     // Block editing when shape drawing tool is active
     if (window.WBE_Shapes?.enabled) return;
     
@@ -1269,6 +1549,23 @@ class ShapeView {
     
     const textEl = this.element?.querySelector('.wbe-shape-text');
     if (!textEl) return;
+
+    // Authoritative lock: refuse if another user holds it, otherwise acquire before editing.
+    // (Lock-free when there is no active GM — requestLock resolves true immediately.)
+    const lockManager = window.Whiteboard?.socket?.lockManager;
+    if (lockManager?.isLockedByOther(this.id)) {
+      ui?.notifications?.info?.('This shape is being edited by another user.');
+      return;
+    }
+    if (lockManager) {
+      const granted = await lockManager.requestLock(this.id, 'shape');
+      if (!granted) {
+        ui?.notifications?.info?.('This shape is being edited by another user.');
+        return;
+      }
+      // Re-check re-entrancy: a second dblclick may have started editing while we awaited.
+      if (this.isEditing) return;
+    }
     
     this.isEditing = true;
     textEl.contentEditable = 'true';
@@ -1321,6 +1618,9 @@ class ShapeView {
         window.Whiteboard.registry.update(this.id, { text: newText }, 'local');
       }
     }
+
+    // Release the authoritative lock (arbiter broadcasts lockReleased to all clients).
+    window.Whiteboard?.socket?.lockManager?.releaseLock(this.id);
   }
 
   _updateSvgContent() {
@@ -1406,6 +1706,8 @@ class ShapePanel {
         const fillOpacity = current?.fillOpacity ?? 100;
         this.view.openBackgroundSubpanel(fillBtn, { color: fillColor, opacity: fillOpacity }, (color, opacity) => {
           this.registry.update(this.shapeId, { fillColor: color, fillOpacity: opacity }, 'local');
+          // Save style for next shapes
+          window.WBE_Shapes?._updateLastShapeStyle({ fillColor: color, fillOpacity: opacity });
         });
       });
       this.view.toolbar.appendChild(fillBtn);
@@ -1422,6 +1724,8 @@ class ShapePanel {
           fontFamily: current?.fontFamily || 'Arial'
         }, (changes) => {
           this.registry.update(this.shapeId, changes, 'local');
+          // Save text style for next shapes
+          window.WBE_Shapes?._updateLastShapeStyle(changes);
         });
       });
       this.view.toolbar.appendChild(textBtn);
@@ -1447,11 +1751,21 @@ class ShapePanel {
           shadowOffsetX: shadowOffsetX,
           shadowOffsetY: shadowOffsetY
         }, 'local');
+        // Save border/shadow style for next shapes
+        window.WBE_Shapes?._updateLastShapeStyle({
+          strokeColor: borderColor,
+          strokeWidth: borderWidth,
+          shadowColor: shadowColor,
+          shadowOpacity: shadowOpacity,
+          shadowOffsetX: shadowOffsetX,
+          shadowOffsetY: shadowOffsetY
+        });
       });
     });
     this.view.toolbar.appendChild(borderBtn);
 
     // Rotate - uses subpanel (same as text/image)
+    // Note: rotation is NOT saved to lastShapeStyle (object-specific, not style)
     const rotateBtn = this.view.makeToolbarButton('Rotate', 'fas fa-sync-alt', () => {
       const current = this.registry.get(this.shapeId);
       this.view.openRotationSubpanel(rotateBtn, current?.rotation || 0, (rotation) => {
@@ -1477,6 +1791,18 @@ class ShapePanel {
       window.Whiteboard?.interaction?.applyStyle(this.shapeId);
     });
     this.view.toolbar.appendChild(applyStyleBtn);
+
+    // Hide button (GM only) - allows GM to hide objects from players
+    if (game.user?.isGM) {
+      const hideBtn = BasePanelView.makeHideButton(obj.hidden, (updateBtn) => {
+        const currentObj = this.registry.get(this.shapeId);
+        if (!currentObj) return;
+        const newHidden = !currentObj.hidden;
+        this.registry.update(this.shapeId, { hidden: newHidden }, 'local');
+        updateBtn(newHidden);
+      });
+      this.view.toolbar.appendChild(hideBtn);
+    }
 
     document.body.appendChild(this.view.panel);
     this.view.positionNear(container);
