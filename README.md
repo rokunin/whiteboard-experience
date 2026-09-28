@@ -66,6 +66,11 @@ Click thumbnails to view full size:
 - Draggable — grab the "WBE" header and move it anywhere
 - Position persists between sessions
 - Tools: Rectangle (`S`), Circle (`C`), Freehand (`F`), Text (`T`), Image paste, Multi-select
+- Settings (⚙, open to every user): collapse the toolbar down to its drag handle, ⚙, and any
+  button a module opts in to keep visible (e.g. Fate Card's Add Card button); disable all WBE
+  hotkeys; disable only the tool-activation hotkeys (`S`/`C`/`F`/`T`/`B`) while keeping object
+  hotkeys (Delete, copy/paste, undo/redo, z-index) working. Each is a per-user setting that
+  persists across reloads.
 
 ### Shapes (Rectangles & Circles)
 - Create rectangles and circles directly on canvas
@@ -104,6 +109,9 @@ Click thumbnails to view full size:
 - Snap to edges and centers of other objects
 - Visual guides show matching boundaries
 - Guides also work during shape and text resize
+- Show/snap/release distances feel the same on screen at any canvas zoom, and a snapped guide
+  doesn't flicker as you hold near a boundary
+- Hidden objects are never a snap target
 
 ### Collaboration
 - Real-time sync between players via sockets
@@ -122,12 +130,15 @@ Click thumbnails to view full size:
 - `C` — Circle tool  
 - `F` — Freehand tool
 - `T` — Text tool
+- `B` — Connector tool
 - `Delete` — delete selected
 - `PageUp/PageDown` — z-index control
 - `Shift+PageUp/PageDown` — z-index jump (move to top/bottom)
 - `Ctrl+C/V` — copy/paste
 - `Shift+Click` — add/remove object from group
 - `Shift+Drag` (empty space) — select multiple objects with box
+- Per-user settings (toolbar ⚙) can disable all of these, or just the tool-activation ones
+  (`S`/`C`/`F`/`T`/`B`) while keeping Delete/copy/paste/undo/redo/z-index working
 
 ### Other
 - Z-index control (`PageUp`/`PageDown`)
@@ -154,6 +165,19 @@ MIT
 ---
 
 ## Changelog
+
+### v0.9.1
+
+Mostly groundwork for the new [Fate Card](https://github.com/rokunin/wbe-fate-card) module, plus a few things that bugged me.
+
+**New**
+- You can fold the toolbar away. In the toolbar settings (⚙) there are three checkboxes: collapse the toolbar down to its handle and the settings button, turn off all WBE hotkeys, or turn off only the tool keys (S, C, F, T, B). Useful if you mostly use the board for cards and keep making shapes by accident while typing. Every player sets this for themselves.
+- Other modules can now put their own objects on the board. Fate Card is the first one. If you want to build your own, see `docs/object-type-api.md`.
+
+**Fixed**
+- Alignment guides snap at the same distance on screen, whatever the zoom. Before, they almost never kicked in when you were zoomed out and grabbed too eagerly when zoomed in. They also stopped flickering at the edge of the snap zone, and they ignore hidden objects.
+- Objects created by someone else in the first second after you joined could stay invisible to you until a reload.
+- Mass scaling no longer resizes objects that are not supposed to be scaled.
 
 ### v0.9.0
 

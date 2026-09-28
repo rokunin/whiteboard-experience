@@ -10,6 +10,7 @@
  * HIGH PRIORITY (1000-750):
  * - 1000: PanelImmunityHandler - Clicks on styling panels
  * - 900: EditImmunityHandler - Clicks on contenteditable elements
+ * - 895: InteractiveImmunityHandler - Clicks on [data-wbe-interactive] elements (select, no drag/consume)
  * - 800: RightClickHandler - Right mouse button - pan or exit text mode
  * - 750: UnfreezeIconHandler - Click on unfreeze icon (must be above MassSelection)
  * 
@@ -224,6 +225,91 @@ export const RightClickHandler = {
 };
 
 /**
+ * InteractiveImmunityHandler (priority 895)
+ *
+ * Exempts any element carrying `data-wbe-interactive` (or a descendant of one) - typically a
+ * button/control a custom object type renders inside its own container - from WBE's drag
+ * machinery. Unlike EditImmunityHandler (contenteditable/input/textarea), this does not stop
+ * the underlying object from being selected: the element's own mousedown/click handler still
+ * receives the event untouched (no ctx.consume()), but the object it belongs to is selected
+ * exactly as a click anywhere else on the object would select it - EXCEPT when doing so would
+ * collapse an active mass selection the object is already part of (see handle() below), and
+ * except with Shift held, where the click is treated as the same mass-selection toggle modifier
+ * it is everywhere else in WBE (delegated to ShiftClickAddHandler, priority 705) rather than as
+ * "select this one object".
+ *
+ * Priority 895 - just below EditImmunityHandler (900) and above every other handler (mass
+ * selection, shape tools, object drag, ...) so a data-wbe-interactive element is genuinely
+ * "left alone" by WBE, not merely exempted from ObjectDragHandler. Only left-clicks are
+ * exempted: canHandle requires button 0, so a right-press on an interactive element still
+ * falls through to RightClickHandler (800, pan / exit text mode / cancel connector) instead of
+ * being swallowed here.
+ *
+ * See whiteboard-experience/docs/object-type-api.md, "Interactive elements".
+ */
+export const InteractiveImmunityHandler = {
+  name: 'interactiveImmunity',
+  priority: 895,
+
+  /**
+   * Check if click is on (or inside) a data-wbe-interactive element
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} True if click targets an interactive element
+   */
+  canHandle(ctx) {
+    // Only left click - a right/middle press must reach RightClickHandler etc. below us.
+    if (ctx.button !== 0) return false;
+    const target = ctx.target;
+    if (!target || typeof target.closest !== 'function') {
+      return false;
+    }
+    return !!target.closest('[data-wbe-interactive]');
+  },
+
+  /**
+   * Select the underlying object (if any) without consuming the event, so the
+   * data-wbe-interactive element's own handler still receives it natively.
+   * @param {EventContext} ctx - Event context
+   * @returns {boolean} Always true (stops further handler processing, event not consumed)
+   */
+  handle(ctx) {
+    // Resolve the object from the DOM ancestry of the actual clicked element, not from
+    // ctx.hitResult (elementFromPoint at the pointer's coordinates) - the two normally agree,
+    // but deriving it independently of pointer position keeps this handler correct even if
+    // they ever diverge (e.g. overlapping containers at that exact pixel).
+    const target = ctx.target;
+    const interactiveEl = target?.closest?.('[data-wbe-interactive]');
+    const containerSelectors = typeof window !== 'undefined'
+      ? window.Whiteboard?.getAllContainerSelectors?.()
+      : null;
+    const container = containerSelectors ? interactiveEl?.closest?.(containerSelectors) : null;
+    const obj = container?.id ? ctx.registry?.get(container.id) : null;
+
+    if (ctx.shiftKey && obj?.id && ShiftClickAddHandler.canHandle(ctx)) {
+      // Shift+click is a mass-selection modifier everywhere else in WBE - delegate to the
+      // exact same handler instead of duplicating its add/remove/convert-to-mass logic. This
+      // DOES consume the event (matching ShiftClickAddHandler's own contract): the modifier's
+      // meaning takes priority over activating the control for this one click.
+      return ShiftClickAddHandler.handle(ctx);
+    }
+
+    if (obj?.id) {
+      // InteractionManager._select() unconditionally clears any active mass selection. Calling
+      // it for an object that is already part of one would silently collapse the whole group
+      // just because one of its members' own control was clicked - so only select when the
+      // object is not already mass-selected (plain click behaviour is unaffected either way).
+      const alreadyMassSelected = ctx.massSelection?.selectedIds?.has(obj.id);
+      if (!alreadyMassSelected) {
+        ctx.im._select(obj.id);
+      }
+    }
+
+    // Do NOT consume: let the element's own mousedown/click handler run normally.
+    return true;
+  }
+};
+
+/**
  * Get all high-priority mousedown handlers
  * @returns {Array} Array of handler objects
  */
@@ -231,6 +317,7 @@ export function getHighPriorityMouseDownHandlers() {
   return [
     PanelImmunityHandler,
     EditImmunityHandler,
+    InteractiveImmunityHandler,
     RightClickHandler,
     UnfreezeIconHandler
   ];

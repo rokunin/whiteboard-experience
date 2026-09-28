@@ -77,6 +77,7 @@ import './modules/connectors.mjs';
 
 // WBE Floating Toolbar - независимый от Foundry тулбар
 import { initToolbar, registerTool } from './modules/wbe-toolbar.mjs';
+import { isHotkeyBlocked as _isHotkeyBlockedPure, getToolHotkeysToggleDisplay } from './modules/wbe-hotkey-gate.mjs';
 
 // WBE Snapshot - debug state capture system
 import { WbeSnapshot } from './modules/wbe-snapshot.mjs';
@@ -177,209 +178,261 @@ function _saveCustomSwatches() {
   } catch {}
 }
 
+// Review finding 2: per-anchor registry of the currently-open picker controller, so a caller
+// that opens the picker directly (Whiteboard.openColorPicker, called fresh on every mousedown by
+// fate-card) can close/replace its own previous popup instead of stacking a new click listener
+// on the anchor every time. Keyed by anchor element (WeakMap - no leak once the anchor is gone).
+const _openColorPickersByAnchor = new WeakMap();
+
 /**
- * Attach two-level color picker to a swatch element
+ * Build and show the two-level colour picker (quick swatches + "+" full Pickr) anchored to
+ * `anchor`, immediately - no click wiring. Extracted out of `attachColorPicker` (review finding
+ * 2) so `Whiteboard.openColorPicker` can open the popup synchronously on call instead of waiting
+ * for a click event that may never fire the way the caller expects (e.g. a caller that already
+ * consumed the triggering event, or a keyboard activation).
+ * @param {HTMLElement} anchor
+ * @param {string} initialColor
+ * @param {Function} onChange
+ * @param {Function} [onClose]
+ * @returns {{ setColor: (hex: string) => void, close: () => void }}
+ */
+function _openColorPickerPopup(anchor, initialColor, onChange, onClose) {
+  let popup = null;
+  let picker = null;
+  let currentColor = initialColor;
+
+  // Create quick swatches popup
+  const rect = anchor.getBoundingClientRect();
+  popup = document.createElement('div');
+  popup.className = 'wbe-color-swatches-popup';
+  popup.style.cssText = `
+    position: fixed;
+    left: ${rect.left}px;
+    top: ${rect.bottom + 6}px;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    padding: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+    z-index: 100000;
+    display: grid;
+    grid-template-columns: repeat(8, 24px);
+    gap: 4px;
+  `;
+
+  // Add default swatches
+  DEFAULT_SWATCHES.forEach(color => {
+    const sw = createSwatchButton(color);
+    popup.appendChild(sw);
+  });
+
+  // Add custom swatches
+  _customSwatches.forEach(color => {
+    const sw = createSwatchButton(color);
+    popup.appendChild(sw);
+  });
+
+  // Add "+" button to open full picker
+  const addBtn = document.createElement('button');
+  addBtn.innerHTML = '<i class="fas fa-plus" style="font-size: 10px; color: #666;"></i>';
+  addBtn.title = 'Custom color';
+  addBtn.style.cssText = `
+    all: unset;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    border: 1px dashed #ccc;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f9f9f9;
+  `;
+  addBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    openFullPicker();
+  });
+  popup.appendChild(addBtn);
+
+  document.body.appendChild(popup);
+
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('mousedown', onOutsideClick);
+  }, 10);
+
+  function createSwatchButton(color) {
+    const sw = document.createElement('button');
+    sw.style.cssText = `
+      all: unset;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      background: ${color};
+      cursor: pointer;
+      border: 1px solid rgba(0,0,0,0.1);
+      ${color.toUpperCase() === '#FFFFFF' ? 'border-color: #ddd;' : ''}
+    `;
+    sw.title = color;
+    sw.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      currentColor = color;
+      anchor.style.background = color;
+      onChange(color);
+      closePopup();
+    });
+    return sw;
+  }
+
+  function onOutsideClick(ev) {
+    if (popup && !popup.contains(ev.target) && ev.target !== anchor) {
+      if (!picker) closePopup();
+    }
+  }
+
+  function openFullPicker() {
+    if (!window.Pickr) return;
+
+    // Create anchor for Pickr
+    const btn = document.createElement('button');
+    btn.style.cssText = 'position: fixed; opacity: 0; pointer-events: none; width: 1px; height: 1px;';
+    document.body.appendChild(btn);
+
+    picker = window.Pickr.create({
+      el: btn,
+      theme: 'nano',
+      default: currentColor,
+      position: 'bottom-middle',
+      adjustableNumbers: true,
+      comparison: false,
+      useAsButton: true,
+      swatches: [], // Swatches shown in quick popup, not here
+      components: {
+        preview: true,
+        opacity: false,
+        hue: true,
+        interaction: {
+          hex: true,
+          input: true,
+          save: true
+        }
+      }
+    });
+
+    picker.show();
+
+    // Position picker
+    requestAnimationFrame(() => {
+      const app = picker.getRoot().app;
+      if (app) {
+        const popupRect = popup.getBoundingClientRect();
+        app.style.position = 'fixed';
+        app.style.left = `${popupRect.left}px`;
+        app.style.top = `${popupRect.bottom + 4}px`;
+        app.style.zIndex = '100001';
+      }
+    });
+
+    picker.on('change', (color) => {
+      const hex = color.toHEXA().toString().substring(0, 7);
+      currentColor = hex;
+      anchor.style.background = hex;
+      onChange(hex);
+    });
+
+    picker.on('save', (color) => {
+      const hex = color.toHEXA().toString().substring(0, 7).toUpperCase();
+      currentColor = hex;
+      anchor.style.background = hex;
+      onChange(hex);
+
+      // Add to custom swatches if not already there
+      if (!DEFAULT_SWATCHES.includes(hex) && !_customSwatches.includes(hex)) {
+        _customSwatches.push(hex);
+        if (_customSwatches.length > 12) _customSwatches.shift(); // Keep max 12 custom
+        _saveCustomSwatches();
+      }
+
+      closePicker();
+      closePopup();
+    });
+
+    picker.on('hide', () => {
+      closePicker();
+    });
+
+    function closePicker() {
+      if (picker) {
+        picker.destroyAndRemove();
+        picker = null;
+      }
+      btn.remove();
+    }
+  }
+
+  function closePopup() {
+    document.removeEventListener('mousedown', onOutsideClick);
+    if (picker) {
+      picker.destroyAndRemove();
+      picker = null;
+    }
+    if (popup) {
+      popup.remove();
+      popup = null;
+    }
+    if (typeof onClose === 'function') {
+      onClose(currentColor);
+    }
+  }
+
+  return {
+    setColor: (hex) => {
+      currentColor = hex;
+      anchor.style.background = hex;
+    },
+    close: () => {
+      if (popup) closePopup();
+    },
+  };
+}
+
+/**
+ * Attach two-level color picker to a swatch element, wired to open/toggle on click of the
+ * swatch itself (WBE's own internal shape/text/border colour swatches: attached ONCE, at swatch
+ * creation time). Not used by `Whiteboard.openColorPicker` any more (review finding 2) - that API
+ * opens the popup directly via `_openColorPickerPopup` instead, since it is called fresh on every
+ * mousedown rather than attached once.
  * Level 1: Quick swatches panel with "+" button
  * Level 2: Full Pickr (opens on "+" click)
  * @param {HTMLElement} swatch - Swatch element to click
  * @param {string} initialColor - Initial color hex
- * @param {Function} onChange - Callback (hexColor) => void
+ * @param {Function} onChange - Callback (hexColor) => void, fires on every live update
+ * @param {Function} [onClose] - fires once, with the current color, whenever the popup closes (a
+ *   value was picked, or the user clicked/Esc'd away) - the natural "commit once per pick" hook
+ *   for a caller that only wants to persist a final value, not every intermediate drag step
+ *   `onChange` already reports. Optional and backward compatible - every existing call site
+ *   omits it and is unaffected.
  */
-function attachColorPicker(swatch, initialColor, onChange) {
-  let popup = null;
-  let picker = null;
+function attachColorPicker(swatch, initialColor, onChange, onClose) {
   let currentColor = initialColor;
+  let controller = null;
 
   swatch.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
 
     // If popup exists, close it (toggle)
-    if (popup) {
-      closePopup();
+    if (controller) {
+      controller.close();
+      controller = null;
       return;
     }
 
-    // Create quick swatches popup
-    const rect = swatch.getBoundingClientRect();
-    popup = document.createElement('div');
-    popup.className = 'wbe-color-swatches-popup';
-    popup.style.cssText = `
-      position: fixed;
-      left: ${rect.left}px;
-      top: ${rect.bottom + 6}px;
-      background: white;
-      border: 1px solid #ddd;
-      border-radius: 10px;
-      padding: 8px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
-      z-index: 100000;
-      display: grid;
-      grid-template-columns: repeat(8, 24px);
-      gap: 4px;
-    `;
-
-    // Add default swatches
-    DEFAULT_SWATCHES.forEach(color => {
-      const sw = createSwatchButton(color);
-      popup.appendChild(sw);
+    controller = _openColorPickerPopup(swatch, currentColor, onChange, (hex) => {
+      currentColor = hex;
+      controller = null;
+      if (typeof onClose === 'function') onClose(hex);
     });
-
-    // Add custom swatches
-    _customSwatches.forEach(color => {
-      const sw = createSwatchButton(color);
-      popup.appendChild(sw);
-    });
-
-    // Add "+" button to open full picker
-    const addBtn = document.createElement('button');
-    addBtn.innerHTML = '<i class="fas fa-plus" style="font-size: 10px; color: #666;"></i>';
-    addBtn.title = 'Custom color';
-    addBtn.style.cssText = `
-      all: unset;
-      width: 24px;
-      height: 24px;
-      border-radius: 4px;
-      border: 1px dashed #ccc;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #f9f9f9;
-    `;
-    addBtn.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      openFullPicker();
-    });
-    popup.appendChild(addBtn);
-
-    document.body.appendChild(popup);
-
-    // Close on outside click
-    setTimeout(() => {
-      document.addEventListener('mousedown', onOutsideClick);
-    }, 10);
-
-    function createSwatchButton(color) {
-      const sw = document.createElement('button');
-      sw.style.cssText = `
-        all: unset;
-        width: 24px;
-        height: 24px;
-        border-radius: 4px;
-        background: ${color};
-        cursor: pointer;
-        border: 1px solid rgba(0,0,0,0.1);
-        ${color.toUpperCase() === '#FFFFFF' ? 'border-color: #ddd;' : ''}
-      `;
-      sw.title = color;
-      sw.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        currentColor = color;
-        swatch.style.background = color;
-        onChange(color);
-        closePopup();
-      });
-      return sw;
-    }
-
-    function onOutsideClick(ev) {
-      if (popup && !popup.contains(ev.target) && ev.target !== swatch) {
-        if (!picker) closePopup();
-      }
-    }
-
-    function openFullPicker() {
-      if (!window.Pickr) return;
-
-      // Create anchor for Pickr
-      const btn = document.createElement('button');
-      btn.style.cssText = 'position: fixed; opacity: 0; pointer-events: none; width: 1px; height: 1px;';
-      document.body.appendChild(btn);
-
-      picker = window.Pickr.create({
-        el: btn,
-        theme: 'nano',
-        default: currentColor,
-        position: 'bottom-middle',
-        adjustableNumbers: true,
-        comparison: false,
-        useAsButton: true,
-        swatches: [], // Swatches shown in quick popup, not here
-        components: {
-          preview: true,
-          opacity: false,
-          hue: true,
-          interaction: {
-            hex: true,
-            input: true,
-            save: true
-          }
-        }
-      });
-
-      picker.show();
-
-      // Position picker
-      requestAnimationFrame(() => {
-        const app = picker.getRoot().app;
-        if (app) {
-          const popupRect = popup.getBoundingClientRect();
-          app.style.position = 'fixed';
-          app.style.left = `${popupRect.left}px`;
-          app.style.top = `${popupRect.bottom + 4}px`;
-          app.style.zIndex = '100001';
-        }
-      });
-
-      picker.on('change', (color) => {
-        const hex = color.toHEXA().toString().substring(0, 7);
-        currentColor = hex;
-        swatch.style.background = hex;
-        onChange(hex);
-      });
-
-      picker.on('save', (color) => {
-        const hex = color.toHEXA().toString().substring(0, 7).toUpperCase();
-        currentColor = hex;
-        swatch.style.background = hex;
-        onChange(hex);
-        
-        // Add to custom swatches if not already there
-        if (!DEFAULT_SWATCHES.includes(hex) && !_customSwatches.includes(hex)) {
-          _customSwatches.push(hex);
-          if (_customSwatches.length > 12) _customSwatches.shift(); // Keep max 12 custom
-          _saveCustomSwatches();
-        }
-        
-        closePicker();
-        closePopup();
-      });
-
-      picker.on('hide', () => {
-        closePicker();
-      });
-
-      function closePicker() {
-        if (picker) {
-          picker.destroyAndRemove();
-          picker = null;
-        }
-        btn.remove();
-      }
-    }
-
-    function closePopup() {
-      document.removeEventListener('mousedown', onOutsideClick);
-      if (picker) {
-        picker.destroyAndRemove();
-        picker = null;
-      }
-      if (popup) {
-        popup.remove();
-        popup = null;
-      }
-    }
   });
 
   // Return update function
@@ -387,6 +440,7 @@ function attachColorPicker(swatch, initialColor, onChange) {
     setColor: (hex) => {
       currentColor = hex;
       swatch.style.background = hex;
+      controller?.setColor(hex);
     }
   };
 }
@@ -625,6 +679,37 @@ function registerModuleSettings() {
     requiresReload: true
   });
 
+  // wbe-toolbar-collapse: per-user client settings, driven from the toolbar's own ⚙ settings
+  // popup (showWBESettingsPopup) rather than Foundry's "Configure Settings" menu, but registered
+  // with config: true too so they also show up there for a user who looks.
+  game.settings.register(MODULE_ID, 'collapseToolbar', {
+    name: 'Collapse WBE Toolbar',
+    hint: 'Shrink the WBE toolbar to its drag handle, the Settings button, and any button a module opts in to keep visible (e.g. Fate Card\'s Add Card button).',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) => window.WBEToolbar?.setCollapsed?.(value)
+  });
+
+  game.settings.register(MODULE_ID, 'disableAllHotkeys', {
+    name: 'Disable All WBE Hotkeys',
+    hint: 'No WBE keyboard shortcut does anything (tool hotkeys and object hotkeys like Delete/Ctrl+C/PageUp alike).',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false
+  });
+
+  game.settings.register(MODULE_ID, 'disableToolHotkeys', {
+    name: 'Disable Tool Hotkeys',
+    hint: 'S/C/F/T/B no longer create or activate a tool. Object hotkeys (Delete, Ctrl+C/V/Z, Ctrl+Shift+Z, PageUp/PageDown) keep working. Implied by "Disable All WBE Hotkeys".',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false
+  });
+
   // Google Fonts setting
   game.settings.register(MODULE_ID, 'googleFonts', {
     name: 'Google Fonts',
@@ -659,6 +744,36 @@ function isFeatureEnabled(feature) {
   } catch {
     return true; // Default to enabled if setting not found
   }
+}
+
+/**
+ * wbe-toolbar-collapse: reads the two hotkey client settings for wbe-hotkey-gate.mjs's pure
+ * functions. Defaults both to off (hotkeys behave as before) if the settings aren't registered
+ * yet (e.g. called too early) or throw.
+ * @returns {{allDisabled: boolean, toolHotkeysDisabled: boolean}}
+ */
+function getHotkeyGateSettings() {
+  try {
+    return {
+      allDisabled: !!game.settings.get(MODULE_ID, 'disableAllHotkeys'),
+      toolHotkeysDisabled: !!game.settings.get(MODULE_ID, 'disableToolHotkeys')
+    };
+  } catch {
+    return { allDisabled: false, toolHotkeysDisabled: false };
+  }
+}
+
+/** @returns {boolean} true while "Disable all WBE hotkeys" is on for this client */
+function isAllHotkeysDisabled() {
+  return getHotkeyGateSettings().allDisabled;
+}
+
+/**
+ * @param {string} code - a KeyboardEvent.code value, e.g. 'KeyS'
+ * @returns {boolean} true if this keypress must be ignored by WBE right now
+ */
+function isHotkeyBlocked(code) {
+  return _isHotkeyBlockedPure(code, getHotkeyGateSettings());
 }
 
 /**
@@ -893,9 +1008,11 @@ function safeParseFloat(value, defaultValue) {
  * Show WBE Settings Popup with GM-only settings
  */
 function showWBESettingsPopup() {
-  // Only GM can access settings
-  if (!game.user?.isGM) return;
-  
+  // wbe-toolbar-collapse (design.md Decision 3): no longer GM-only - the "Toolbar & Hotkeys"
+  // section below is per-user and useful to every user. The pre-existing "Hidden Objects"
+  // section stays GM-only, gated individually further down instead of at this top level.
+  const isGM = !!game.user?.isGM;
+
   // Remove existing popup if any (toggle behavior)
   const existingPopup = document.getElementById('wbe-settings-popup');
   if (existingPopup) {
@@ -905,6 +1022,13 @@ function showWBESettingsPopup() {
 
   // Get current settings
   const createHidden = getWBESetting('createObjectsHidden');
+  const collapseToolbar = !!game.settings.get(MODULE_ID, 'collapseToolbar');
+  const disableAllHotkeys = !!game.settings.get(MODULE_ID, 'disableAllHotkeys');
+  const disableToolHotkeys = !!game.settings.get(MODULE_ID, 'disableToolHotkeys');
+  const toolHotkeysDisplay = getToolHotkeysToggleDisplay({
+    allDisabled: disableAllHotkeys,
+    toolHotkeysDisabled: disableToolHotkeys
+  });
 
   // Create popup overlay
   const overlay = document.createElement('div');
@@ -1024,6 +1148,10 @@ function showWBESettingsPopup() {
       .wbe-settings-toggle.active::after {
         transform: translateX(20px);
       }
+      .wbe-settings-toggle.locked {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
       .wbe-settings-section-title {
         font-size: 11px;
         color: rgba(255,255,255,0.4);
@@ -1042,15 +1170,43 @@ function showWBESettingsPopup() {
           <i class="fa-solid fa-xmark"></i>
         </button>
       </div>
-      
+
+      ${isGM ? `
       <div class="wbe-settings-section-title">Hidden Objects</div>
-      
+
       <div class="wbe-settings-option">
         <div class="wbe-settings-label">
           <span class="wbe-settings-label-text">Create objects as hidden</span>
           <span class="wbe-settings-label-desc">New objects will be hidden from players by default</span>
         </div>
         <div class="wbe-settings-toggle ${createHidden ? 'active' : ''}" data-setting="createObjectsHidden"></div>
+      </div>
+      ` : ''}
+
+      <div class="wbe-settings-section-title">Toolbar &amp; Hotkeys</div>
+
+      <div class="wbe-settings-option">
+        <div class="wbe-settings-label">
+          <span class="wbe-settings-label-text">Collapse toolbar</span>
+          <span class="wbe-settings-label-desc">Shrink to the drag handle, Settings, and buttons that opt in (e.g. Fate Card)</span>
+        </div>
+        <div class="wbe-settings-toggle ${collapseToolbar ? 'active' : ''}" data-game-setting="collapseToolbar"></div>
+      </div>
+
+      <div class="wbe-settings-option">
+        <div class="wbe-settings-label">
+          <span class="wbe-settings-label-text">Disable all WBE hotkeys</span>
+          <span class="wbe-settings-label-desc">No WBE keyboard shortcut will do anything</span>
+        </div>
+        <div class="wbe-settings-toggle ${disableAllHotkeys ? 'active' : ''}" data-game-setting="disableAllHotkeys"></div>
+      </div>
+
+      <div class="wbe-settings-option">
+        <div class="wbe-settings-label">
+          <span class="wbe-settings-label-text">Disable tool hotkeys</span>
+          <span class="wbe-settings-label-desc">S/C/F/T/B won't activate tools; Delete, copy/paste, undo/redo and z-index keys keep working</span>
+        </div>
+        <div class="wbe-settings-toggle ${toolHotkeysDisplay.checked ? 'active' : ''} ${toolHotkeysDisplay.locked ? 'locked' : ''}" data-game-setting="disableToolHotkeys" data-locked="${toolHotkeysDisplay.locked}"></div>
       </div>
     </div>
   `;
@@ -1077,17 +1233,53 @@ function showWBESettingsPopup() {
   };
   document.addEventListener('keydown', escHandler);
 
-  // Toggle handlers
-  const toggles = overlay.querySelectorAll('.wbe-settings-toggle');
+  // Toggle handlers (legacy localStorage-based settings, e.g. createObjectsHidden)
+  const toggles = overlay.querySelectorAll('.wbe-settings-toggle[data-setting]');
   toggles.forEach(toggle => {
     toggle.addEventListener('click', () => {
       const settingKey = toggle.dataset.setting;
       const newValue = !toggle.classList.contains('active');
-      
+
       setWBESetting(settingKey, newValue);
       toggle.classList.toggle('active', newValue);
-      
+
       console.log(`${MODULE_ID} | Setting "${settingKey}" changed to ${newValue}`);
+    });
+  });
+
+  // wbe-toolbar-collapse: toggle handlers for the three real game.settings (client-scoped).
+  const gsToggles = overlay.querySelectorAll('.wbe-settings-toggle[data-game-setting]');
+  gsToggles.forEach(toggle => {
+    toggle.addEventListener('click', async () => {
+      // "Disable tool hotkeys" is locked (non-interactive) while "Disable all" is on - see
+      // design.md Decision 4.
+      if (toggle.dataset.locked === 'true') return;
+
+      const key = toggle.dataset.gameSetting;
+      const newValue = !toggle.classList.contains('active');
+      await game.settings.set(MODULE_ID, key, newValue);
+      toggle.classList.toggle('active', newValue);
+      console.log(`${MODULE_ID} | Setting "${key}" changed to ${newValue}`);
+
+      if (key === 'collapseToolbar') {
+        window.WBEToolbar?.setCollapsed?.(newValue);
+      }
+
+      // Flipping "Disable all" changes the "Disable tool hotkeys" row's own checked/locked
+      // display (it doesn't touch that setting's stored value - see getToolHotkeysToggleDisplay).
+      if (key === 'disableAllHotkeys') {
+        const toolToggle = overlay.querySelector('.wbe-settings-toggle[data-game-setting="disableToolHotkeys"]');
+        if (toolToggle) {
+          const disableToolHotkeysNow = !!game.settings.get(MODULE_ID, 'disableToolHotkeys');
+          const display = getToolHotkeysToggleDisplay({
+            allDisabled: newValue,
+            toolHotkeysDisabled: disableToolHotkeysNow
+          });
+          toolToggle.classList.toggle('active', display.checked);
+          toolToggle.classList.toggle('locked', display.locked);
+          toolToggle.dataset.locked = String(display.locked);
+        }
+      }
     });
   });
 }
@@ -3394,6 +3586,11 @@ class WhiteboardLayer {
       // Clear registry WITHOUT socket events (data is already saved in scene flags)
       // This prevents old scene objects from appearing on new scene
       this._clearRegistryForSceneChange();
+      // Review finding 7 (3rd bullet): pending-type queue entries are per-id snapshots with no
+      // scene of their own (see `PersistenceController.clearAllPending`'s doc comment) - drop
+      // them here too, or a pending entry queued on the outgoing scene would still be sitting
+      // around to load onto the incoming one once its type registers.
+      window.Whiteboard?.persistence?.clearAllPending();
 
       this._destroyLayer();
     };
@@ -5804,13 +6001,17 @@ class WhiteboardObject {
   /**
    * Get object capabilities for generic handling
    * Override in subclasses to specify what the object supports
-   * @returns {Object} { scalable, draggable, freezable }
+   * @returns {Object} { scalable, draggable, freezable, movable }
    */
   getCapabilities() {
     return {
       scalable: false,
       draggable: true,
-      freezable: false
+      freezable: false,
+      // movable: false lets an object type refuse repositioning (drag, mass-drag,
+      // scale-resize) while staying selectable and click-through-free, unlike freeze.
+      // See whiteboard-experience/docs/object-type-api.md.
+      movable: true
     };
   }
 
@@ -6005,53 +6206,6 @@ class WhiteboardObject {
     return wrapper;
   }
 
-  /**
-   * Overriding polymorphic methods for WhiteboardText WhiteboardText
-   */
-
-  canEdit() {
-    return true; // return true; // Texts are editable
-  }
-
-  getElementForHitTest(layer) {
-    // Use click-target for texts (same as images) - it has pointer-events: auto
-    const container = layer.getObjectContainer(this.id);
-    return container?.querySelector('.wbe-text-click-target') || layer.getTextElement(this.id) || container;
-  }
-
-  getCopyData(layer) {
-    const textSpan = layer.getTextSpan(this.id);
-    if (!textSpan) return null;
-    return {
-      type: 'text',
-      html: textSpan.innerHTML || textSpan.textContent || '',
-      text: textSpan.textContent || ''
-    };
-  }
-
-  getSerializationKey() {
-    return 'text';
-  }
-
-  onCreated(interactionManager, options) {
-    // // Show styling panel for text (after DOM element creation)
-    requestAnimationFrame(() => {
-      if (interactionManager.selectedId === this.id) {
-        interactionManager._showPanelForObject(this);
-      }
-    });
-
-    // Start editing immediately if autoEdit = true
-    if (options && options.autoEdit) {
-      requestAnimationFrame(() => {
-        const container = interactionManager.layer?.getObjectContainer(this.id);
-        if (container) {
-          interactionManager._startEditText(this.id);
-        }
-      });
-    }
-  }
-
   render() {
     throw new Error("Must implement render");
   }
@@ -6114,6 +6268,54 @@ class WhiteboardText extends WhiteboardObject {
       this._updateCallback(this.id, changes);
     }
   }
+
+  /**
+   * Overriding polymorphic methods for WhiteboardText
+   */
+
+  canEdit() {
+    return true; // Texts are editable
+  }
+
+  getElementForHitTest(layer) {
+    // Use click-target for texts (same as images) - it has pointer-events: auto
+    const container = layer.getObjectContainer(this.id);
+    return container?.querySelector('.wbe-text-click-target') || layer.getTextElement(this.id) || container;
+  }
+
+  getCopyData(layer) {
+    const textSpan = layer.getTextSpan(this.id);
+    if (!textSpan) return null;
+    return {
+      type: 'text',
+      html: textSpan.innerHTML || textSpan.textContent || '',
+      text: textSpan.textContent || ''
+    };
+  }
+
+  getSerializationKey() {
+    return 'text';
+  }
+
+  onCreated(interactionManager, options) {
+    // Show styling panel for text (after DOM element creation)
+    requestAnimationFrame(() => {
+      if (interactionManager.selectedId === this.id) {
+        interactionManager._showPanelForObject(this);
+      }
+    });
+
+    // Start editing immediately if autoEdit = true
+    if (options && options.autoEdit) {
+      requestAnimationFrame(() => {
+        const container = interactionManager.layer?.getObjectContainer(this.id);
+        if (container) {
+          interactionManager._startEditText(this.id);
+        }
+      });
+    }
+  }
+
   render() {
     const container = document.createElement("div");
     container.id = this.id;
@@ -11975,10 +12177,13 @@ class MassSelectionController {
     // Save start positions from Registry (obj.x/obj.y)
     // These are the "base" positions that get saved to DB
     // Container position may differ (e.g. cropped images have offset)
+    // Not-movable objects (getCapabilities().movable === false) are left out of
+    // startPositions on purpose: updateMassDrag only repositions ids present here
+    // (`if (!start) continue`), so they stay in place while the rest of the group moves.
     this.startPositions.clear();
     for (const id of this.selectedIds) {
       const obj = this.registry.get(id);
-      if (obj) {
+      if (obj && obj.getCapabilities?.().movable !== false) {
         this.startPositions.set(id, { x: obj.x, y: obj.y });
       }
     }
@@ -12133,6 +12338,15 @@ class MassSelectionController {
     for (const id of this.selectedIds) {
       const obj = this.registry.get(id);
       if (obj) {
+        // fate-card-editing review fix 7: a mass-selection scale drag must respect the same
+        // getCapabilities().scalable gate the single-object scale handle already enforces
+        // (_startScaleResize, ~15610: `if (!capabilities.scalable) return;`) - this loop had no
+        // such check at all, so e.g. a fate-card outside edit mode (scalable: false) got
+        // resized by a group-scale drag even though its own corner handle never shows. Object
+        // is simply left out of `startData` - updateGroupScale's own `if (!obj || !start)
+        // continue` guard (below) already skips anything with no entry here, for free.
+        const caps = obj.getCapabilities?.() || {};
+        if (!caps.scalable) continue;
         // Get base dimensions - CRITICAL: use baseWidth for images, width for others
         // Images have baseWidth (natural size) and displayed size = baseWidth * scale
         // Text/Shapes have width (container size) and displayed size = width * scale (via transform)
@@ -12744,6 +12958,7 @@ class MassSelectionController {
     console.log('[MassSelection] paste - centering under cursor:', { screenX, screenY, worldX, worldY, offsetX, offsetY });
 
     const newIds = [];
+    let skippedForPermission = 0;
 
     // UNDO-REDO: Start batch for mass paste (all creates = 1 undo step)
     if (window.Whiteboard?.undoRedo) {
@@ -12751,6 +12966,14 @@ class MassSelectionController {
     }
 
     for (const data of objectsToPaste) {
+      // Object-type API addition (canCreate): same per-type veto _createObjectAt applies to
+      // single-object paste/duplicate/create - mass-selection paste builds objects directly
+      // (see below) instead of going through _createObjectAt, so it needs its own check.
+      if (!Whiteboard.canCreateType(data.type, game.user)) {
+        skippedForPermission++;
+        continue;
+      }
+
       const newId = `wbe-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       
       // Remove old z-index related fields - registry.register() will assign new ones
@@ -12771,9 +12994,14 @@ class MassSelectionController {
       } else if (data.type === 'image') {
         obj = new WhiteboardImage(newData);
       } else {
-        // Use registered object type (shape, fate-card, etc.) via Whiteboard API
+        // Use registered object type (shape, fate-card, etc.) via Whiteboard API.
+        // Prefer config.factory when present, same precedence as
+        // InteractionManager._createObjectFromType, so a type that needs its factory
+        // for correct construction is not silently mis-constructed during mass-paste.
         const typeConfig = Whiteboard.getObjectTypeConfig(data.type);
-        if (typeConfig?.ViewClass) {
+        if (typeConfig?.factory) {
+          obj = typeConfig.factory(newData);
+        } else if (typeConfig?.ViewClass) {
           obj = new typeConfig.ViewClass(newData);
         }
       }
@@ -12787,6 +13015,10 @@ class MassSelectionController {
     // UNDO-REDO: End batch
     if (window.Whiteboard?.undoRedo) {
       window.Whiteboard.undoRedo.endBatch();
+    }
+
+    if (skippedForPermission > 0) {
+      ui?.notifications?.warn(`You do not have permission to create ${skippedForPermission} of the pasted object(s)`);
     }
 
     // Select new objects
@@ -13223,8 +13455,9 @@ class InteractionManager {
    * HIGH PRIORITY (1000-800):
    * - 1000: PanelImmunityHandler - Clicks on styling panels
    * - 900: EditImmunityHandler - Clicks on contenteditable elements
+   * - 895: InteractiveImmunityHandler - Clicks on [data-wbe-interactive] elements (select, no drag/consume)
    * - 800: RightClickHandler - Right mouse button - pan or exit text mode
-   * 
+   *
    * MEDIUM PRIORITY (700-550):
    * - 700: MassSelectionDragHandler - Drag inside mass selection bounding box
    * - 695: MassSelectionClearHandler - Click outside mass selection bounding box
@@ -13450,7 +13683,15 @@ class InteractionManager {
     if (isEditable && e.key === 'Enter') {
       return; // Let the textSpan handler deal with it
     }
-    
+
+    // wbe-toolbar-collapse: "Disable all WBE hotkeys" - short-circuit the entire handler here so
+    // every branch below (Z passthrough, undo/redo, Ctrl+C, V tool-reset, T text mode,
+    // Delete/Backspace, PageUp/PageDown/[/]) becomes unreachable. See design.md Decision 2 for
+    // why this is a single early return rather than gating each branch individually.
+    if (isAllHotkeysDisabled()) {
+      return;
+    }
+
     // PRIORITY 0.3: Z key - enable passthrough mode (layer becomes transparent and non-interactive)
     // This allows interacting with Foundry VTT underneath the whiteboard
     // Use e.code for keyboard-layout independence (works with any language layout)
@@ -13523,11 +13764,18 @@ class InteractionManager {
       
       // CRITICAL: Only intercept if focus is on whiteboard or body
       // If user is copying from external elements (browser, other UI), let browser handle it
-      const isWhiteboardTarget = target === document.body || 
-                                  target.closest('#board') || 
-                                  target.closest('.wbe-text-container') ||
-                                  target.closest('.wbe-image-container') ||
-                                  target.closest('.wbe-whiteboard-layer');
+      // NOTE: every object container (built-in or custom) is a descendant of the
+      // #whiteboard-experience-layer div (LAYER_ID), not of #board (that's the canvas, a
+      // sibling of the layer div - see WhiteboardLayer.init()). The previous
+      // '.wbe-whiteboard-layer' class selector never matched anything real (the layer has an
+      // id, not that class), so this fell back to the `target === document.body` case for
+      // every object - which happens to be true in the common case (nothing else holds
+      // focus), but not when the previously clicked element inside an object is itself
+      // focusable (e.g. an <input>/<button> a custom type renders) and still has focus when
+      // Ctrl+C is pressed.
+      const isWhiteboardTarget = target === document.body ||
+                                  target.closest('#board') ||
+                                  target.closest(`#${LAYER_ID}`);
       
       if (!isWhiteboardTarget) {
         console.log('[InteractionManager] Ctrl+C ignored - target is external element:', target.tagName, target.className);
@@ -13609,6 +13857,13 @@ class InteractionManager {
           return;
         }
       }
+
+      // wbe-toolbar-collapse: T is a tool-activation key - "Disable tool hotkeys" turns it off
+      // too ("Disable all" already returned above and is covered by isHotkeyBlocked as well).
+      if (isHotkeyBlocked('KeyT')) {
+        return;
+      }
+
       e.preventDefault();
       if (this.mode === 'text') {
         this._exitTextMode();
@@ -14972,6 +15227,10 @@ class InteractionManager {
     if (this.socketController?.lockManager?.isLockedByOther(id)) return;
     const obj = this.registry.get(id);
     if (obj) {
+      // Not-movable objects (getCapabilities().movable === false) refuse drag but stay
+      // selectable/clickable - selection already happened before this call.
+      if (obj.getCapabilities?.().movable === false) return;
+
       // Hide styling panel during drag (standardized for all object types)
       this._hideAllPanels();
 
@@ -15570,6 +15829,9 @@ class InteractionManager {
     if (!obj) return;
     const capabilities = obj.getCapabilities?.() || {};
     if (!capabilities.scalable) return;
+
+    // Not-movable objects refuse scale-resize too (it repositions via transform-origin).
+    if (capabilities.movable === false) return;
 
     // Frozen images cannot be scaled
     if (obj.type === 'image' && obj.frozen) {
@@ -16334,6 +16596,17 @@ class InteractionManager {
    * @returns {WhiteboardObject} Created object
    */
   _createObjectAt(type, screenX, screenY, options = {}) {
+    // Object-type API addition (canCreate): a registered type can veto client-side creation
+    // for the current user (e.g. a GM-only object type). This is the single generic path
+    // behind single-object create, single-object paste (_handleCopiedObjectPaste), duplicate
+    // (copy then paste), and any custom module's own creation call - checking it here covers
+    // all of them at once. Mass-selection paste has its own per-object check, since it does
+    // not go through this method - see MassSelectionController.paste().
+    if (!Whiteboard.canCreateType(type, game.user)) {
+      ui?.notifications?.warn(`You do not have permission to create this object`);
+      return null;
+    }
+
     // 1. Coordinate conversion (ONCE for all types!)
     const t = canvas.stage.worldTransform;
     const det = t.a * t.d - t.b * t.c;
@@ -16446,6 +16719,15 @@ class InteractionManager {
    * Put data into the system clipboard for compatibility with other applications
    */
   async _handleCopy(e) {
+    // Review finding 4: "Disable all WBE hotkeys" must also cover this window-level copy
+    // listener, not just _handleKeyDown - it fires independently of that handler (the browser's
+    // own native `copy` event, from Ctrl+C or the OS/right-click "Copy"), so the keydown gate
+    // alone left it reachable. Returned before any `e.preventDefault()` below, so the browser's
+    // own default copy behaviour is left completely alone while hotkeys are disabled.
+    if (isAllHotkeysDisabled()) {
+      return;
+    }
+
     // NOTE: Mass selection copy is handled via keydown (Ctrl+C) in MassSelectionController.handleKeyDown
     // This _handleCopy only handles single object copy
 
@@ -17025,6 +17307,114 @@ class InteractionManager {
   }
 
   /**
+   * Upload a file to Foundry's file storage (worlds/<world-id>/) and return its server path.
+   * Extracted from the image-paste-from-clipboard flow so the upload logic has exactly one
+   * implementation, shared by _handleImagePasteFromClipboard (below) and the public
+   * Whiteboard.uploadImage(file) API. Does nothing beyond the upload itself: no dimension
+   * preload, no board object creation - callers that need those (like the paste flow) do them
+   * around this call.
+   * @param {File} file
+   * @returns {Promise<string>} the uploaded file's server path
+   * @throws {Error} with a clear message, `.code` ('no-permission'|'rejected'|'exception'), and
+   *   `.notified` (true if Foundry's own UI likely already showed its own message for this
+   *   failure - see the IMPORTANT note below) - callers use `.notified` to decide whether
+   *   showing their own message would be a second, redundant one. See object-type-api.md,
+   *   "Image upload".
+   */
+  async _uploadImageFile(file) {
+    // Fail fast with a clear, specific message instead of making a network round trip Foundry
+    // will reject anyway. FilePicker.upload does not throw for a permission failure (see the
+    // IMPORTANT note below) - without this check, the only failure a caller would ever see is
+    // the generic "Upload rejected by the server" further down.
+    if (game.user && typeof game.user.can === 'function' && !game.user.can('FILES_UPLOAD')) {
+      const err = new Error('You do not have permission to upload files');
+      err.code = 'no-permission';
+      err.notified = false; // Foundry was never called - nothing has been shown yet.
+      throw err;
+    }
+
+    const timestamp = Date.now();
+    const extension = file.type.split('/')[1] || 'png';
+    const filename = `wbe-image-${timestamp}.${extension}`;
+    const newFile = new File([file], filename, {
+      type: file.type
+    });
+
+    // Determine loading method (V12+ or V11)
+    let uploadMethod;
+    if (foundry.applications?.apps?.FilePicker?.implementation) {
+      uploadMethod = foundry.applications.apps.FilePicker.implementation;
+    } else {
+      uploadMethod = FilePicker;
+    }
+
+    // IMPORTANT: FilePicker.upload does not throw for a server-side rejection (bad path,
+    // quota, a permission re-check on the server, a network error it caught internally, ...) -
+    // it shows its OWN ui.notifications.error (unless notify:false) and resolves to `false` or
+    // a path-less object rather than rejecting the promise. The try/catch below only catches a
+    // genuine synchronous/transport exception, which is rare in practice; the far more common
+    // failure path is the falsy/path-less check further down. notify:false on this primary
+    // attempt suppresses Foundry's own toast so this method's caller decides how to surface it.
+    let uploadResult;
+    let usedFallbackRetry = false;
+    try {
+      // Upload file - format: upload(source, path, file, options, uploadOptions)
+      // For V12+: uploadOptions is separate object with notify, etc.
+      uploadResult = await uploadMethod.upload("data", `worlds/${game.world.id}/`, newFile, {
+        name: filename
+      }, {
+        notify: false  // Don't show Foundry's default notification
+      });
+    } catch (uploadError) {
+      console.error('[InteractionManager] Upload error:', uploadError);
+      // Retry without the 4th (uploadOptions) argument: kept for Foundry v11, whose
+      // FilePicker.upload predates the separate notify-options object added later - passing it
+      // was observed to make the primary call above throw synchronously instead of resolving,
+      // unlike v12+ (where the primary call above already succeeds or resolves without
+      // throwing, even on a server-side rejection - see the IMPORTANT note above). Not
+      // reachable on v12+. Because the options object that disables Foundry's own notification
+      // is exactly what this fallback omits, notify defaults to true here - a known v11-only
+      // limitation: Foundry's own toast may already be showing by the time the caller decides
+      // whether to show its own (hence `usedFallbackRetry`/`.notified` below).
+      usedFallbackRetry = true;
+      try {
+        uploadResult = await uploadMethod.upload("data", `worlds/${game.world.id}/`, newFile, {
+          name: filename
+        });
+      } catch (retryError) {
+        console.error('[InteractionManager] Retry upload error:', retryError);
+        const errorMsg = retryError.message || retryError.toString() || 'Unknown error';
+        console.error('[InteractionManager] Full error details:', {
+          error: retryError,
+          user: game.user?.name,
+          isGM: game.user?.isGM,
+          canUpload: game.user?.can('FILES_UPLOAD')
+        });
+        const err = new Error(`Image upload failed: ${errorMsg}`);
+        err.code = 'exception';
+        err.notified = true; // v11 fallback path - Foundry may already have shown its own toast.
+        throw err;
+      }
+    }
+
+    if (!uploadResult || !uploadResult.path) {
+      console.error('[InteractionManager] Upload rejected by the server:', {
+        user: game.user?.name,
+        isGM: game.user?.isGM,
+        canUpload: game.user?.can('FILES_UPLOAD')
+      });
+      const err = new Error('Upload rejected by the server');
+      err.code = 'rejected';
+      // true only when the v11 fallback ran (no notify:false, so Foundry's own default toast
+      // was not suppressed); the primary (v12+) attempt above always passes notify:false.
+      err.notified = usedFallbackRetry;
+      throw err;
+    }
+
+    return uploadResult.path;
+  }
+
+  /**
    * Insert image from system clipboard (Ctrl+V / Cmd+V for file) clipboard (Ctrl+V / Cmd+V for file)
    * Universal: uses Windows system clipboard: uses the system clipboard Windows
    * Architecturally correct: uses _createObjectAt to create object: uses _createObjectAt to create the object
@@ -17063,53 +17453,16 @@ class InteractionManager {
       const canvasZoom = getCanvasScale();
       const finalScale = 1 / canvasZoom;
 
-      // Upload file via Foundry API
-      const timestamp = Date.now();
-      const extension = file.type.split('/')[1] || 'png';
-      const filename = `wbe-image-${timestamp}.${extension}`;
-      const newFile = new File([file], filename, {
-        type: file.type
-      });
-      let uploadResult;
-
-      // Determine loading method (V12+ or V11)
-      let uploadMethod;
-      if (foundry.applications?.apps?.FilePicker?.implementation) {
-        uploadMethod = foundry.applications.apps.FilePicker.implementation;
-      } else {
-        uploadMethod = FilePicker;
-      }
+      // Upload file via Foundry API (shared with Whiteboard.uploadImage - see _uploadImageFile)
+      let uploadedPath;
       try {
-        // Upload file - format: upload(source, path, file, options, uploadOptions)
-        // For V12+: uploadOptions is separate object with notify, etc.
-        uploadResult = await uploadMethod.upload("data", `worlds/${game.world.id}/`, newFile, {
-          name: filename
-        }, {
-          notify: false  // Don't show Foundry's default notification
-        });
+        uploadedPath = await this._uploadImageFile(file);
       } catch (uploadError) {
-        console.error('[InteractionManager] Upload error:', uploadError);
-        // Try without uploadOptions (for older Foundry versions)
-        try {
-          uploadResult = await uploadMethod.upload("data", `worlds/${game.world.id}/`, newFile, {
-            name: filename
-          });
-        } catch (retryError) {
-          console.error('[InteractionManager] Retry upload error:', retryError);
-          const errorMsg = retryError.message || retryError.toString() || 'Unknown error';
-          console.error('[InteractionManager] Full error details:', {
-            error: retryError,
-            user: game.user?.name,
-            isGM: game.user?.isGM,
-            canUpload: game.user?.can('FILES_UPLOAD')
-          });
-          ui.notifications.error(`Image upload failed: ${errorMsg}`);
-          return null;
+        // Show exactly one message: skip ours when Foundry's own notification for this
+        // failure is already on screen (uploadError.notified - see _uploadImageFile).
+        if (!uploadError.notified) {
+          ui.notifications.error(uploadError.message || 'Image upload failed');
         }
-      }
-      
-      if (!uploadResult || !uploadResult.path) {
-        ui.notifications.error("Image upload failed: No path returned");
         return null;
       }
 
@@ -17134,7 +17487,7 @@ class InteractionManager {
       // _createObjectAt converts screenX/Y to world, but we override via options
       // ALTERNATIVE 1: Pass baseWidth/baseHeight for correct size calculation
       const obj = this._createObjectAt('image', screenX, screenY, {
-        src: uploadResult.path,
+        src: uploadedPath,
         width: dimensions.width,
         height: dimensions.height,
         baseWidth: dimensions.width, // Natural image dimensions
@@ -17153,15 +17506,48 @@ class InteractionManager {
   }
 
   /**
+   * True if `el` (or one of its ancestors) carries `data-wbe-paste-target`, meaning WBE's own
+   * paste handling should be skipped entirely for this element - see _handlePaste. Extracted
+   * as its own (static, side-effect-free) method so the check itself is unit-testable in
+   * isolation (main.mjs cannot be imported under vitest - see
+   * tests/unit/object-type-api/paste-target.test.mjs, which mirrors this exact logic).
+   * @param {Element|null} el
+   * @returns {boolean}
+   */
+  static _isWbePasteTargetElement(el) {
+    if (!el || typeof el.closest !== 'function') return false;
+    return !!el.closest('[data-wbe-paste-target]');
+  }
+
+  /**
    * Event handler paste (Ctrl+V / Cmd+V)
    * Unified: handles both copied objects and system clipboard: handles both copied objects and the system clipboard, and system clipboard
    */
   async _handlePaste(e) {
+    // Review finding 4: same "Disable all WBE hotkeys" gate as _handleCopy above - this window-
+    // level `paste` listener fires independently of _handleKeyDown's own Ctrl+V handling (see the
+    // NOTE below), so it needs its own early return, before any `e.preventDefault()`, so the
+    // browser's default paste is left alone while hotkeys are disabled.
+    if (isAllHotkeysDisabled()) {
+      return;
+    }
+
     // Ignore if editing text or input/textarea is active
     const target = e.target;
     const isEditable = target.isContentEditable || target.getAttribute('contenteditable') === 'true' || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
     if (isEditable) {
       return; // return; // Let the browser handle text paste
+    }
+
+    // Let an element opt out of WBE's paste handling entirely via data-wbe-paste-target (e.g.
+    // a custom type's own portrait drop zone that wants to handle a pasted image itself,
+    // without WBE also creating a board image object from the same paste). Checked on both the
+    // event's target and document.activeElement: a paste event's target is not always the
+    // focused element on every browser/input path, so either being inside the opt-out element
+    // is enough. See object-type-api.md, "Interactive elements" / paste opt-out.
+    if (InteractionManager._isWbePasteTargetElement(target) ||
+        InteractionManager._isWbePasteTargetElement(document.activeElement)) {
+      return; // Let the element's own paste handler run - WBE does nothing here.
     }
 
     const clipboardData = e.clipboardData || window.clipboardData;
@@ -17706,10 +18092,24 @@ class PersistenceController {
 
       // Generic: group objects by serialization key
       const dataByType = new Map(); // serializationKey -> { id: json }
-      
-      // Initialize buckets for all registered storage types
+
+      // Initialize buckets only for storage types whose object type is already known
+      // to WBE (built-in, or a custom type that finished registerObjectType()). A
+      // custom type can have its *storage* type registered (from the consumer
+      // module's 'init' hook) well before its *object* type registers (e.g. from a
+      // 'ready' hook that awaits a dynamic import) - see
+      // whiteboard-experience/docs/object-type-api.md "Registration". Data saved
+      // under that storage type before the object type registers is queued as
+      // "pending" by loadAll()/loadPendingByType(), not held in this.registry - so
+      // blindly creating an empty bucket here would save {} for it on the very next
+      // debounced save and permanently wipe already-persisted data for an unrelated
+      // reason. Skipping the bucket entirely leaves that flag key untouched; once the
+      // type registers, the "Ensure bucket exists" fallback below creates a real
+      // bucket from the now-loaded objects.
       for (const serKey of this.foundryAdapter.getStorageTypes().keys()) {
-        dataByType.set(serKey, {});
+        if (Whiteboard.hasObjectType(this._serKeyToObjectType(serKey))) {
+          dataByType.set(serKey, {});
+        }
       }
 
       allObjects.forEach(obj => {
@@ -17795,9 +18195,17 @@ class PersistenceController {
           });
           loadedCounts[objectType] = loaded;
         } else if (Object.keys(data).length > 0) {
-          // Custom type not registered yet - store for deferred loading
+          // Custom type not registered yet - store for deferred loading.
+          // Review finding 7 (2nd bullet): MERGE into any already-queued pending entries for
+          // this type instead of replacing the bucket outright - `loadAll()` can run more than
+          // once per session (every `canvasReady`, on every scene switch), and a remote
+          // 'created'/'updated' socket message for this same still-unregistered type
+          // (`queuePendingObject`, below) can have queued an entry here in between two `loadAll`
+          // calls, or even while this very `loadAll` call is awaiting `loadByType`. Overwriting
+          // the bucket used to silently drop that entry.
           const pendingKey = `_pending${objectType.charAt(0).toUpperCase() + objectType.slice(1)}s`;
-          this[pendingKey] = data;
+          if (!this[pendingKey]) this[pendingKey] = {};
+          Object.assign(this[pendingKey], data);
           loadedCounts[objectType] = `${Object.keys(data).length} pending`;
           console.log(`[Persistence] ${objectType} type not registered yet, ${Object.keys(data).length} objects will be loaded when module initializes`);
         }
@@ -17842,10 +18250,72 @@ class PersistenceController {
    * Load pending objects of a specific type (called when type is registered after initial load)
    * @param {string} type - Object type to load
    */
+  /**
+   * Registration race fix (object-type-api.md "Registration race"): queues a remote
+   * create/update payload for `type` when that type has not finished
+   * `registerObjectType()` yet on THIS client - e.g. a socket 'created' message arriving in
+   * the window between a consumer module's `Hooks.once('ready', ...)` starting a dynamic
+   * import and that import resolving. Reuses the exact same "pending" cache
+   * `loadAll()`/`loadPendingByType()` already use for data loaded from scene flags before a
+   * custom type registers, so `registerObjectType()`'s existing call to
+   * `loadPendingByType(type)` also flushes anything queued here - no separate flush path to
+   * keep in sync. `data` here is always a full `toJSON()` snapshot (both the 'created'
+   * payload and every 'updated' payload SocketController emits carry the object's complete
+   * current state, not a partial diff - see `_emitSocketMessage`), so a later call for the
+   * same `id` safely overwrites the earlier one with nothing lost, matching normal
+   * last-write-wins semantics for the same object.
+   * @param {string} type
+   * @param {string} id
+   * @param {object} data - full object JSON (must include `type`)
+   */
+  queuePendingObject(type, id, data) {
+    const pendingKey = `_pending${type.charAt(0).toUpperCase() + type.slice(1)}s`;
+    if (!this[pendingKey]) this[pendingKey] = {};
+    this[pendingKey][id] = data;
+  }
+
+  /**
+   * Review finding 7 (1st bullet): a remote 'deleted' for an id that is only sitting in a
+   * pending bucket (its type never registered on this client, or hasn't yet) used to be a no-op
+   * - `SocketController`'s 'deleted' handler only ever called `registry.unregister`, which finds
+   * nothing for an id that was never registered. Left uncorrected, the delete is lost: once the
+   * type eventually registers, `loadPendingByType` resurrects the object this client was just
+   * told is gone. The 'deleted' payload carries no `type` (only `id`), so this scans every
+   * `_pending*s` bucket rather than requiring the caller to know which one.
+   * @param {string} id
+   */
+  removePendingObject(id) {
+    for (const key of Object.keys(this)) {
+      if (!key.startsWith('_pending') || !key.endsWith('s')) continue;
+      const bucket = this[key];
+      if (bucket && typeof bucket === 'object' && id in bucket) {
+        delete bucket[id];
+      }
+    }
+  }
+
+  /**
+   * Review finding 7 (3rd bullet): drops every queued pending entry, of every type, on a scene
+   * switch. Pending entries are keyed only by object id - nothing in them says which scene they
+   * belong to (see `queuePendingObject`'s doc comment: they are raw `toJSON()` snapshots) - so
+   * without this, a pending entry queued while viewing scene A (a 'created'/'updated' for a
+   * still-unregistering type) would survive into scene B and, once the type finally registers,
+   * get loaded onto the WRONG scene's canvas. Called from `WhiteboardLayer`'s `canvasTearDown`
+   * hook, alongside `_clearRegistryForSceneChange()` - the loaded-and-registered side of the same
+   * "nothing survives a scene switch that wasn't just persisted" contract.
+   */
+  clearAllPending() {
+    for (const key of Object.keys(this)) {
+      if (key.startsWith('_pending') && key.endsWith('s')) {
+        this[key] = null;
+      }
+    }
+  }
+
   loadPendingByType(type) {
     const pendingKey = `_pending${type.charAt(0).toUpperCase() + type.slice(1)}s`;
     const pending = this[pendingKey];
-    
+
     if (!pending || Object.keys(pending).length === 0) {
       return;
     }
@@ -18104,6 +18574,23 @@ class SocketController {
         });
         return;
       }
+
+      // Registration race fix (bugfix-level, object-type-api.md "Registration race"): a
+      // custom type's *storage* type can register (consumer's 'init' hook) well before its
+      // *object* type finishes registering (e.g. a 'ready' hook awaiting a dynamic import -
+      // fate-card's own pattern). A 'created' socket message for that type arriving in that
+      // window used to throw "Unknown object type" out of _createObjectFromType, uncaught,
+      // permanently losing the create for this client (it never appeared until a reload).
+      // Queue it instead, exactly like data loaded from scene flags before the type
+      // registers is queued by loadAll() - registerObjectType() already flushes this same
+      // "pending" cache via loadPendingByType() as soon as the type registers, so nothing
+      // extra is needed on that side.
+      if (!Whiteboard.hasObjectType(data?.type)) {
+        console.warn(`[Socket] Object type "${data?.type}" not registered yet on this client - queuing 'created' for ${id} until it registers`);
+        Whiteboard.persistence?.queuePendingObject(data.type, id, data);
+        return;
+      }
+
       console.log(`[Socket] Registering remote object ${id}`, {
         registrySizeBefore: this.registry.objects?.size || 0
       });
@@ -18114,6 +18601,21 @@ class SocketController {
         registrySizeAfter: this.registry.objects?.size || 0
       });
     } else if (action === 'updated') {
+      // Registration race fix (continued): an 'updated' message for an id this client has
+      // never registered (the object's own 'created' message is itself still queued as
+      // pending above, or was queued on a previous 'updated' too) used to be silently
+      // dropped by ObjectRegistry.update()'s `if (this.objects.has(id))` guard - not a
+      // crash, but a real data loss for whatever changed in that update. Every 'updated'
+      // payload is already a full toJSON() snapshot (see queuePendingObject's doc comment),
+      // so queuing/overwriting the same pending entry is exactly as correct as queuing the
+      // 'created' payload would have been - nothing is lost, and loadPendingByType() only
+      // ever reads the latest snapshot for a given id.
+      if (!this.registry.get(id) && data && !Whiteboard.hasObjectType(data.type)) {
+        console.warn(`[Socket] Object type "${data.type}" not registered yet on this client - queuing 'updated' for unknown id ${id} until it registers`);
+        Whiteboard.persistence?.queuePendingObject(data.type, id, data);
+        return;
+      }
+
       // CRITICAL: Skip updates for locked objects (being cropped/edited by another user)
       // BUT: Accept updates from the lock owner (final values after they finish)
       const container = document.getElementById(id);
@@ -18126,7 +18628,7 @@ class SocketController {
           return;
         }
       }
-      
+
       // 🔍 SCALE DEBUG: Log socket update with scale
       if (data && data.scale !== undefined) {
         const obj = this.registry.get(id);
@@ -18146,6 +18648,9 @@ class SocketController {
       });
     } else if (action === 'deleted') {
       this.registry.unregister(id, 'remote');
+      // Review finding 7 (1st bullet): also drop `id` from any pending-type queue it might be
+      // sitting in - see `removePendingObject`'s own doc comment.
+      Whiteboard.persistence?.removePendingObject(id);
     } else if (action === 'gmStatusChange') {
       // Handle GM status change (online/offline)
       // Update indicator on all clients when GM connects/disconnects
@@ -18556,6 +19061,26 @@ class Whiteboard {
   }
 
   /**
+   * Object-type API addition (bugfix-level, documented in docs/object-type-api.md): whether
+   * `user` is allowed to create a new instance of `type` on THIS client. Built-in types
+   * (`text`, `image`) and any custom type registered without a `canCreate` config are always
+   * allowed (opt-in veto, not opt-in permission) - only a registered type whose `config.
+   * canCreate(user)` explicitly returns `false` refuses. This is a client-side check only
+   * (like every other WBE permission check - `canDelete`, the GM-only toolbar buttons): it
+   * gates the local creation call, not the socket/persistence layer, so it does not stop a
+   * determined non-GM from creating one via the browser console with WBE's own APIs, only
+   * from doing so through the normal UI paths this function is wired into.
+   * @param {string} type
+   * @param {object} user - a Foundry User (typically `game.user`)
+   * @returns {boolean}
+   */
+  static canCreateType(type, user) {
+    const config = this.getObjectTypeConfig(type);
+    if (!config?.canCreate) return true;
+    return config.canCreate(user) !== false;
+  }
+
+  /**
    * Register a storage type for persistence
    * Call this when registering a custom object type that needs DB persistence
    * @param {string} serializationKey - Key returned by object.getSerializationKey()
@@ -18636,6 +19161,194 @@ class Whiteboard {
     return selectors.join(', ');
   }
 
+  /**
+   * Force a re-evaluation of the currently-selected object's getCapabilities()/isFrozen()
+   * against the selection overlay (extensibility API for other modules; bugfix-level addition,
+   * openspec/changes/fate-card-editing design.md Decision 9). WBE itself only re-reads
+   * getCapabilities() from inside updateSelectionOverlay(), which it already calls after every
+   * registry-driven change (select, drag-end, scale-resize, ...) - a custom type whose
+   * capabilities depend on purely local, unsynced state (e.g. an edit-mode flag that is
+   * intentionally never written through registry.update(), per this module's own documented
+   * "local UI is never synced" convention) has no documented way to ask WBE to look again after
+   * such a change, since nothing else triggers it. This is a thin, additive wrapper - it does not
+   * change what updateSelectionOverlay() does, only exposes calling it as public API. No-op if
+   * `id` is not the object currently showing a selection overlay (e.g. already deselected).
+   *
+   * @param {string} id - the object id whose capabilities should be re-evaluated.
+   * @returns {boolean} true if a re-evaluation actually ran, false if `id` was not the current
+   *   selection overlay target (nothing to refresh).
+   *
+   * @example
+   * // After a local-only change that flips getCapabilities().scalable with no data write:
+   * this.editing = true;
+   * Whiteboard.refreshObjectCapabilities(this.id);
+   */
+  static refreshObjectCapabilities(id) {
+    if (!id || !this.layer) return false;
+    if (this.layer._selectionOverlaySelectedId !== id) return false;
+    this.layer.updateSelectionOverlay();
+    return true;
+  }
+
+  /**
+   * Public lock API (extensibility API for other modules) - thin wrapper around the same
+   * LockManager instance WBE's own text editing and image cropping already use
+   * (this.socket.lockManager). A getter (not a value captured once) so it always reflects the
+   * current SocketController/LockManager even across Whiteboard.init()/destroy() cycles.
+   *
+   * @example
+   * // Take a lock before entering an edit-like mode; release it when done:
+   * const granted = await Whiteboard.locks.request(card.id);
+   * if (!granted) return; // someone else holds it (or the request timed out)
+   * // ... edit ...
+   * Whiteboard.locks.release(card.id);
+   *
+   * @example
+   * // Check who holds a lock (e.g. to show "locked by X" in a custom panel):
+   * const holder = Whiteboard.locks.holder(card.id); // { userId, userName } | null
+   */
+  static get locks() {
+    return {
+      /**
+       * Request a lock. Resolves true if granted, false if denied/timed out. Resolves true
+       * immediately if no LockManager exists yet (WBE not initialized) or there is no active
+       * GM to arbitrate - same "lock-free editing" convention LockManager itself uses.
+       * @param {string} id - object id to lock (does not need to be a registered WBE object)
+       * @param {string} [objectType='custom'] - informational label included in the lock
+       *   request payload (mirrors the 'text'/'image'/'shape' labels WBE's own callers pass)
+       * @returns {Promise<boolean>}
+       */
+      request: (id, objectType = 'custom') => {
+        const lockManager = Whiteboard.socket?.lockManager;
+        if (!lockManager) return Promise.resolve(true);
+        return lockManager.requestLock(id, objectType);
+      },
+      /** Release a lock this client holds. No-op if not held or WBE is not initialized. */
+      release: (id) => {
+        Whiteboard.socket?.lockManager?.releaseLock(id);
+      },
+      /**
+       * Who currently holds this lock, including this client itself.
+       * @returns {{ userId: string, userName: string } | null}
+       */
+      holder: (id) => {
+        return Whiteboard.socket?.lockManager?.holderOf(id) ?? null;
+      },
+      /** True if some OTHER user holds this lock (false for our own lock or a free object). */
+      isLockedByOther: (id) => {
+        return !!Whiteboard.socket?.lockManager?.isLockedByOther(id);
+      },
+    };
+  }
+
+  /**
+   * Upload an image file to Foundry's file storage (worlds/<world-id>/) and return its server
+   * path. Extensibility API for other modules (e.g. a custom object type's own portrait/image
+   * upload) - reuses exactly the upload logic WBE's own paste-from-clipboard path uses
+   * (InteractionManager._uploadImageFile), with no duplicated upload code. Unlike pasting an
+   * image onto the board, this does NOT create a whiteboard image object - it only uploads the
+   * file and hands back the path; the caller decides what to do with it.
+   *
+   * @param {File} file
+   * @returns {Promise<string>} the uploaded file's server path
+   * @throws {Error} with a clear message if the upload fails (e.g. the user lacks the
+   *   FILES_UPLOAD permission)
+   *
+   * @example
+   * try {
+   *   const path = await Whiteboard.uploadImage(file);
+   *   card.portrait = path;
+   * } catch (err) {
+   *   ui.notifications.error(err.message);
+   * }
+   */
+  static async uploadImage(file) {
+    this._ensureInitialized();
+    if (!this.interaction) {
+      throw new Error(`${MODULE_ID} | InteractionManager is undefined in uploadImage`);
+    }
+    return this.interaction._uploadImageFile(file);
+  }
+
+  /**
+   * Open WBE's own two-level colour picker (quick swatches + full Pickr) anchored to an element,
+   * IMMEDIATELY - for another module's own colour-editing UI - e.g. fate-card's "Themes" popover
+   * (wbe-fate-card-theme-colours). Reuses the exact picker WBE's own shape/text/border colour
+   * swatches use internally (`_openColorPickerPopup`), so a custom type's colour pickers look and
+   * behave identically to WBE's built-in ones instead of a redundant reimplementation.
+   *
+   * Review finding 2: this used to hand off to `attachColorPicker`, which only ATTACHES a click
+   * listener rather than opening anything - contradicting this doc comment. A caller like
+   * fate-card that invokes this fresh on every mousedown (rather than once, at setup, the way
+   * WBE's own internal swatches use `attachColorPicker`) stacked a new click listener on the same
+   * anchor every time: the 2nd click toggled, the 3rd left two popups open, and keyboard
+   * activation (which fires `click` synchronously with no real pointer event, but only reaches
+   * whichever the FIRST attached listener's now-stale closure state was) did nothing on the first
+   * press. Fixed by opening the popup synchronously here via `_openColorPickerPopup`, and tracking
+   * at most one open picker per anchor in `_openColorPickersByAnchor` - a second call for the same
+   * anchor while its picker is still open closes that picker instead of stacking another.
+   *
+   * `onChange` fires on every live colour update while the picker is open (a quick-swatch click,
+   * or every step of a full-picker hue/rgb drag) - use it ONLY for a local/visual preview, never
+   * for something expensive like a registry update, since a single drag can fire it many times.
+   * `onClose` fires exactly once, when the popup closes for any reason (a value was picked, or
+   * the user clicked/Esc'd away) - the right place to commit/persist a single value per pick.
+   *
+   * @param {Object} options
+   * @param {HTMLElement} options.anchor - element the popup is positioned against and whose
+   *   `style.background` the picker keeps in sync with the current colour (typically a small
+   *   colour-swatch button you render yourself)
+   * @param {string} options.value - initial colour, hex e.g. '#ffcc00'
+   * @param {(hex: string) => void} [options.onChange] - live update callback (see above)
+   * @param {(hex: string) => void} [options.onClose] - fires once when the popup closes, with the
+   *   final colour - use this to commit/persist
+   * @returns {{ setColor: (hex: string) => void }|null} `null` if `anchor` is missing, or if this
+   *   call closed an already-open picker for that anchor instead of opening a new one
+   *
+   * @example
+   * Whiteboard.openColorPicker({
+   *   anchor: swatchEl,
+   *   value: card.themeTextColor,
+   *   onChange: (hex) => { swatchEl.style.background = hex; }, // live preview only
+   *   onClose: (hex) => { registry.update(card.id, { themeTextColor: hex }, 'local'); },
+   * });
+   */
+  static openColorPicker({ anchor, value, onChange, onClose } = {}) {
+    if (!anchor) {
+      console.error(`${MODULE_ID} | Whiteboard.openColorPicker requires an anchor element`);
+      return null;
+    }
+    const existing = _openColorPickersByAnchor.get(anchor);
+    if (existing) {
+      existing.close();
+      _openColorPickersByAnchor.delete(anchor);
+      return null;
+    }
+    const controller = _openColorPickerPopup(anchor, value, onChange || (() => {}), (hex) => {
+      _openColorPickersByAnchor.delete(anchor);
+      if (typeof onClose === 'function') onClose(hex);
+    });
+    _openColorPickersByAnchor.set(anchor, controller);
+    return controller;
+  }
+
+  /**
+   * Review finding 3 (4th bullet): closes the picker opened by `openColorPicker` for `anchor`,
+   * if one is currently open - for a caller whose own popover/panel is closing by some other
+   * path (Esc, outside click, deselect) and needs its still-open colour picker to go away with
+   * it, without waiting for the picker's own outside-click handling to notice. No-op (returns
+   * `false`) if `anchor` has no open picker.
+   * @param {HTMLElement} anchor
+   * @returns {boolean}
+   */
+  static closeColorPicker(anchor) {
+    const existing = anchor && _openColorPickersByAnchor.get(anchor);
+    if (!existing) return false;
+    existing.close();
+    _openColorPickersByAnchor.delete(anchor);
+    return true;
+  }
+
   static _ensureInitialized() {
     if (!this.registry) {
       console.warn(`${MODULE_ID} | Auto-initializing (init() was not called)`);
@@ -18700,7 +19413,16 @@ class Whiteboard {
 
       // Initialize WBE Floating Toolbar (независимый от Foundry)
       initToolbar();
-      
+
+      // wbe-toolbar-collapse: apply this user's persisted collapse state once, now that the
+      // toolbar element exists (registerTool calls below will each re-render anyway, but this
+      // makes sure a client that lands with zero registered tools yet still starts collapsed).
+      try {
+        window.WBEToolbar?.setCollapsed?.(game.settings.get(MODULE_ID, 'collapseToolbar'));
+      } catch (err) {
+        console.warn(`${MODULE_ID} | Failed to apply collapseToolbar setting:`, err);
+      }
+
       // Register mass selection in WBE Toolbar
       const massSelCtrl = this.interaction.massSelection;
       const MASS_SEL_STORAGE_KEY = 'wbe-mass-selection-toggle';
@@ -18777,19 +19499,22 @@ class Whiteboard {
         }
       });
       
-      // Register "Settings" button in toolbar (GM only)
-      if (game.user?.isGM) {
-        registerTool({
-          id: 'wbe-settings',
-          title: 'WBE Settings',
-          icon: 'fa-solid fa-gear',
-          group: 'settings',
-          type: 'button',
-          onClick: () => {
-            showWBESettingsPopup();
-          }
-        });
-      }
+      // Register "Settings" button in toolbar. wbe-toolbar-collapse: no longer GM-only - the
+      // popup now also holds per-user client settings (collapse toolbar, disable hotkeys) every
+      // user benefits from controlling on their own client; showWBESettingsPopup() itself keeps
+      // the pre-existing GM-only "Hidden Objects" section gated internally (see design.md
+      // Decision 3). Always shown while the toolbar is collapsed (wbe-toolbar.mjs special-cases
+      // this id), since it's the only way to expand it back.
+      registerTool({
+        id: 'wbe-settings',
+        title: 'WBE Settings',
+        icon: 'fa-solid fa-gear',
+        group: 'settings',
+        type: 'button',
+        onClick: () => {
+          showWBESettingsPopup();
+        }
+      });
       
       // Register "Debug Snapshot" button in toolbar
       registerTool({
@@ -19028,6 +19753,11 @@ window.WBE_BasePanelView = BasePanelView;
 window.WBE_registerSettings = registerModuleSettings;
 window.WBE_loadGoogleFonts = _loadGoogleFonts;
 window.WBE_isFeatureEnabled = isFeatureEnabled;
+
+// wbe-toolbar-collapse: cross-module hotkey-gating checks (shapes.mjs/connectors.mjs), same
+// window-global convention as WBE_isFeatureEnabled above.
+window.WBE_isAllHotkeysDisabled = isAllHotkeysDisabled;
+window.WBE_isHotkeyBlocked = isHotkeyBlocked;
 
 // Export WBE Settings API (localStorage-based, per-user settings)
 window.getWBESetting = getWBESetting;

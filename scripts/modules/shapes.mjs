@@ -845,6 +845,12 @@ class ShapesManager {
     if (this._isInputFocused()) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
 
+    // wbe-toolbar-collapse: S/C/F are all tool-activation keys, so a single check against both
+    // the "disable all" and "disable tool hotkeys" client settings covers this whole handler -
+    // see window.WBE_isHotkeyBlocked's own doc comment (main.mjs) for why this is read through a
+    // window global rather than importing wbe-hotkey-gate.mjs's settings-read directly here.
+    if (window.WBE_isHotkeyBlocked?.(e.code)) return;
+
     // Use e.code for keyboard layout independence (works with Russian layout too)
     const toolMap = {
       'KeyS': SHAPE_TYPES.RECT,

@@ -64,6 +64,11 @@ export class LockManager {
 
     // Local view: objectId -> ownerId (who holds it, per broadcasts). Excludes our own held.
     this._view = new Map();
+    // Local view: objectId -> ownerName, kept in lockstep with _view (same three write sites:
+    // _onGranted/_onDenied set both, _onReleased clears both). Only needed by holderOf(), which
+    // wants a display name alongside the id - ownerOf() itself intentionally keeps returning
+    // just the id, unchanged, for its existing (tested) callers.
+    this._viewNames = new Map();
 
     // Locks WE currently hold: objectId -> { renewHandle }.
     this._held = new Map();
@@ -116,6 +121,22 @@ export class LockManager {
   /** Owner id for badge/messages, or null. */
   ownerOf(objectId) {
     return this._view.get(objectId) ?? null;
+  }
+
+  /**
+   * Who currently holds this lock, or null if it is free. Unlike ownerOf()/isLockedByOther(),
+   * this DOES report our own held lock (as { userId: selfId, userName: selfName }) - a
+   * consumer asking "who holds this" wants a true answer even when the answer is "I do, on
+   * this client", not just "is someone ELSE holding it".
+   * @returns {{ userId: string, userName: string } | null}
+   */
+  holderOf(objectId) {
+    if (this._held.has(objectId)) {
+      return { userId: this._getSelfId(), userName: this._getSelfName() };
+    }
+    const ownerId = this._view.get(objectId);
+    if (ownerId == null) return null;
+    return { userId: ownerId, userName: this._viewNames.get(objectId) ?? ownerId };
   }
 
   /** True if we currently hold the lock on this object. */
@@ -275,6 +296,7 @@ export class LockManager {
     if (ownerId === selfId) {
       // We own it -> ensure heartbeat is running, and it's not in the "others" view.
       this._view.delete(objectId);
+      this._viewNames.delete(objectId);
       if (!this._held.has(objectId)) {
         const renewHandle = this._setInterval(() => {
           const p = { objectId, userId: selfId };
@@ -287,6 +309,7 @@ export class LockManager {
     } else {
       // Someone else owns it -> update view + render lock locally.
       this._view.set(objectId, ownerId);
+      this._viewNames.set(objectId, ownerName);
       this._onLockApplied(objectId, ownerId, ownerName);
     }
   }
@@ -295,6 +318,7 @@ export class LockManager {
     // Reflect the true owner in our view and render it.
     if (ownerId && ownerId !== this._getSelfId()) {
       this._view.set(objectId, ownerId);
+      this._viewNames.set(objectId, ownerName);
       this._onLockApplied(objectId, ownerId, ownerName);
     }
     this._resolvePending(requestId, objectId, false);
@@ -302,6 +326,7 @@ export class LockManager {
 
   _onReleased({ objectId }) {
     this._view.delete(objectId);
+    this._viewNames.delete(objectId);
     // If WE were holding it and got force-released (renew refused / reaped), stop heartbeat.
     const held = this._held.get(objectId);
     if (held) {

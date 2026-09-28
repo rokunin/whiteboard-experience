@@ -1288,7 +1288,12 @@ class ConnectorsManager {
     // Guard: don't fire with open Foundry windows
     if (document.querySelector('.app.window-app:not([style*="display: none"])')) return;
 
-    // Delete selected connector
+    // wbe-toolbar-collapse: "disable all WBE hotkeys" kills everything in this handler,
+    // including the connector Delete below (that setting has no carve-outs, unlike "disable tool
+    // hotkeys" - see design.md Decision 2). Checked once, up front.
+    if (window.WBE_isAllHotkeysDisabled?.()) return;
+
+    // Delete selected connector (an object hotkey - stays alive under "disable tool hotkeys")
     if (e.key === 'Delete' && this.selectedConnectorId) {
       const registry = window.Whiteboard?.interaction?.registry;
       if (registry) {
@@ -1299,8 +1304,9 @@ class ConnectorsManager {
       return;
     }
 
-    // Hotkey B — toggle connector tool
+    // Hotkey B — toggle connector tool (a tool-activation key - gated by "disable tool hotkeys" too)
     if (e.code === 'KeyB') {
+      if (window.WBE_isHotkeyBlocked?.('KeyB')) return;
       e.preventDefault();
       if (this.enabled) {
         window.WBEToolbar?.deactivateAllTools?.();

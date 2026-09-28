@@ -18,6 +18,12 @@ let toolbarElement = null;
 let isInitialized = false;
 let activeToolId = null;
 
+// wbe-toolbar-collapse: when true, renderToolbar() only shows the drag handle, the ⚙ button, and
+// any tool registered with `showWhenCollapsed: true`. Persisted client-side via the
+// `collapseToolbar` game.setting (main.mjs owns reading/writing that setting and calls
+// setCollapsed() on change - this module only holds the resulting boolean).
+let isCollapsed = false;
+
 // Drag state
 let isDragging = false;
 let dragStartX = 0;
@@ -574,8 +580,11 @@ function renderToolbar() {
   if (header) toolbarElement.appendChild(header);
   
   // Группировать тулы
+  // wbe-toolbar-collapse: while collapsed, skip every tool except the Settings button and any
+  // tool that explicitly opted in with showWhenCollapsed: true.
   const groups = new Map();
   for (const [id, tool] of registeredTools) {
+    if (isCollapsed && tool.id !== 'wbe-settings' && !tool.showWhenCollapsed) continue;
     const group = tool.group || 'default';
     if (!groups.has(group)) groups.set(group, []);
     groups.get(group).push(tool);
@@ -665,6 +674,10 @@ export function initToolbar() {
  * @param {Function} [tool.onToggle] - Для type='toggle', получает (isActive)
  * @param {Function} [tool.onActivate] - Для type='tool'
  * @param {Function} [tool.onDeactivate] - Для type='tool'
+ * @param {boolean} [tool.showWhenCollapsed] - wbe-toolbar-collapse: if true, this tool's button
+ *   stays visible while the toolbar is collapsed (setCollapsed(true)/the "Collapse toolbar"
+ *   client setting) - otherwise it is hidden along with every other non-opted-in tool. The ⚙
+ *   Settings button (id 'wbe-settings') is always shown while collapsed regardless of this flag.
  */
 export function registerTool(tool) {
   if (!tool.id) {
@@ -750,6 +763,38 @@ export function updateToolbarPosition(leftOffset = 110) {
 }
 
 /**
+ * wbe-toolbar-collapse: set/read whether the toolbar is currently collapsed (drag handle + ⚙ +
+ * any showWhenCollapsed tool only). Re-renders immediately when the state actually changes.
+ * main.mjs calls this from the `collapseToolbar` client setting's onChange handler and once at
+ * startup to apply the persisted value.
+ * @param {boolean} collapsed
+ */
+export function setCollapsed(collapsed) {
+  const next = !!collapsed;
+  if (next === isCollapsed) return;
+  isCollapsed = next;
+  // Review finding 9: collapsing hides every tool button except Settings and any tool that opted
+  // into `showWhenCollapsed` - if a tool was active at that moment, `renderToolbar()` below just
+  // wipes its (now-hidden) button and rebuilds the DOM, but never called the tool's own
+  // `onDeactivate` or cleared `activeToolId`: the tool kept running (e.g. still placing shapes on
+  // every click) with no visible button left to turn it back off short of expanding the toolbar
+  // again. Deactivate it the same way any other "tool is no longer available" path does, before
+  // the collapsed re-render removes its button.
+  if (isCollapsed && activeToolId) {
+    const activeTool = registeredTools.get(activeToolId);
+    if (!activeTool?.showWhenCollapsed) {
+      deactivateTool(activeToolId);
+    }
+  }
+  renderToolbar();
+}
+
+/** @returns {boolean} whether the toolbar is currently collapsed */
+export function isToolbarCollapsed() {
+  return isCollapsed;
+}
+
+/**
  * Сбросить позицию тулбара к дефолтной
  */
 export function resetToolbarPosition() {
@@ -791,5 +836,7 @@ window.WBEToolbar = {
   deactivateAllTools,
   setToolbarVisible,
   updateToolbarPosition,
-  resetToolbarPosition
+  resetToolbarPosition,
+  setCollapsed,
+  isToolbarCollapsed
 };
