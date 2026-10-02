@@ -7,7 +7,7 @@ FoundryVTT module that provides whiteboard-style tools for images, text, shapes,
 
 **Important:** WBE objects live in a layer ABOVE the standard Foundry canvas. They will overlay tokens, tiles, drawings, and other native VTT objects.
 
-**Important:** Alpha version is tested MOSTLY for a single Foundry scene, if you have more then ONE scene on the table some issues may occur.
+**Important:** The GM must be online — the GM client stores the board. If the GM is offline, edits won't be saved.
 
 **Important:** Make it available for your players to add tokens / pictures in Foundry game settings, to make it really collaborative!
 
@@ -35,16 +35,18 @@ The WBE toolbar can be placed anywhere you like — just drag it by the header.
 
 ![Toolbar Position](toolbar_position.gif)
 
-I usually start with my table main background picture, place it and FREEZE it, so it won't move unnecessarily:
+I usually start with my table main background picture: paste it, stretch it over the screen and LOCK it, so it won't move unnecessarily:
 
 ![Background Setup](freeze_your_table_background.gif)
 
-Then we can have a character for the mecha game there. I don't own the art, just took first one I liked from Google, and then deleted it, used just for the example.
+Then the table fills up: player characters on the left (these are [Fate Card](https://foundryvtt.com/packages/fate-card) cards), NPC portraits pasted in one go and moved as a group, scene aspects written right on the table, and a roll straight from the card (with [Dice So Nice](https://foundryvtt.com/packages/dice-so-nice)):
 
-![Create a character and give him some Fate Points](create_character.gif)
+![Lay out the scene: NPCs, scene aspects and a roll](create_scene.gif)
 
 So basically that's the whole idea: quick and somewhat "dirty" and you can do it together with your players. 
-Create tables, write down your characters, notes, Fate Aspects, make tokens, draw freehand lines, shapes etc. Have fun!
+Create tables, write down your characters, notes, Fate Aspects, make tokens, draw freehand lines, shapes, connect things etc. Have fun!
+
+<sub>Art in the GIFs: the background is from Foundry VTT's own assets; character portraits are public-domain paintings — G. F. Watts "Sir Galahad" (1862), J. W. Waterhouse "The Crystal Ball" (1902), F. Dicksee "Chivalry" (1885); NPC icons are from Foundry VTT's core icon set.</sub>
 
 
 ## Table Examples
@@ -135,15 +137,28 @@ Click thumbnails to view full size:
 - `PageUp/PageDown` — z-index control
 - `Shift+PageUp/PageDown` — z-index jump (move to top/bottom)
 - `Ctrl+C/V` — copy/paste
+- `Ctrl+Z` / `Ctrl+Shift+Z` — undo / redo
+- Hold `Alt` — see through the board to the Foundry canvas below
 - `Shift+Click` — add/remove object from group
 - `Shift+Drag` (empty space) — select multiple objects with box
 - Per-user settings (toolbar ⚙) can disable all of these, or just the tool-activation ones
   (`S`/`C`/`F`/`T`/`B`) while keeping Delete/copy/paste/undo/redo/z-index working
 
+### Connectors
+- Curved lines between two objects (`B`)
+- They follow the objects when you move them
+- Bend a connector by dragging its middle point
+
+### GM Tools
+- Hide From Players: hidden objects are invisible to players and click-through for them
+- "Create objects as hidden" option in the toolbar settings (⚙)
+
 ### Other
+- Undo / redo for everything on the board (`Ctrl+Z` / `Ctrl+Shift+Z`)
 - Z-index control (`PageUp`/`PageDown`)
 - Lock objects to prevent accidental edits
 - Freeze images from the style panel
+- Add-on objects: other modules can put their own objects on the board — [Fate Card](https://foundryvtt.com/packages/fate-card) is the first one
 
 ## Compatibility
 - Foundry VTT v11 to v14
@@ -172,7 +187,7 @@ Mostly groundwork for the new [Fate Card](https://github.com/rokunin/wbe-fate-ca
 
 **New**
 - You can fold the toolbar away. In the toolbar settings (⚙) there are three checkboxes: collapse the toolbar down to its handle and the settings button, turn off all WBE hotkeys, or turn off only the tool keys (S, C, F, T, B). Useful if you mostly use the board for cards and keep making shapes by accident while typing. Every player sets this for themselves.
-- Other modules can now put their own objects on the board. Fate Card is the first one. If you want to build your own, see `docs/object-type-api.md`.
+- Other modules can now put their own objects on the board. Fate Card is the first one. If you want to build your own, the [Fate Card source](https://github.com/rokunin/wbe-fate-card) is the reference for now — ask on Discord if you get stuck.
 
 **Fixed**
 - Alignment guides snap at the same distance on screen, whatever the zoom. Before, they almost never kicked in when you were zoomed out and grabbed too eagerly when zoomed in. They also stopped flickering at the edge of the snap zone, and they ignore hidden objects.

@@ -1,7 +1,7 @@
 {
   "id": "whiteboard-experience",
   "title": "Whiteboard Experience",
-  "description": "Now tokens layer gives you whiteboard experience",
+  "description": "Collaborative whiteboard for Foundry: paste images, write text, draw shapes, freehand lines and connectors on one layer above the canvas.",
   "version": "0.9.1",
   "compatibility": { "minimum": "11", "verified": "14", "maximum": "14" },
   "authors": [{ "name": "rokunin" }],
