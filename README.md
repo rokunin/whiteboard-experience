@@ -150,6 +150,7 @@ Click thumbnails to view full size:
 - Bend a connector by dragging its middle point
 
 ### GM Tools
+- Players Can Edit the Whiteboard: world setting, on by default. Off, players still see the board but cannot touch it — no toolbar, no hotkeys, clicks fall through to the canvas — and the GM client ignores the object changes a player's client sends. GMs and Assistant GMs are never affected; it flips live for everyone, no reload. Toggle it in Configure Settings, the toolbar ⚙ popup, or a macro: `game.settings.set('whiteboard-experience', 'playersCanEdit', false)`
 - Hide From Players: hidden objects are invisible to players and click-through for them
 - "Create objects as hidden" option in the toolbar settings (⚙)
 
