@@ -679,6 +679,26 @@ function registerModuleSettings() {
     requiresReload: true
   });
 
+  // playersCanEdit: one world setting that lets the GM take the board away from the
+  // players without disabling the module. Players still SEE the board - they just cannot
+  // create, move, edit or delete anything on it. GMs and Assistant GMs are never affected.
+  // Live, no reload: Foundry pushes a world setting change to every connected client and runs
+  // onChange there, so applyBoardAccess() re-applies the lock on each client on the spot.
+  // Enforced on both sides - the UI gates (toolbar, hotkeys, mouse) on the player's client,
+  // and canUserEditBoard() in SocketController on every other client, including the activeGM
+  // that writes the scene flags, so whatever a player client still emits is dropped rather
+  // than saved - judged by the server-attached sender id where the core passes one (v14),
+  // see canUserEditBoard.
+  game.settings.register(MODULE_ID, 'playersCanEdit', {
+    name: 'Players Can Edit the Whiteboard',
+    hint: 'Off: only Game Masters and Assistant GMs can create, move, edit or delete whiteboard objects; players still see the board. Applies to every connected client immediately, no reload.',
+    scope: 'world',
+    config: true,
+    type: Boolean,
+    default: true,
+    onChange: () => applyBoardAccess({ notify: true, resync: true })
+  });
+
   // wbe-toolbar-collapse: per-user client settings, driven from the toolbar's own ⚙ settings
   // popup (showWBESettingsPopup) rather than Foundry's "Configure Settings" menu, but registered
   // with config: true too so they also show up there for a user who looks.
@@ -755,7 +775,9 @@ function isFeatureEnabled(feature) {
 function getHotkeyGateSettings() {
   try {
     return {
-      allDisabled: !!game.settings.get(MODULE_ID, 'disableAllHotkeys'),
+      // playersCanEdit: a locked-out player has no WBE hotkeys at all - this one flag reaches every
+      // keyboard path (keydown, copy, paste, shapes.mjs, connectors.mjs) through the gate.
+      allDisabled: isBoardReadOnly() || !!game.settings.get(MODULE_ID, 'disableAllHotkeys'),
       toolHotkeysDisabled: !!game.settings.get(MODULE_ID, 'disableToolHotkeys')
     };
   } catch {
@@ -774,6 +796,159 @@ function isAllHotkeysDisabled() {
  */
 function isHotkeyBlocked(code) {
   return _isHotkeyBlockedPure(code, getHotkeyGateSettings());
+}
+
+// ==========================================
+// playersCanEdit: "Players Can Edit the Whiteboard"
+// ==========================================
+
+/** playersCanEdit: cached answer of computeBoardReadOnly(); null until first asked for. */
+let _boardReadOnly = null;
+
+/**
+ * playersCanEdit: is THIS client read-only right now - a non-GM user in a world whose GM has turned
+ * "Players Can Edit the Whiteboard" off. GMs and Assistant GMs (Foundry's `isGM`) are never
+ * read-only, matching every other GM-only check in WBE. Falls back to editable (upstream
+ * behaviour) if the setting is not registered yet or the read throws.
+ * @returns {boolean}
+ */
+function computeBoardReadOnly() {
+  if (game.user?.isGM) return false;
+  try {
+    return !game.settings.get(MODULE_ID, 'playersCanEdit');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * playersCanEdit: the cached read-only state. Read from every capture-phase mouse and key event, so
+ * it must not hit game.settings each time; applyBoardAccess() recomputes it whenever the
+ * answer can change (init, the setting's onChange, this user's role changing).
+ * @returns {boolean}
+ */
+function isBoardReadOnly() {
+  if (_boardReadOnly === null) _boardReadOnly = computeBoardReadOnly();
+  return _boardReadOnly;
+}
+
+/**
+ * playersCanEdit: whether a socket message sent by `userId` may change the board on this client.
+ * The UI gates only cover the normal paths; SocketController runs this on every incoming
+ * object message so that, while players are locked out, anything a non-GM client sends is
+ * ignored by every other client - above all by the activeGM, the only client that writes
+ * scene flags. `userId` should be the sender id the Foundry server attaches to every module
+ * socket message (the handler's second argument, taken from the sender's session, so a
+ * client cannot forge it; v14 passes it), with the payload's self-reported id as the
+ * fallback on a core that does not. Players cannot write scene flags themselves, so with
+ * the server-attached id this is a real boundary for the socket path.
+ * @param {string|undefined} userId
+ * @returns {boolean}
+ */
+function canUserEditBoard(userId) {
+  try {
+    if (game.settings.get(MODULE_ID, 'playersCanEdit')) return true;
+  } catch {
+    return true;
+  }
+  return !!game.users?.get(userId)?.isGM;
+}
+
+/**
+ * playersCanEdit: apply "Players Can Edit the Whiteboard" to THIS client. Called once at the end of
+ * Whiteboard.init() and again from the setting's onChange, which Foundry runs on every
+ * connected client when the GM flips it. A GM is never affected. For a locked-out player it
+ * cancels whatever was in progress (active tool, text mode, selection, mass selection, open
+ * panels), hides the toolbar and the "GM is not online" banner (there is nothing to save),
+ * and marks the layer read-only so mouse input falls through to the Foundry canvas beneath
+ * (InteractionManager._isInputPassthrough is the handler-side half of the same gate).
+ * Unlocking reverses the visible parts; nothing else needs restoring.
+ * @param {{notify?: boolean}} [opts] - notify: tell a player that the board was (un)locked
+ */
+function applyBoardAccess({ notify = false, resync = false } = {}) {
+  const wasReadOnly = _boardReadOnly === true;
+  const readOnly = (_boardReadOnly = computeBoardReadOnly());
+  const im = Whiteboard.interaction;
+
+  if (readOnly) {
+    try {
+      window.WBEToolbar?.deactivateAllTools?.();
+      if (im) {
+        // Cancel, never finish, whatever this client had in flight: finishing a drag, resize,
+        // crop or text edit would commit locally exactly what every other client is about to
+        // drop. mouseup is gated as well, so none of this is completed later either.
+        if (im.unfreezeHoldState?.holdTimer) clearTimeout(im.unfreezeHoldState.holdTimer);
+        im.unfreezeHoldState = null;
+        im.dragState = null;
+        im.panState = null;
+        im.cropDragState = null;
+        im.scaleResizeState = null;
+        im.widthResizeState = null;
+        im.stretchResizeState = null;
+        // Every drag/resize/crop start hid Foundry's own box-select frame and set a board
+        // cursor; the end handlers that would restore them are never reached now.
+        FoundryAPIAdapter.enableMassSelect();
+        im.layer?.applyBoardCursor?.('');
+        if (im.massSelection) {
+          im.massSelection.isSelecting = false;
+          im.massSelection.isDragging = false;
+          im.massSelection.isScaling = false;
+          im.massSelection.view?.hideSelectionBox?.();
+        }
+        if (im.mode === 'text') im._exitTextMode();
+        im._deselect();
+        im._hideAllPanels();
+      }
+    } catch (err) {
+      console.warn(`${MODULE_ID} | applyBoardAccess: could not reset interaction state`, err);
+    }
+  }
+
+  Whiteboard.layer?.element?.classList.toggle('wbe-read-only', readOnly);
+  window.WBEToolbar?.setToolbarVisible?.(!readOnly);
+  updateGMWarningIndicator();
+
+  // Only a real transition into read-only (the setting flipped, or this user's role changed)
+  // re-reads the board - never the layer rebuild that calls this from _createLayer, which
+  // the resync itself triggers.
+  if (resync && readOnly && !wasReadOnly) _scheduleReadOnlyResync();
+
+  if (notify && !game.user?.isGM) {
+    ui?.notifications?.info?.(readOnly
+      ? 'The GM has locked the whiteboard: you can see it, but not change it.'
+      : 'The GM has unlocked the whiteboard.');
+  }
+  console.log(`${MODULE_ID} | Board access applied: ${readOnly ? 'read-only' : 'editable'} for ${game.user?.name}`);
+}
+
+/** playersCanEdit: pending read-only resync, see _scheduleReadOnlyResync. */
+let _readOnlyResyncTimer = null;
+
+/**
+ * playersCanEdit: a player locked out mid-edit still holds, locally, the half-done edit that
+ * applyBoardAccess() abandoned and that every other client dropped. Re-read the board from the
+ * scene flags the way a scene change does - the layer's own canvasTearDown and canvasReady
+ * callbacks: release held locks, clear the registry, rebuild the layer, loadAll - once the
+ * activeGM's debounced save (300 ms) of anything it legitimately received just before the lock
+ * has landed. Skipped if the board was unlocked again meanwhile, there is no scene, or the
+ * first load never completed (the ready callback would then rebuild an empty board).
+ */
+function _scheduleReadOnlyResync() {
+  clearTimeout(_readOnlyResyncTimer);
+  _readOnlyResyncTimer = setTimeout(async () => {
+    _readOnlyResyncTimer = null;
+    const layer = Whiteboard.layer;
+    const cb = layer?._hookCallbacks;
+    if (!isBoardReadOnly() || !canvas?.scene || !layer?._hasLoadedInitialScene ||
+        !cb?.canvasTearDown || !cb?.canvasReady) return;
+    try {
+      cb.canvasTearDown();
+      await cb.canvasReady();
+      console.log(`${MODULE_ID} | Board re-read from scene flags after the lock`);
+    } catch (err) {
+      console.warn(`${MODULE_ID} | read-only resync failed`, err);
+    }
+  }, 1000);
 }
 
 /**
@@ -1012,6 +1187,10 @@ function showWBESettingsPopup() {
   // section below is per-user and useful to every user. The pre-existing "Hidden Objects"
   // section stays GM-only, gated individually further down instead of at this top level.
   const isGM = !!game.user?.isGM;
+  // playersCanEdit: the "Players" row writes a WORLD setting, which core allows only with the
+  // SETTINGS_MODIFY permission (every full GM; Assistant GMs by default, but revocable) -
+  // the same test core's own Configure Settings uses before showing world settings at all.
+  const canLockPlayers = isGM && !!game.user?.can?.('SETTINGS_MODIFY');
 
   // Remove existing popup if any (toggle behavior)
   const existingPopup = document.getElementById('wbe-settings-popup');
@@ -1022,6 +1201,7 @@ function showWBESettingsPopup() {
 
   // Get current settings
   const createHidden = getWBESetting('createObjectsHidden');
+  const playersCanEdit = !!game.settings.get(MODULE_ID, 'playersCanEdit'); // playersCanEdit, GM-only row
   const collapseToolbar = !!game.settings.get(MODULE_ID, 'collapseToolbar');
   const disableAllHotkeys = !!game.settings.get(MODULE_ID, 'disableAllHotkeys');
   const disableToolHotkeys = !!game.settings.get(MODULE_ID, 'disableToolHotkeys');
@@ -1172,6 +1352,18 @@ function showWBESettingsPopup() {
       </div>
 
       ${isGM ? `
+      ${canLockPlayers ? `
+      <div class="wbe-settings-section-title">Players</div>
+
+      <div class="wbe-settings-option">
+        <div class="wbe-settings-label">
+          <span class="wbe-settings-label-text">Players can edit the board</span>
+          <span class="wbe-settings-label-desc">Off: only GMs can change the board; players still see it</span>
+        </div>
+        <div class="wbe-settings-toggle ${playersCanEdit ? 'active' : ''}" data-game-setting="playersCanEdit"></div>
+      </div>
+      ` : ''}
+
       <div class="wbe-settings-section-title">Hidden Objects</div>
 
       <div class="wbe-settings-option">
@@ -1247,7 +1439,9 @@ function showWBESettingsPopup() {
     });
   });
 
-  // wbe-toolbar-collapse: toggle handlers for the three real game.settings (client-scoped).
+  // wbe-toolbar-collapse: toggle handlers for the real game.settings - the three client-scoped
+  // ones, plus (playersCanEdit, GM-only row) the world-scoped playersCanEdit, which game.settings.set
+  // pushes to every connected client.
   const gsToggles = overlay.querySelectorAll('.wbe-settings-toggle[data-game-setting]');
   gsToggles.forEach(toggle => {
     toggle.addEventListener('click', async () => {
@@ -1257,7 +1451,16 @@ function showWBESettingsPopup() {
 
       const key = toggle.dataset.gameSetting;
       const newValue = !toggle.classList.contains('active');
-      await game.settings.set(MODULE_ID, key, newValue);
+      // playersCanEdit: a world setting's save can be refused by the server (the permission was
+      // revoked after the popup opened); keep the toggle on the stored value and say why,
+      // instead of an unhandled rejection out of this listener.
+      try {
+        await game.settings.set(MODULE_ID, key, newValue);
+      } catch (err) {
+        console.warn(`${MODULE_ID} | Could not save setting "${key}":`, err);
+        ui?.notifications?.warn?.(`Could not save the WBE setting "${key}": ${err?.message ?? err}`);
+        return;
+      }
       toggle.classList.toggle('active', newValue);
       console.log(`${MODULE_ID} | Setting "${key}" changed to ${newValue}`);
 
@@ -1515,7 +1718,22 @@ function showWBEHelpModal() {
           <span class="wbe-help-desc">Zoom in/out</span>
         </div>
       </div>
-      
+
+      <!-- playersCanEdit: the "Players Can Edit the Whiteboard" world setting -->
+      <div class="wbe-help-section">
+        <div class="wbe-help-section-title">
+          <i class="fa-solid fa-user-lock"></i> GM: Lock the Board for Players
+        </div>
+        <div class="wbe-help-grid">
+          <span class="wbe-help-key">⚙ → Players</span>
+          <span class="wbe-help-desc">"Players can edit the board" switch in the toolbar's settings popup (GM only)</span>
+          <span class="wbe-help-key">Settings</span>
+          <span class="wbe-help-desc">Same switch under Configure Settings → Whiteboard Experience</span>
+          <span class="wbe-help-key">Off</span>
+          <span class="wbe-help-desc">Players still see the board, but their toolbar is hidden, hotkeys do nothing and clicks pass through to the canvas. Flips live for everyone, no reload.</span>
+        </div>
+      </div>
+
       <div class="wbe-help-tip">
         <i class="fa-solid fa-lightbulb"></i>
         <strong>Tip:</strong> Alignment guides appear automatically when dragging or resizing objects near other objects!
@@ -3785,6 +4003,9 @@ class WhiteboardLayer {
     if (!board) return;
     this.element = document.createElement("div");
     this.element.id = LAYER_ID;
+    // playersCanEdit: the layer is rebuilt on scene change - re-apply the lock to the new element
+    // through the one function that owns that state (it is null-safe before init completes).
+    applyBoardAccess();
     // Initial styles - will be synced by _sync()
     // CRITICAL: isolation: isolate creates stacking context, allowing unlimited objects
     // with z-index 0, 1, 2... inside layer, while layer itself has z-index 45
@@ -3854,6 +4075,15 @@ class WhiteboardLayer {
         position: relative;
       }
       
+      /* playersCanEdit: a locked-out player's layer is display-only. Every descendant
+         too, because pointer-events: none on a parent does not stop a child that sets its
+         own 'auto' (every object container does). Same rule as .wbe-passthrough-mode, minus
+         the opacity - the board stays fully visible. */
+      #${LAYER_ID}.wbe-read-only,
+      #${LAYER_ID}.wbe-read-only * {
+        pointer-events: none !important;
+      }
+
       /* Hidden Objects - GM-only visibility (reduced opacity + dashed outline) */
       .wbe-object-hidden {
         opacity: 0.5 !important;
@@ -13670,6 +13900,19 @@ class InteractionManager {
     }
   }
 
+  /**
+   * playersCanEdit: true while mouse input must fall through to Foundry untouched - the Z-key
+   * passthrough mode, or a player locked out by "Players Can Edit the Whiteboard". Gates
+   * every window-level mouse handler; an interaction in flight when the lock lands is
+   * cancelled by applyBoardAccess() rather than finished here, so it never commits locally
+   * what every other client would drop. Keyboard input is gated separately, through
+   * getHotkeyGateSettings().
+   * @returns {boolean}
+   */
+  _isInputPassthrough() {
+    return this._isPassthroughMode || isBoardReadOnly();
+  }
+
   _handleKeyDown(e) {
     // PRIORITY 0: Ignore Enter key in contentEditable elements
     // This prevents conflicts with other Foundry modules that listen to Enter on window
@@ -14005,8 +14248,8 @@ class InteractionManager {
    * @private
    */
   _handleMouseDown(e) {
-    // Passthrough mode - let events pass to Foundry VTT
-    if (this._isPassthroughMode) return;
+    // Passthrough mode (or playersCanEdit read-only) - let events pass to Foundry VTT
+    if (this._isInputPassthrough()) return;
     try {
       // Create EventContext for unified access to event data
       const ctx = new EventContext(e, this);
@@ -14025,8 +14268,8 @@ class InteractionManager {
     }
   }
   _handleMouseMove(e) {
-    // Passthrough mode - let events pass to Foundry VTT
-    if (this._isPassthroughMode) return;
+    // Passthrough mode (or playersCanEdit read-only) - let events pass to Foundry VTT
+    if (this._isInputPassthrough()) return;
     
     // Save mouse position for paste (center under cursor)
     this.lastMouseX = e.clientX;
@@ -14173,8 +14416,10 @@ class InteractionManager {
     }
   }
   _handleMouseUp(e) {
-    // Passthrough mode - let events pass to Foundry VTT
-    if (this._isPassthroughMode) return;
+    // Passthrough mode (or playersCanEdit read-only) - let events pass to Foundry VTT. For a locked
+    // player nothing is in flight: applyBoardAccess() cancels every interaction state when
+    // the lock lands, so there is nothing for this handler to finish.
+    if (this._isInputPassthrough()) return;
     
     // Handle unfreeze icon mouse up (must be checked before other operations)
     if (this.unfreezeHoldState && e.button === 0) {
@@ -14362,8 +14607,8 @@ class InteractionManager {
     }
   }
   _handleWheel(_e) {
-    // Passthrough mode - let events pass to Foundry VTT
-    if (this._isPassthroughMode) return;
+    // Passthrough mode (or playersCanEdit read-only) - let events pass to Foundry VTT
+    if (this._isInputPassthrough()) return;
     
     // Hide all panels during zoom
     this._hideAllPanels();
@@ -14400,8 +14645,8 @@ class InteractionManager {
     // Don't preventDefault - let Foundry handle zoom
   }
   _handleClick(e) {
-    // Passthrough mode - let events pass to Foundry VTT
-    if (this._isPassthroughMode) return;
+    // Passthrough mode (or playersCanEdit read-only) - let events pass to Foundry VTT
+    if (this._isInputPassthrough()) return;
     
     // Handle panel closing (architectural fix: centralized event handling)
     // Check if styling panel is open and should be closed
@@ -14426,8 +14671,8 @@ class InteractionManager {
     }
   }
   _handleDblClick(e) {
-    // Passthrough mode - let events pass to Foundry VTT
-    if (this._isPassthroughMode) return;
+    // Passthrough mode (or playersCanEdit read-only) - let events pass to Foundry VTT
+    if (this._isInputPassthrough()) return;
     
     // Handle Text Editing (double click on editable object)
     const target = this._hitTest(e.clientX, e.clientY);
@@ -18526,7 +18771,15 @@ class SocketController {
       console.error(`[Socket] Failed to emit ${type} for ${id}:`, error);
     }
   }
-  _handleSocketMessage(payload) {
+  /**
+   * @param {object} payload - what the sender passed to game.socket.emit
+   * @param {string} [senderId] - playersCanEdit: the sending user's id as attached by the Foundry
+   *   server to every module socket message (its handleCustomSocket emits
+   *   `(event, data, socket.user.id)`; read from the shipped 14.365 server, and core's own
+   *   A/V client consumes the same argument). Undefined on a core that does not pass it,
+   *   in which case the payload's self-reported userId is the only identity available.
+   */
+  _handleSocketMessage(payload, senderId) {
     console.log(`[Socket] Received message`, payload);
     const {
       action,
@@ -18536,6 +18789,26 @@ class SocketController {
       timestamp,
       userId
     } = payload;
+
+    // playersCanEdit: while "Players Can Edit the Whiteboard" is off, a non-GM client's
+    // object mutations and lock requests/renewals are ignored by every client - in
+    // particular by the activeGM, the only client that writes scene flags. The sender is
+    // judged by the id the server attached to the message (senderId), which a client cannot
+    // forge, so on a core that passes it (v14 does) this holds even against a player crafting
+    // raw socket messages from the console; the payload's self-reported userId is only the
+    // fallback. Let through: gmStatusChange (informational) and a lockRelease whose payload
+    // names the sender itself - a player who held an edit lock when the GM flipped the
+    // setting must still be able to give it back (applyBoardAccess ends the edit, and the
+    // resync's teardown releases again), or the arbiter keeps that object locked against
+    // the GM until the lock expires. The arbiter frees only the sender's own lock. Must run
+    // before the LockManager and the scene filter below.
+    const from = senderId ?? userId;
+    const passesWhileLocked = action === 'gmStatusChange' ||
+      (action === 'lockRelease' && userId === from);
+    if (!passesWhileLocked && !canUserEditBoard(from)) {
+      console.log(`[Socket] Ignoring ${action} from ${from}: players cannot edit the board`);
+      return;
+    }
 
     // Authoritative lock protocol (lockRequest/lockGranted/lockDenied/lockRenew/lockRelease/
     // lockReleased) is fully handled by the LockManager. Locks are keyed by object id, not by
@@ -18813,9 +19086,10 @@ function updateGMWarningIndicator() {
     return;
   }
   
-  // Hide for GM (GM doesn't need this warning)
-  if (game.user?.isGM) {
-    console.log('[GM Warning] updateGMWarningIndicator: Current user is GM, hiding indicator');
+  // Hide for GM (GM doesn't need this warning). playersCanEdit: hide for a locked-out player too -
+  // nothing of theirs can be saved, so "you can't save" would only confuse.
+  if (game.user?.isGM || isBoardReadOnly()) {
+    console.log('[GM Warning] updateGMWarningIndicator: GM or read-only player, hiding indicator');
     indicator.style.display = "none";
     return;
   }
@@ -19541,6 +19815,15 @@ class Whiteboard {
       // LEGACY: Keep old injector for backwards compatibility (can be removed later)
       // MassSelectionToolInjector.register(this.interaction.massSelection);
       
+      // playersCanEdit: the toolbar and layer exist now - apply "Players Can Edit the Whiteboard" to
+      // this client before any object is loaded (a locked-out player gets no toolbar and a
+      // click-through layer from the first frame). A role change for this user (player made
+      // GM, or the reverse) changes the answer too, so re-apply on that.
+      applyBoardAccess();
+      Hooks.on('updateUser', (user, data) => {
+        if (user.id === game.user?.id && 'role' in data) applyBoardAccess({ notify: true, resync: true });
+      });
+
       // Register panels for custom types (if any were registered before init)
       for (const [type, config] of this._customTypes) {
         if (config.PanelClass && !this.interaction.panels[type]) {
@@ -19758,6 +20041,10 @@ window.WBE_isFeatureEnabled = isFeatureEnabled;
 // window-global convention as WBE_isFeatureEnabled above.
 window.WBE_isAllHotkeysDisabled = isAllHotkeysDisabled;
 window.WBE_isHotkeyBlocked = isHotkeyBlocked;
+
+// playersCanEdit: so an add-on module with its own board objects (e.g. Fate Card) can
+// hide or disable its own controls for a locked-out player.
+window.WBE_isBoardReadOnly = isBoardReadOnly;
 
 // Export WBE Settings API (localStorage-based, per-user settings)
 window.getWBESetting = getWBESetting;
