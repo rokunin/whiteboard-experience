@@ -1100,6 +1100,7 @@ function showWBESettingsPopup() {
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: 12px; /* keep wrapped label text off the toggle */
         padding: 12px;
         background: rgba(255,255,255,0.05);
         border-radius: 8px;
@@ -1112,6 +1113,10 @@ function showWBESettingsPopup() {
         display: flex;
         flex-direction: column;
         gap: 4px;
+        /* The label takes the slack and wraps. Without this a long description grows the
+           label to its max-content width and flex squeezes the toggle instead. */
+        flex: 1;
+        min-width: 0;
       }
       .wbe-settings-label-text {
         font-size: 14px;
@@ -1125,6 +1130,7 @@ function showWBESettingsPopup() {
         position: relative;
         width: 44px;
         height: 24px;
+        flex-shrink: 0; /* the pill keeps its 44px whatever the label's length */
         background: rgba(255,255,255,0.2);
         border-radius: 12px;
         cursor: pointer;
