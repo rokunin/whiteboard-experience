@@ -137,6 +137,16 @@ export class UndoRedoManager {
         // Nothing significant changed
         if (!filteredOld || Object.keys(filteredOld).length === 0) return null;
 
+        // Drop keys whose value did not actually change (a repeated click or an
+        // idempotent write); an update that changes nothing is not an undo step.
+        for (const key of Object.keys(filteredOld)) {
+          if (filteredNew && key in filteredNew && valuesEqual(filteredOld[key], filteredNew[key])) {
+            delete filteredOld[key];
+            delete filteredNew[key];
+          }
+        }
+        if (Object.keys(filteredOld).length === 0) return null;
+
         // Skip z-index-only changes (handled separately via zIndexChanged)
         const changeKeys = Object.keys(filteredNew || {});
         if (changeKeys.length > 0 && changeKeys.every(k => ['zIndex', 'rank'].includes(k))) {
@@ -355,6 +365,18 @@ export class UndoRedoManager {
     
     // Squash all diffs into one
     const squashed = squashDiffs(batch.diffs);
+
+    // A batch can net out to nothing (x -> y -> x): prune keys that end where they began
+    for (const id of Object.keys(squashed.updated)) {
+      const entry = squashed.updated[id];
+      for (const key of Object.keys(entry.old || {})) {
+        if (entry.new && key in entry.new && valuesEqual(entry.old[key], entry.new[key])) {
+          delete entry.old[key];
+          delete entry.new[key];
+        }
+      }
+      if (Object.keys(entry.old || {}).length === 0) delete squashed.updated[id];
+    }
     
     // Skip if squashing cancelled everything out (e.g. create + delete same object)
     const hasChanges = Object.keys(squashed.added).length > 0
@@ -371,6 +393,11 @@ export class UndoRedoManager {
   // ==========================================
   // Utility Methods
   // ==========================================
+
+  /** True while a batch is open (all writes so far are one pending undo step) */
+  isBatching() {
+    return !!this._currentBatch;
+  }
 
   canUndo() {
     return this.undoStack.length > 0;
@@ -465,6 +492,21 @@ function reverseDiff(diff) {
   }
 
   return reversed;
+}
+
+/**
+ * Structural equality for diff values (primitives, plain objects, arrays).
+ */
+function valuesEqual(a, b) {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
+    return typeof a === 'number' && typeof b === 'number' && Number.isNaN(a) && Number.isNaN(b);
+  }
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every(k => k in b && valuesEqual(a[k], b[k]));
 }
 
 /**
@@ -618,6 +660,8 @@ function applyDiff(diff, registry, interaction, isUndo = false, objectFactory = 
       }
     }
     ms.selectedIds = validIds;
+    // Rotation state must follow what undo/redo just did to the objects
+    ms.syncRotationStateAfterHistory?.();
     if (validIds.size > 0) {
       ms._updateBoundingBox();
     }

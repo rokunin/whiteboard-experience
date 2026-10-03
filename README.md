@@ -138,7 +138,7 @@ Click thumbnails to view full size:
 - `Shift+PageUp/PageDown` — z-index jump (move to top/bottom)
 - `Ctrl+C/V` — copy/paste
 - `Ctrl+Z` / `Ctrl+Shift+Z` — undo / redo
-- Hold `Alt` — see through the board to the Foundry canvas below
+- Hold `Z` — see through the board to the Foundry canvas below
 - `Shift+Click` — add/remove object from group
 - `Shift+Drag` (empty space) — select multiple objects with box
 - Per-user settings (toolbar ⚙) can disable all of these, or just the tool-activation ones
@@ -181,6 +181,13 @@ MIT
 
 ## Changelog
 
+### v0.9.2
+
+**Fixed**
+- Rotating a group of selected objects is one step for undo now. Before, Ctrl+Z took the group apart one object at a time. The rotate panel also stays where it is while you click it.
+- Ctrl+Z no longer spends a press on "changes" that changed nothing.
+- The blue selection frame follows an object when it changes size: a Fate card switching edit mode, a picture that finishes loading, a text that grows as you type. Before, the frame kept the old size until something else refreshed it.
+
 ### v0.9.1
 
 Mostly groundwork for the new [Fate Card](https://github.com/rokunin/wbe-fate-card) module, plus a few things that bugged me.
@@ -200,7 +207,7 @@ Mostly groundwork for the new [Fate Card](https://github.com/rokunin/wbe-fate-ca
 - Undo and redo for everything on the board: Ctrl+Z and Ctrl+Shift+Z.
 - Connectors (B): curved lines between two objects. They follow the objects when you move them, and you can bend them by dragging the middle point.
 - Hide From Players: GMs can hide any object. Players don't see it and click straight through it.
-- Hold `Alt` to see through the board at 20% opacity, so you can find Foundry tokens or tiles hidden underneath it. Objects stay put while you do this.
+- Hold `Z` to see through the board at 20% opacity, so you can find Foundry tokens or tiles hidden underneath it. Objects stay put while you do this.
 - Only one person can edit a text at a time. If someone else is typing in it, you get a message instead of both edits fighting.
 - Debug snapshot button on the toolbar: saves the board state to a file you can attach to a bug report.
 

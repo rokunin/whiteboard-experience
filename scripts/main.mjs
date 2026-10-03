@@ -3198,7 +3198,26 @@ class WhiteboardLayer {
     }
     
     this._selectionOverlaySelectedId = objectId;
+    this._observeSelectedSize(objectId);
     this.updateSelectionOverlay();
+  }
+
+  /**
+   * Keep the selection overlay in step with the selected object's size. Content-sized objects
+   * change size without a registry change that would refresh the overlay: a Fate card entering
+   * or leaving edit mode, a portrait that finishes loading, a text growing as it is typed.
+   * Before this, the overlay kept the previous size until the next unrelated refresh.
+   * @param {string} objectId
+   */
+  _observeSelectedSize(objectId) {
+    this._selectionResizeObserver?.disconnect();
+    this._selectionResizeObserver = null;
+    const container = this.getObjectContainer(objectId);
+    if (!container || typeof ResizeObserver === 'undefined') return;
+    this._selectionResizeObserver = new ResizeObserver(() => {
+      if (this._selectionOverlaySelectedId === objectId) this.updateSelectionOverlay();
+    });
+    this._selectionResizeObserver.observe(container);
   }
 
   /**
@@ -3397,6 +3416,8 @@ class WhiteboardLayer {
       this._selectionOverlay.style.display = 'none';
     }
     this._selectionOverlaySelectedId = null;
+    this._selectionResizeObserver?.disconnect();
+    this._selectionResizeObserver = null;
   }
 
   // ========== MASS SELECTION OVERLAYS ==========
@@ -9623,8 +9644,10 @@ class BasePanelView {
    * @param {HTMLElement} button - Button that triggered the subpanel
    * @param {number} currentRotation - Current rotation in degrees
    * @param {Function} onChange - Callback (rotation) => void
+   * @param {{onGestureStart?: Function, onGestureEnd?: Function}} [gesture] - Slider drag bracket
+   *   (start on the first input of a drag, end on change/pointerup), so a drag can be one undo step
    */
-  openRotationSubpanel(button, currentRotation, onChange) {
+  openRotationSubpanel(button, currentRotation, onChange, gesture = {}) {
     if (this.activeButton === button) {
       this.closeSubpanel();
       return;
@@ -9709,8 +9732,30 @@ class BasePanelView {
       onChange(rotation);
     };
 
-    slider.addEventListener('input', () => sync(Number(slider.value)));
+    let dragging = false;
+    const endDrag = () => {
+      if (!dragging) return;
+      dragging = false;
+      gesture.onGestureEnd?.();
+    };
+    slider.addEventListener('input', () => {
+      if (!dragging) {
+        dragging = true;
+        gesture.onGestureStart?.();
+      }
+      sync(Number(slider.value));
+    });
+    slider.addEventListener('change', endDrag);
+    slider.addEventListener('pointerup', endDrag);
+    slider.addEventListener('pointercancel', endDrag);
     input.addEventListener('change', () => sync(Number(input.value)));
+
+    // The board's rotation changed behind the subpanel's back (undo/redo): show it
+    content.wbeSetRotation = (value) => {
+      rotation = Number(value) || 0;
+      input.value = String(rotation);
+      slider.value = String(Math.max(-180, Math.min(180, rotation)));
+    };
 
     this.openSubpanel(button, content);
   }
@@ -10289,6 +10334,7 @@ class MassSelectionPanel {
    * Hide panel (just hide, don't destroy)
    */
   hide() {
+    this.massSelection.endRotationGesture();
     if (this.view?.activeSubpanel) {
       this.view.closeSubpanel();
     }
@@ -10302,6 +10348,7 @@ class MassSelectionPanel {
    * Destroy panel completely (called when mass selection is cleared)
    */
   destroy() {
+    this.massSelection.endRotationGesture();
     if (this.view?.activeSubpanel) {
       this.view.closeSubpanel();
     }
@@ -10349,6 +10396,10 @@ class MassSelectionPanel {
       } else {
         this.massSelection.setGroupRotation(rotation);
       }
+    }, {
+      // Slider drag: all ticks of one drag are one undo step
+      onGestureStart: () => this.massSelection.beginRotationGesture(),
+      onGestureEnd: () => this.massSelection.endRotationGesture()
     });
   }
 }
@@ -12652,6 +12703,7 @@ class MassSelectionController {
     // Hide individual selection overlays
     this.layer?.hideMassSelectionOverlays();
     // Reset group rotation state
+    this.endRotationGesture();
     this.groupRotation = 0;
     this.startRotations.clear();
     this._rotationPivot = null;
@@ -12673,29 +12725,134 @@ class MassSelectionController {
    * Returns objects to their start positions (which include drag offset) with rotation=0
    */
   resetRotation() {
-    // If we have startRotations, restore positions from there (includes drag offset)
-    // This returns objects to where they were BEFORE rotation, but AFTER any drags
-    if (this.startRotations.size > 0) {
-      for (const [id, start] of this.startRotations) {
-        this.registry.update(id, {
-          x: start.x,
-          y: start.y,
-          rotation: 0
-        }, 'local');
+    this._inUndoStep(() => {
+      // If we have startRotations, restore positions from there (includes drag offset)
+      // This returns objects to where they were BEFORE rotation, but AFTER any drags
+      if (this.startRotations.size > 0) {
+        for (const [id, start] of this.startRotations) {
+          this.registry.update(id, {
+            x: start.x,
+            y: start.y,
+            rotation: 0
+          }, 'local');
+        }
+      } else {
+        // No rotation state - just reset rotation value
+        for (const id of this.selectedIds) {
+          this.registry.update(id, { rotation: 0 }, 'local');
+        }
       }
-    } else {
-      // No rotation state - just reset rotation value
-      for (const id of this.selectedIds) {
-        this.registry.update(id, { rotation: 0 }, 'local');
-      }
-    }
-    
+    });
+
     // Clear group rotation state
     this.groupRotation = 0;
     this.startRotations.clear();
     this._rotationPivot = null;
-    
-    this._updateBoundingBox();
+
+    // Keep the panel where it is: the rotation subpanel is open under it
+    this._updateBoundingBox(true);
+  }
+
+  /**
+   * Run fn so that everything it writes to the registry is ONE undo step.
+   * Joins the open rotation gesture (slider drag) or any outer batch instead of nesting.
+   */
+  _inUndoStep(fn) {
+    const undo = window.Whiteboard?.undoRedo;
+    const join = !undo || this._rotationGestureOpen || undo.isBatching?.();
+    if (!join) undo.startBatch();
+    this._suppressPanelReposition = true;
+    try {
+      fn();
+    } finally {
+      this._suppressPanelReposition = false;
+      if (!join) undo.endBatch();
+    }
+  }
+
+  /**
+   * Start a multi-tick rotation gesture (slider drag): every setGroupRotation call until
+   * endRotationGesture() lands in one undo step.
+   */
+  beginRotationGesture() {
+    if (this._rotationGestureOpen) return;
+    const undo = window.Whiteboard?.undoRedo;
+    if (!undo || undo.isBatching?.()) return;
+    undo.startBatch();
+    this._rotationGestureOpen = true;
+  }
+
+  endRotationGesture() {
+    if (!this._rotationGestureOpen) return;
+    this._rotationGestureOpen = false;
+    window.Whiteboard?.undoRedo?.endBatch();
+  }
+
+  /**
+   * Where an object ends up when the group is rotated by `rotation` degrees from its start state.
+   */
+  _rotatedPlacement(start, rotation) {
+    const pivotX = this._rotationPivot.x;
+    const pivotY = this._rotationPivot.y;
+    const rad = (rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    // Rotate object's CENTER around group pivot
+    const dx = start.centerX - pivotX;
+    const dy = start.centerY - pivotY;
+    const newCenterX = pivotX + dx * cos - dy * sin;
+    const newCenterY = pivotY + dx * sin + dy * cos;
+
+    // Convert back to top-left (x, y) position
+    const offsetX = start.centerX - start.x;  // half width
+    const offsetY = start.centerY - start.y;  // half height
+    return {
+      x: newCenterX - offsetX,
+      y: newCenterY - offsetY,
+      // New rotation = start rotation + group rotation delta
+      rotation: (start.rotation + rotation) % 360
+    };
+  }
+
+  /**
+   * Called after undo/redo changed objects. The rotation state (start positions, pivot,
+   * group angle) describes the objects as they were when the rotation began; if the objects
+   * are still a rigid rotation of that start state, keep it and re-derive the group angle,
+   * otherwise (undo of a drag, delete, ...) drop it so the next rotation starts from what
+   * is on the board. The open rotation subpanel is told the new angle.
+   */
+  syncRotationStateAfterHistory() {
+    if (this.startRotations.size > 0 && this._rotationPivot) {
+      let angle = null;
+      let consistent = true;
+      for (const [id, start] of this.startRotations) {
+        const obj = this.registry.get(id);
+        if (!obj || !this.selectedIds.has(id)) { consistent = false; break; }
+        if (angle === null) {
+          let d = (((obj.rotation || 0) - start.rotation) % 360 + 360) % 360;
+          if (d > 180) d -= 360;
+          angle = d;
+        }
+        const want = this._rotatedPlacement(start, angle);
+        const dRot = ((((obj.rotation || 0) - want.rotation) % 360) + 360) % 360;
+        if (Math.abs(obj.x - want.x) > 0.01 || Math.abs(obj.y - want.y) > 0.01
+          || (dRot > 0.01 && dRot < 359.99)) {
+          consistent = false;
+          break;
+        }
+      }
+      if (consistent && angle !== null && angle !== 0) {
+        this.groupRotation = angle;
+      } else {
+        this.groupRotation = 0;
+        this.startRotations.clear();
+        this._rotationPivot = null;
+      }
+    } else {
+      this.groupRotation = 0;
+    }
+    this.panel?.view?.activeSubpanel?.firstElementChild?.wbeSetRotation?.(this.groupRotation);
   }
 
   /**
@@ -12735,40 +12892,14 @@ class MassSelectionController {
       }
     }
 
-    const pivotX = this._rotationPivot.x;
-    const pivotY = this._rotationPivot.y;
-    const rad = (rotation * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-
-    // Apply absolute rotation from start positions
-    for (const id of this.selectedIds) {
-      const start = this.startRotations.get(id);
-      if (!start) continue;
-
-      // Rotate object's CENTER around group pivot
-      const dx = start.centerX - pivotX;
-      const dy = start.centerY - pivotY;
-      
-      const newCenterX = pivotX + dx * cos - dy * sin;
-      const newCenterY = pivotY + dx * sin + dy * cos;
-      
-      // Convert back to top-left (x, y) position
-      const offsetX = start.centerX - start.x;  // half width
-      const offsetY = start.centerY - start.y;  // half height
-      const newX = newCenterX - offsetX;
-      const newY = newCenterY - offsetY;
-
-      // New rotation = start rotation + group rotation delta
-      const newRotation = (start.rotation + rotation) % 360;
-
-      // Update object
-      this.registry.update(id, {
-        x: newX,
-        y: newY,
-        rotation: newRotation
-      }, 'local');
-    }
+    // Apply absolute rotation from start positions (all objects = ONE undo step)
+    this._inUndoStep(() => {
+      for (const id of this.selectedIds) {
+        const start = this.startRotations.get(id);
+        if (!start) continue;
+        this.registry.update(id, this._rotatedPlacement(start, rotation), 'local');
+      }
+    });
 
     this.groupRotation = rotation;
     
@@ -16052,8 +16183,10 @@ class InteractionManager {
     }
 
     // Mass-selection panel reposition
+    // (skipped while the group is being rotated: the rotation subpanel is open under the panel
+    // and the panel must not slide away from the pointer between clicks)
     if (this.massSelection?.selectedIds?.has(id) && this.massSelection.selectedIds.size >= 2) {
-      this.massSelection._updateBoundingBox();
+      this.massSelection._updateBoundingBox(!!this.massSelection._suppressPanelReposition);
     }
   }
 
