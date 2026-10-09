@@ -24,12 +24,29 @@ let activeToolId = null;
 // setCollapsed() on change - this module only holds the resulting boolean).
 let isCollapsed = false;
 
+// wbe-toolbar-orientation-select: 'vertical' (default column) or 'horizontal' (row). Persisted
+// client-side via the `toolbarOrientation` game.setting, which main.mjs owns (same split as
+// isCollapsed above); this module only holds the value and applies the CSS class.
+let orientation = 'vertical';
+
+// wbe-toolbar-orientation-select: double-clicking the drag handle calls this (main.mjs flips the
+// `collapseToolbar` setting there, so ⚙ and persistence stay in sync).
+let headerDoubleClickHandler = null;
+
+// The arrow (Select) tool's id: highlighted while no tool is on, see refreshSelectIndicator().
+const SELECT_TOOL_ID = 'wbe-select';
+
 // Drag state
 let isDragging = false;
 let dragStartX = 0;
 let dragStartY = 0;
 let toolbarStartX = 0;
 let toolbarStartY = 0;
+// True once the pointer moved more than DRAG_THRESHOLD px during the current click sequence, so a
+// drag never counts as a double-click on the handle.
+let dragMoved = false;
+const DRAG_THRESHOLD = 3;
+const VIEWPORT_MARGIN = 10;
 
 const STORAGE_KEY = 'wbe-toolbar-position';
 
@@ -244,9 +261,11 @@ const TOOLBAR_STYLES = `
   text-align: center;
 }
 
-/* Tooltip - hide for buttons with submenu or quick options panel */
-#wbe-toolbar .wbe-tool-btn[data-tooltip]:not(:has(.wbe-tool-submenu)):not(:has(.wbe-quick-options)):hover::after {
-  content: attr(data-tooltip);
+/* Tooltip - hide for buttons with submenu or quick options panel.
+ * data-wbe-tooltip, not data-tooltip: Foundry's own TooltipManager (v12+) reads data-tooltip
+ * and would show a second tooltip on top of this one. */
+#wbe-toolbar .wbe-tool-btn[data-wbe-tooltip]:not(:has(.wbe-tool-submenu)):not(:has(.wbe-quick-options)):hover::after {
+  content: attr(data-wbe-tooltip);
   position: absolute;
   left: 100%;
   margin-left: 8px;
@@ -260,6 +279,58 @@ const TOOLBAR_STYLES = `
   
   pointer-events: none;
   z-index: 1000;
+}
+
+/* Horizontal orientation: a row, the handle a vertical strip at its start, popups open below */
+#wbe-toolbar.wbe-toolbar--horizontal {
+  flex-direction: row;
+  align-items: center;
+}
+
+#wbe-toolbar.wbe-toolbar--horizontal .wbe-toolbar-header {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 0;
+  padding-left: 4px;
+  border-bottom: none;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 0;
+  margin-left: 2px;
+}
+
+#wbe-toolbar.wbe-toolbar--horizontal .wbe-toolbar-separator {
+  width: 1px;
+  height: auto;
+  align-self: stretch;
+  margin: 0 4px;
+}
+
+#wbe-toolbar.wbe-toolbar--horizontal .wbe-tool-submenu {
+  left: -8px;
+  top: calc(100% - 8px);
+  padding: 16px 8px 8px 8px;
+}
+
+#wbe-toolbar.wbe-toolbar--horizontal .wbe-tool-submenu::before {
+  top: 16px;
+  left: 8px;
+}
+
+#wbe-toolbar.wbe-toolbar--horizontal .wbe-quick-options {
+  left: 0;
+  top: calc(100% + 6px);
+}
+
+#wbe-toolbar.wbe-toolbar--horizontal .wbe-tool-btn[data-wbe-tooltip]:not(:has(.wbe-tool-submenu)):not(:has(.wbe-quick-options)):hover::after {
+  left: 50%;
+  top: 100%;
+  transform: translateX(-50%);
+  margin-left: 0;
+  margin-top: 8px;
 }
 `;
 
@@ -296,6 +367,9 @@ function startDrag(e) {
   if (e.button !== 0) return; // Только левая кнопка
   
   isDragging = true;
+  // A new click sequence starts on its first press; the second press of a double-click keeps
+  // the flag, so movement during either press cancels the double-click.
+  if (e.detail <= 1) dragMoved = false;
   dragStartX = e.clientX;
   dragStartY = e.clientY;
   
@@ -319,19 +393,36 @@ function onDrag(e) {
   
   const deltaX = e.clientX - dragStartX;
   const deltaY = e.clientY - dragStartY;
-  
-  let newLeft = toolbarStartX + deltaX;
-  let newTop = toolbarStartY + deltaY;
-  
-  // Ограничить в пределах экрана
-  const maxLeft = window.innerWidth - toolbarElement.offsetWidth - 10;
-  const maxTop = window.innerHeight - toolbarElement.offsetHeight - 10;
-  
-  newLeft = Math.max(10, Math.min(newLeft, maxLeft));
-  newTop = Math.max(10, Math.min(newTop, maxTop));
-  
-  toolbarElement.style.left = `${newLeft}px`;
-  toolbarElement.style.top = `${newTop}px`;
+  if (Math.abs(deltaX) > DRAG_THRESHOLD || Math.abs(deltaY) > DRAG_THRESHOLD) dragMoved = true;
+
+  const { left, top } = clampPosition(toolbarStartX + deltaX, toolbarStartY + deltaY);
+  toolbarElement.style.left = `${left}px`;
+  toolbarElement.style.top = `${top}px`;
+}
+
+/**
+ * Ограничить позицию тулбара пределами экрана (VIEWPORT_MARGIN от краёв)
+ */
+function clampPosition(left, top) {
+  const maxLeft = window.innerWidth - toolbarElement.offsetWidth - VIEWPORT_MARGIN;
+  const maxTop = window.innerHeight - toolbarElement.offsetHeight - VIEWPORT_MARGIN;
+  return {
+    left: Math.max(VIEWPORT_MARGIN, Math.min(left, maxLeft)),
+    top: Math.max(VIEWPORT_MARGIN, Math.min(top, maxTop))
+  };
+}
+
+/**
+ * Вернуть тулбар в пределы экрана (после смены ориентации меняется его размер)
+ */
+export function clampToViewport() {
+  if (!toolbarElement) return;
+  const rect = toolbarElement.getBoundingClientRect();
+  const { left, top } = clampPosition(rect.left, rect.top);
+  if (left === rect.left && top === rect.top) return;
+  toolbarElement.style.left = `${left}px`;
+  toolbarElement.style.top = `${top}px`;
+  if (loadSavedPosition()) savePosition(left, top);
 }
 
 /**
@@ -408,7 +499,13 @@ function createToolbarElement() {
   header.className = 'wbe-toolbar-header';
   header.textContent = 'WBE';
   header.addEventListener('mousedown', startDrag);
+  header.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    if (dragMoved) return;
+    headerDoubleClickHandler?.();
+  });
   toolbar.appendChild(header);
+  toolbar.classList.toggle('wbe-toolbar--horizontal', orientation === 'horizontal');
   
   return toolbar;
 }
@@ -422,10 +519,9 @@ function createToolButton(tool) {
   btn.dataset.toolId = tool.id;
   
   // Don't set tooltip for buttons with submenu (submenu replaces tooltip)
-  if (!tool.submenu) {
-    btn.dataset.tooltip = tool.title;
-  }
-  
+  applyTooltip(btn, tool);
+  btn.classList.toggle('active', tool.type === 'tool' && activeToolId === tool.id);
+    
   // Icon
   const icon = document.createElement('i');
   icon.className = tool.icon;
@@ -498,6 +594,25 @@ function createToolButton(tool) {
 }
 
 /**
+ * Tooltip text: the title, plus the hotkey in parentheses ("Create Text (T)") unless WBE's
+ * hotkey settings currently block that key (main.mjs exposes the gate as WBE_isHotkeyBlocked).
+ * @param {Object} tool
+ * @returns {string}
+ */
+function tooltipText(tool) {
+  if (!tool.hotkey) return tool.title;
+  const code = tool.hotkeyCode || `Key${String(tool.hotkey).toUpperCase()}`;
+  if (window.WBE_isHotkeyBlocked?.(code)) return tool.title;
+  return `${tool.title} (${tool.hotkey})`;
+}
+
+function applyTooltip(btn, tool) {
+  btn.setAttribute('aria-label', tooltipText(tool));
+  if (tool.submenu) return;
+  btn.dataset.wbeTooltip = tooltipText(tool);
+}
+
+/**
  * Обработчик клика по тулу
  */
 function handleToolClick(tool) {
@@ -547,6 +662,7 @@ function activateTool(toolId) {
   
   activeToolId = toolId;
   tool.onActivate?.();
+  refreshSelectIndicator();
 }
 
 /**
@@ -563,10 +679,11 @@ function deactivateTool(toolId) {
     activeToolId = null;
   }
   tool.onDeactivate?.();
+  refreshSelectIndicator();
 }
 
 // Group order for consistent toolbar layout
-const GROUP_ORDER = ['help', 'selection', 'create', 'shapes', 'objects', 'settings', 'default'];
+const GROUP_ORDER = ['select', 'help', 'selection', 'create', 'shapes', 'objects', 'settings', 'default'];
 
 /**
  * Перерендерить тулбар
@@ -617,6 +734,7 @@ function renderToolbar() {
       toolbarElement.appendChild(btn);
     }
   }
+  refreshSelectIndicator();
 }
 
 // ==========================================
@@ -667,6 +785,9 @@ export function initToolbar() {
  * @param {Object} tool - Конфигурация тула
  * @param {string} tool.id - Уникальный ID
  * @param {string} tool.title - Название (для tooltip)
+ * @param {string} [tool.hotkey] - wbe-toolbar-orientation-select: the key shown in the tooltip,
+ *   e.g. 'T' -> "Create Text (T)"; left out while WBE's hotkey settings block it. Checked as
+ *   `Key<hotkey>` unless tool.hotkeyCode gives the KeyboardEvent.code.
  * @param {string} tool.icon - FontAwesome класс иконки
  * @param {string} tool.group - Группа ('selection', 'shapes', 'objects')
  * @param {string} tool.type - Тип: 'button' | 'toggle' | 'tool'
@@ -807,6 +928,63 @@ export function resetToolbarPosition() {
 }
 
 /**
+ * wbe-toolbar-orientation-select: highlight the arrow (Select) button exactly while no tool is
+ * on - no exclusive toolbar tool (shapes, freehand, connector) and no text mode. Called from
+ * activateTool/deactivateTool, renderToolbar, and InteractionManager.setMode (text mode).
+ */
+export function refreshSelectIndicator() {
+  const btn = toolbarElement?.querySelector(`[data-tool-id="${SELECT_TOOL_ID}"]`);
+  if (!btn) return;
+  const textMode = window.Whiteboard?.interaction?.mode === 'text';
+  btn.classList.toggle('active', !activeToolId && !textMode);
+}
+
+/**
+ * Re-read every button's tooltip (main.mjs calls this when a hotkey setting changes, so the key
+ * appears or disappears from the tooltip).
+ */
+export function refreshTooltips() {
+  if (!toolbarElement) return;
+  for (const btn of toolbarElement.querySelectorAll('.wbe-tool-btn[data-tool-id]')) {
+    const tool = registeredTools.get(btn.dataset.toolId);
+    if (tool) applyTooltip(btn, tool);
+  }
+}
+
+/**
+ * wbe-toolbar-orientation-select: lay the toolbar out as a column ('vertical') or a row
+ * ('horizontal'). main.mjs calls this from the `toolbarOrientation` client setting. Toggles a
+ * class in place (no re-render, so an active tool's quick options panel survives), refreshes
+ * the buttons' icons and tooltips (the orientation button's depend on it), and keeps the
+ * toolbar on screen.
+ * @param {'vertical'|'horizontal'} value
+ */
+export function setOrientation(value) {
+  orientation = value === 'horizontal' ? 'horizontal' : 'vertical';
+  if (!toolbarElement) return;
+  toolbarElement.classList.toggle('wbe-toolbar--horizontal', orientation === 'horizontal');
+  for (const btn of toolbarElement.querySelectorAll('.wbe-tool-btn[data-tool-id]')) {
+    const tool = registeredTools.get(btn.dataset.toolId);
+    const icon = btn.querySelector(':scope > i');
+    if (tool && icon && icon.className !== tool.icon) icon.className = tool.icon;
+    if (tool) applyTooltip(btn, tool);
+  }
+  clampToViewport();
+}
+
+/** @returns {'vertical'|'horizontal'} */
+export function getOrientation() {
+  return orientation;
+}
+
+/**
+ * @param {Function|null} handler - called on a double-click of the drag handle (not after a drag)
+ */
+export function setHeaderDoubleClickHandler(handler) {
+  headerDoubleClickHandler = typeof handler === 'function' ? handler : null;
+}
+
+/**
  * Activate a tool by ID (for hotkey support)
  */
 function activateToolById(toolId) {
@@ -838,5 +1016,11 @@ window.WBEToolbar = {
   updateToolbarPosition,
   resetToolbarPosition,
   setCollapsed,
-  isToolbarCollapsed
+  isToolbarCollapsed,
+  refreshSelectIndicator,
+  refreshTooltips,
+  setOrientation,
+  getOrientation,
+  setHeaderDoubleClickHandler,
+  clampToViewport
 };

@@ -181,6 +181,25 @@ MIT
 
 ## Changelog
 
+### v0.9.3
+
+**New**
+- An arrow button at the top of the toolbar. It is lit while no tool is on, so you can always see whether you are still drawing, placing shapes, connecting or adding text. Click it (or press V) to put the tool down. Right click, clicking the tool again and its own key still work too.
+- The toolbar can lie flat. The button next to ⚙ switches it between a column and a row, and every player picks this for themselves.
+- Double-click the WBE handle to fold the toolbar away, and again to bring it back. Same as the checkbox in ⚙.
+
+**Changed**
+- Texts now work like in Miro. A text you never resized grows with its content: make the font bigger and the text gets wider instead of wrapping. Once you drag a text's side handle, its width stays where you put it and the text wraps inside it. Texts from earlier versions are sorted out the first time you change them: a one-line label becomes a growing one, a paragraph that already wraps keeps its width.
+
+**Fixed**
+- Rotating a group, clicking away, selecting it again and pressing reset (0°) no longer scatters it. When the selected objects share one angle, the rotation panel shows it, and reset puts the layout back as it was before the rotation, also after a reload or after the group was moved. Reset also gives every object back its own angle (it used to set them all to 0).
+- Making a text's font smaller shrinks its box right away. Before, the box kept the old height until a reload, so the same text could have a different frame on another player's screen.
+- Toolbar buttons show one tooltip, not two, and it names the key: "Create Text (T)", "Rectangle (S)". The rectangle tooltip used to say R, but its key has always been S. If you turned tool keys off in ⚙, the tooltips leave the key out.
+- The "GM is not online" banner no longer blocks clicks on whatever is under it, such as the toolbar handle.
+- While editing a text, the fields and lists in the style panel (size, line spacing, opacity) work. Before, clicking the size field sent you straight back into the text, so the digits you typed ended up in the text and the lists closed at once. The part of the text you had selected stays selected, so Bold and Italic still apply to it.
+- A long word in a text with a set width no longer gets cut off after you finish editing. It wraps the same way it does while editing.
+- With more than one GM in the game, changes on a scene are saved even when the main GM is looking at another scene. Before, only the main GM saved, so objects made on a scene they were not viewing could be lost on reload.
+
 ### v0.9.2
 
 **Fixed**

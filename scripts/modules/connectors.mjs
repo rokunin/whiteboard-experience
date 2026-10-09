@@ -523,7 +523,8 @@ class ConnectorsManager {
 
     window.WBEToolbar.registerTool({
       id: 'wbe-connector',
-      title: 'Connector (B)',
+      title: 'Connector',
+      hotkey: 'B',
       icon: 'fa-solid fa-bezier-curve',
       group: 'shapes',
       type: 'tool',

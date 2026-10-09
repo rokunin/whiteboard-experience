@@ -82,6 +82,11 @@ import { isHotkeyBlocked as _isHotkeyBlockedPure, getToolHotkeysToggleDisplay } 
 // WBE Snapshot - debug state capture system
 import { WbeSnapshot } from './modules/wbe-snapshot.mjs';
 
+// Text width modes: auto (fits content) vs fixed (set with a handle)
+import { widthUpdateFor, measureAutoTextWidth, textWidthStyles, applyTextWidthStyles } from './modules/text-width.mjs';
+// Pasted text wider than this starts with a fixed width and wraps (matches the render cap).
+const PASTED_TEXT_MAX_AUTO_WIDTH = 400;
+
 // ==========================================
 // Pickr - Color Picker Library (@simonwep/pickr)
 // ==========================================
@@ -692,13 +697,27 @@ function registerModuleSettings() {
     onChange: (value) => window.WBEToolbar?.setCollapsed?.(value)
   });
 
+  // wbe-toolbar-orientation-select: switched by the toolbar's own orientation button.
+  game.settings.register(MODULE_ID, 'toolbarOrientation', {
+    name: 'WBE Toolbar Orientation',
+    hint: 'Lay the WBE toolbar out as a vertical column or a horizontal row.',
+    scope: 'client',
+    config: true,
+    type: String,
+    choices: { vertical: 'Vertical', horizontal: 'Horizontal' },
+    default: 'vertical',
+    onChange: (value) => window.WBEToolbar?.setOrientation?.(value)
+  });
+
+  // Both hotkey settings refresh the toolbar tooltips, which name a key only while it works.
   game.settings.register(MODULE_ID, 'disableAllHotkeys', {
     name: 'Disable All WBE Hotkeys',
     hint: 'No WBE keyboard shortcut does anything (tool hotkeys and object hotkeys like Delete/Ctrl+C/PageUp alike).',
     scope: 'client',
     config: true,
     type: Boolean,
-    default: false
+    default: false,
+    onChange: () => window.WBEToolbar?.refreshTooltips?.()
   });
 
   game.settings.register(MODULE_ID, 'disableToolHotkeys', {
@@ -707,7 +726,8 @@ function registerModuleSettings() {
     scope: 'client',
     config: true,
     type: Boolean,
-    default: false
+    default: false,
+    onChange: () => window.WBEToolbar?.refreshTooltips?.()
   });
 
   // Google Fonts setting
@@ -4820,17 +4840,10 @@ class WhiteboardLayer {
         // Only allow position updates (x/y) and textWidth sync to prevent browser auto-resize
         // This complements Registry lock mode which protects the model
 
-        // CRITICAL: Apply textWidth from model to DOM
-        // If textWidth is set (fixed width mode), use it
-        // If textWidth is null, use max-width: 400px (will be fixed by _handleTextPasteFromClipboard)
-        if (obj.textWidth && obj.textWidth > 0) {
-          textElement.style.width = `${obj.textWidth}px`;
-          textElement.style.maxWidth = '';
-        } else {
-          // Auto-width mode with max limit - used only briefly before textWidth is fixed
-          textElement.style.width = 'auto';
-          textElement.style.maxWidth = '400px';
-        }
+        // CRITICAL: Apply textWidth from model to DOM, per width mode (text-width.mjs).
+        // While editing, an auto-width text grows with what is typed.
+        const isEditingText = textElement.querySelector('.wbe-text-background-span')?.contentEditable === 'true';
+        applyTextWidthStyles(textElement, obj, isEditingText);
 
         // CRITICAL: Force sync styles from model to DOM to prevent external DOM manipulation
         // This overwrites any direct DOM changes (like from console attacks)
@@ -4884,7 +4897,7 @@ class WhiteboardLayer {
       // Elegant: use field-to-style mapping instead of many ifs
       
       // Determine which fields correspond to text styles
-      const textStyleFields = new Set(['color', 'colorOpacity', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textAlign', 'textWidth', 'lineHeight', 'backgroundColor', 'backgroundColorOpacity', 'borderColor', 'borderOpacity', 'borderWidth']);
+      const textStyleFields = new Set(['color', 'colorOpacity', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textAlign', 'textWidth', 'textWidthMode', 'lineHeight', 'backgroundColor', 'backgroundColorOpacity', 'borderColor', 'borderOpacity', 'borderWidth']);
       
       // Check if changes contain at least one style field (or changes = null for full update)
       const hasStyleChanges = !changes || Object.keys(changes).some(key => textStyleFields.has(key));
@@ -4897,12 +4910,8 @@ class WhiteboardLayer {
         const shouldUpdate = (field) => !changes || field in changes;
         
         // Text width (depends only on textWidth)
-        if (shouldUpdate('textWidth')) {
-          if (obj.textWidth && obj.textWidth > 0) {
-            allTextElementStyles.width = `${obj.textWidth}px`;
-          } else {
-            allTextElementStyles.width = '';
-          }
+        if (shouldUpdate('textWidth') || shouldUpdate('textWidthMode')) {
+          Object.assign(allTextElementStyles, textWidthStyles(obj, false));
         }
         
         // Color (depends on color and colorOpacity)
@@ -6271,6 +6280,12 @@ class WhiteboardText extends WhiteboardObject {
     this.borderOpacity = data.borderOpacity !== undefined ? data.borderOpacity : DEFAULT_BORDER_OPACITY;
     this.borderWidth = data.borderWidth !== undefined ? data.borderWidth : DEFAULT_BORDER_WIDTH;
     this.textWidth = data.textWidth || null; // null = auto width, number = fixed width in px
+    // 'auto': width fits the content (refitted on content/font changes, stored in textWidth so
+    // every client breaks lines the same way). 'fixed': width set by a width/stretch handle.
+    // null: saved before modes existed - resolved on the first width-affecting change.
+    this.textWidthMode = data.textWidthMode === 'auto' || data.textWidthMode === 'fixed'
+      ? data.textWidthMode
+      : (data.textWidth ? null : 'auto');
     this.lineHeight = data.lineHeight !== undefined ? data.lineHeight : 1.2; // Default line-height
     this.scale = data.scale !== undefined ? data.scale : 1;
     this.rotation = data.rotation || 0;
@@ -6288,6 +6303,35 @@ class WhiteboardText extends WhiteboardObject {
     if (this._updateCallback) {
       this._updateCallback(this.id, changes);
     }
+  }
+
+  /**
+   * Put focus back in the text being edited and restore the selection remembered before a
+   * panel field took focus. Falls back to a caret at the end when the remembered range no
+   * longer lies inside the text (for example after a re-render). No-op outside edit mode.
+   * @returns {boolean} true if a selection was restored
+   */
+  restoreSavedSelection() {
+    const textSpan = document.getElementById(this.id)?.querySelector('.wbe-text-background-span');
+    if (!textSpan || textSpan.contentEditable !== "true") return false;
+    if (document.activeElement !== textSpan) {
+      this._caretFromClick = false;
+      textSpan.focus({ preventScroll: true });
+    }
+    const sel = window.getSelection();
+    if (!sel) return false;
+    const range = this._savedSelection;
+    const usable = range && textSpan.contains(range.startContainer) && textSpan.contains(range.endContainer);
+    sel.removeAllRanges();
+    if (usable) {
+      sel.addRange(range);
+      return true;
+    }
+    const end = document.createRange();
+    end.selectNodeContents(textSpan);
+    end.collapse(false);
+    sel.addRange(end);
+    return false;
   }
 
   /**
@@ -6377,7 +6421,7 @@ class WhiteboardText extends WhiteboardObject {
             text-align: ${this.textAlign};
             user-select: none;
             min-width: 100px;
-            min-height: ${this.fontSize}px;
+            min-height: 1em; /* keeps an empty text clickable; em follows later font size changes */
             ${widthStyle}
             overflow-wrap: normal;
             word-break: normal;
@@ -6425,6 +6469,8 @@ class WhiteboardText extends WhiteboardObject {
             min-height: 1em;
         `;
     textElement.appendChild(textSpan);
+    // Width and wrapping per width mode (text-width.mjs); overrides the base cssText above.
+    applyTextWidthStyles(textElement, this, false);
 
     // Input handler to update outline and handle on text size change
     // Use Registry update to trigger Layer update (architecture intact)
@@ -6473,6 +6519,25 @@ class WhiteboardText extends WhiteboardObject {
       }
     }, true); // Use capture phase to handle before other handlers
 
+    // Remember the text selection while editing, so a trip to a panel field (which takes
+    // focus and with it the document selection) does not lose it. Restored by
+    // restoreSavedSelection() before B/I/clear, and on returning to the text by keyboard.
+    const rememberSelection = () => {
+      if (textSpan.contentEditable !== "true") return;
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && textSpan.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+        this._savedSelection = sel.getRangeAt(0).cloneRange();
+      }
+    };
+    textSpan.addEventListener('mouseup', rememberSelection);
+    textSpan.addEventListener('keyup', rememberSelection);
+    // A click inside the text places its own caret: do not restore the old selection over it.
+    textSpan.addEventListener('mousedown', () => { this._caretFromClick = true; });
+    textSpan.addEventListener('focus', () => {
+      if (textSpan.contentEditable === "true" && !this._caretFromClick) this.restoreSavedSelection();
+      this._caretFromClick = false;
+    });
+
     // Blur handler to finish editing
     // CRITICAL: Don't finish editing if blur was caused by clicking on panel
     textSpan.addEventListener('blur', (e) => {
@@ -6485,7 +6550,19 @@ class WhiteboardText extends WhiteboardObject {
           relatedTarget.closest('.wbe-color-subpanel') ||
           relatedTarget.closest('.wbe-rotation-subpanel')
         );
-        
+
+        // Owner report 2026-10-03: a panel field (font size, line height, opacity, a
+        // dropdown) needs to keep the focus it was given, or typed digits land in the text
+        // and dropdowns close at once. Stay in edit mode, but leave focus where it went.
+        const isPanelFormControl = isPanelClick && (
+          relatedTarget.matches('input, select, textarea, color-picker') ||
+          !!relatedTarget.closest('color-picker')
+        );
+        if (isPanelFormControl) {
+          rememberSelection();
+          return; // Don't finish editing, don't refocus
+        }
+
         // If blur was caused by panel click, restore focus and don't finish editing
         if (isPanelClick) {
           // Restore focus after a short delay to allow panel interaction
@@ -6587,6 +6664,7 @@ class WhiteboardText extends WhiteboardObject {
       borderOpacity: this.borderOpacity,
       borderWidth: this.borderWidth,
       textWidth: this.textWidth,
+      textWidthMode: this.textWidthMode,
       lineHeight: this.lineHeight,
       scale: this.scale,
       rotation: this.rotation
@@ -8267,11 +8345,19 @@ class TextStylingController {
     this._updateLastTextStyle({ backgroundColor: hex, backgroundColorOpacity: opacity });
   }
   handleFontChange(fontFamily, fontSize, fontWeight, fontStyle) {
+    // An auto-width text refits to the new font in the same update (one undo step); a
+    // fixed-width text keeps its width and wraps.
+    const widthChanges = widthUpdateFor(
+      this.registry.get(this.textId),
+      this.layer?.getTextElement(this.textId),
+      { fontFamily, fontSize, fontWeight, fontStyle }
+    );
     this.registry.update(this.textId, {
       fontFamily,
       fontSize,
       fontWeight,
-      fontStyle
+      fontStyle,
+      ...widthChanges
     }, 'local');
     this._updateLastTextStyle({ fontFamily, fontSize, fontWeight, fontStyle });
   }
@@ -8525,6 +8611,15 @@ class TextSubpanel {
       return textSpan.contains(range.commonAncestorContainer);
     };
     
+    // While a panel field has focus the document selection lives in that field. Before B/I/
+    // clear decide between "selection" and "whole text", put the remembered text selection
+    // back (see WhiteboardText.restoreSavedSelection).
+    const restoreTextSelection = () => {
+      const textSpan = this.controller.layer?.getTextSpan(this.controller.textId);
+      if (!textSpan || textSpan.contentEditable !== "true" || document.activeElement === textSpan) return;
+      this.controller.registry.get(this.controller.textId)?.restoreSavedSelection?.();
+    };
+
     // Helper: apply inline formatting via execCommand
     const applyInlineFormat = (command) => {
       document.execCommand(command, false, null);
@@ -8537,6 +8632,7 @@ class TextSubpanel {
     };
     
     boldBtn.addEventListener("click", () => {
+      restoreTextSelection();
       if (hasInlineSelection()) {
         // Inline formatting for selection
         applyInlineFormat('bold');
@@ -8547,6 +8643,7 @@ class TextSubpanel {
       }
     });
     italicBtn.addEventListener("click", () => {
+      restoreTextSelection();
       if (hasInlineSelection()) {
         // Inline formatting for selection
         applyInlineFormat('italic');
@@ -8557,6 +8654,7 @@ class TextSubpanel {
       }
     });
     regularBtn.addEventListener("click", () => {
+      restoreTextSelection();
       if (hasInlineSelection()) {
         // Remove inline formatting from selection
         applyInlineFormat('removeFormat');
@@ -10384,7 +10482,8 @@ class MassSelectionPanel {
     // Close any existing subpanel
     this.view.closeSubpanel();
 
-    // Get current group rotation
+    // Current group angle: a rotation made before this selection is recovered here
+    this.massSelection._initRotationState();
     const currentRotation = this.massSelection.getGroupRotation();
 
     // Open rotation subpanel using BasePanelView method
@@ -12170,6 +12269,7 @@ class MassSelectionController {
     }
 
     this.selectedIds = newSelectedIds;
+    this._resetRotationState(); // a different selection: its rotation start is built again
     this.view.updateIndicator(this.selectedIds.size);
 
     // Show individual overlays immediately during selection (not just at end)
@@ -12535,16 +12635,22 @@ class MassSelectionController {
    */
   _getGroupBounds() {
     if (this.selectedIds.size === 0) return null;
+    return this._boundsOfBoxes(this._groupBoxes());
+  }
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
+  /**
+   * Each selected object's box as the group bounds see it: its centre (transform-origin: center,
+   * so x + baseWidth/2) and half its visible size (scale and border included), unrotated.
+   * @returns {{id: string, obj: object, baseWidth: number, baseHeight: number,
+   *   centerX: number, centerY: number, halfWidth: number, halfHeight: number}[]}
+   */
+  _groupBoxes() {
+    const boxes = [];
     for (const id of this.selectedIds) {
       const obj = this.registry.get(id);
       const container = this.layer?.getObjectContainer(id);
       if (!obj || !container) continue;
 
-      const x = obj.x;
-      const y = obj.y;
       const scale = obj.scale !== undefined ? obj.scale : 1;
       const borderWidth = obj.borderWidth || obj.strokeWidth || 0;
 
@@ -12552,33 +12658,39 @@ class MassSelectionController {
       const baseHeight = parseFloat(container.style.height) || container.offsetHeight;
 
       const usesTransformScale = obj.usesTransformScale?.() ?? (obj.type === 'text' || obj.type === 'shape' || obj.type === 'fate-card');
+      const factor = usesTransformScale ? scale : 1;
+      const finalWidth = baseWidth * factor + 2 * borderWidth * factor;
+      const finalHeight = baseHeight * factor + 2 * borderWidth * factor;
 
-      let width, height, borderPadding;
-      if (usesTransformScale) {
-        width = baseWidth * scale;
-        height = baseHeight * scale;
-        borderPadding = borderWidth * scale;
-      } else {
-        width = baseWidth;
-        height = baseHeight;
-        borderPadding = borderWidth;
-      }
-
-      const finalWidth = width + 2 * borderPadding;
-      const finalHeight = height + 2 * borderPadding;
-
-      // For transform-origin: center
-      const centerX = x + baseWidth / 2;
-      const centerY = y + baseHeight / 2;
-      const left = centerX - finalWidth / 2;
-      const top = centerY - finalHeight / 2;
-
-      minX = Math.min(minX, left);
-      minY = Math.min(minY, top);
-      maxX = Math.max(maxX, left + finalWidth);
-      maxY = Math.max(maxY, top + finalHeight);
+      boxes.push({
+        id,
+        obj,
+        baseWidth,
+        baseHeight,
+        centerX: obj.x + baseWidth / 2,
+        centerY: obj.y + baseHeight / 2,
+        halfWidth: finalWidth / 2,
+        halfHeight: finalHeight / 2
+      });
     }
+    return boxes;
+  }
 
+  /**
+   * Bounds of boxes from _groupBoxes(), optionally with other centres (same order).
+   * @returns {{ minX, minY, maxX, maxY, centerX, centerY } | null}
+   */
+  _boundsOfBoxes(boxes, centers = null) {
+    if (!boxes.length) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    boxes.forEach((b, i) => {
+      const cx = centers ? centers[i].x : b.centerX;
+      const cy = centers ? centers[i].y : b.centerY;
+      minX = Math.min(minX, cx - b.halfWidth);
+      minY = Math.min(minY, cy - b.halfHeight);
+      maxX = Math.max(maxX, cx + b.halfWidth);
+      maxY = Math.max(maxY, cy + b.halfHeight);
+    });
     return {
       minX,
       minY,
@@ -12659,6 +12771,7 @@ class MassSelectionController {
       this.selectedIds.delete(id);
       this.registry.update(id, { selected: false, massSelected: false }, 'local');
     }
+    this._resetRotationState();
 
     this.view.updateIndicator(this.selectedIds.size);
     this._updateBoundingBox();
@@ -12681,6 +12794,7 @@ class MassSelectionController {
       this.selectedIds.add(obj.id);
       this.registry.update(obj.id, { selected: true, massSelected: true }, 'local');
     }
+    this._resetRotationState();
 
     this.view.updateIndicator(this.selectedIds.size);
     this._updateBoundingBox();
@@ -12721,28 +12835,98 @@ class MassSelectionController {
   }
   
   /**
-   * Reset rotation of all selected objects to 0
-   * Returns objects to their start positions (which include drag offset) with rotation=0
+   * Group rotation start state for the current selection (start positions/angles + pivot), and
+   * the panel's angle. Built once per selection, before the first rotation or when the panel
+   * opens.
+   *
+   * When every selected object has the same non-zero angle θ, the selection is read as a group
+   * rotated by θ from straight - including one rotated earlier, before a reselect, a reload or on
+   * another client, and moved as a whole since (owner report 2026-10-06: the panel said 0° on a
+   * rotated title and reset did nothing). The start layout is recovered exactly: the rotation
+   * was around the centre of the unrotated group bounds P, so with K = the bounds centre of the
+   * current centres rotated by -θ about the origin, P = R(θ)·K, and each start centre is
+   * P + R(-θ)(c - P). The panel then shows θ, and reset / ±15 / the slider work from that start.
+   * Mixed angles: the start is the current state and the panel starts at 0.
+   */
+  _initRotationState() {
+    if (this.startRotations.size > 0) return true;
+    const boxes = this._groupBoxes();
+    if (!boxes.length) return false;
+
+    const norm = (a) => { let d = ((a % 360) + 360) % 360; if (d > 180) d -= 360; return d; };
+    const angles = boxes.map(b => norm(b.obj.rotation || 0));
+    const common = angles.every(a => Math.abs(a - angles[0]) < 1e-6) ? angles[0] : 0;
+
+    if (common !== 0) {
+      const rad = (common * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      // Current centres rotated by -θ about the origin.
+      const back = boxes.map(b => ({ x: b.centerX * cos + b.centerY * sin, y: -b.centerX * sin + b.centerY * cos }));
+      const k = this._boundsOfBoxes(boxes, back);
+      const pivot = { x: k.centerX * cos - k.centerY * sin, y: k.centerX * sin + k.centerY * cos };
+      this._rotationPivot = pivot;
+      for (const b of boxes) {
+        const dx = b.centerX - pivot.x;
+        const dy = b.centerY - pivot.y;
+        const centerX = pivot.x + dx * cos + dy * sin;
+        const centerY = pivot.y - dx * sin + dy * cos;
+        this.startRotations.set(b.id, {
+          rotation: norm((b.obj.rotation || 0) - common),
+          x: centerX - b.baseWidth / 2,
+          y: centerY - b.baseHeight / 2,
+          centerX,
+          centerY
+        });
+      }
+      this.groupRotation = common;
+      return true;
+    }
+
+    const bounds = this._boundsOfBoxes(boxes);
+    this._rotationPivot = { x: bounds.centerX, y: bounds.centerY };
+    for (const b of boxes) {
+      this.startRotations.set(b.id, {
+        rotation: b.obj.rotation || 0,
+        x: b.obj.x,
+        y: b.obj.y,
+        centerX: b.centerX,
+        centerY: b.centerY
+      });
+    }
+    this.groupRotation = 0;
+    return true;
+  }
+
+  /** Forget the rotation start state: the selection changed, so it is built again when needed. */
+  _resetRotationState() {
+    this.endRotationGesture();
+    this.groupRotation = 0;
+    this.startRotations.clear();
+    this._rotationPivot = null;
+  }
+
+  /**
+   * Undo this selection's group rotation: the panel's 0° (reset button, typed 0, slider at 0).
+   * The selection is temporary (like a Miro multi-select, not a group): 0° means the start
+   * layout from _initRotationState(), so every object gets back its start position AND its own
+   * start angle. A rotation made before a reselect or a reload is recovered there too, as long
+   * as the objects still share one angle. Nothing to undo: nothing changes (it used to zero every
+   * object's angle in place, scattering a rotated layout; owner report 2026-10-06).
    */
   resetRotation() {
-    this._inUndoStep(() => {
-      // If we have startRotations, restore positions from there (includes drag offset)
-      // This returns objects to where they were BEFORE rotation, but AFTER any drags
-      if (this.startRotations.size > 0) {
+    this._initRotationState();
+    if (this.groupRotation !== 0 && this.startRotations.size > 0) {
+      this._inUndoStep(() => {
         for (const [id, start] of this.startRotations) {
           this.registry.update(id, {
             x: start.x,
             y: start.y,
-            rotation: 0
+            rotation: start.rotation
           }, 'local');
         }
-      } else {
-        // No rotation state - just reset rotation value
-        for (const id of this.selectedIds) {
-          this.registry.update(id, { rotation: 0 }, 'local');
-        }
-      }
-    });
+      });
+    }
 
     // Clear group rotation state
     this.groupRotation = 0;
@@ -12852,6 +13036,8 @@ class MassSelectionController {
     } else {
       this.groupRotation = 0;
     }
+    // Dropped state: recover the group angle from the objects as they are now.
+    if (this.startRotations.size === 0 && this.selectedIds.size > 0) this._initRotationState();
     this.panel?.view?.activeSubpanel?.firstElementChild?.wbeSetRotation?.(this.groupRotation);
   }
 
@@ -12863,34 +13049,8 @@ class MassSelectionController {
   setGroupRotation(rotation) {
     if (this.selectedIds.size === 0) return;
 
-    // Initialize start state if not set (first rotation change)
-    if (this.startRotations.size === 0) {
-      // Calculate initial group center BEFORE any rotation
-      const bounds = this._getGroupBounds();
-      if (!bounds) return;
-      
-      this._rotationPivot = { x: bounds.centerX, y: bounds.centerY };
-      
-      for (const id of this.selectedIds) {
-        const obj = this.registry.get(id);
-        const container = this.layer?.getObjectContainer(id);
-        if (!obj || !container) continue;
-        
-        // Calculate object center same way as _getGroupBounds
-        const baseWidth = parseFloat(container.style.width) || container.offsetWidth || 100;
-        const baseHeight = parseFloat(container.style.height) || container.offsetHeight || 100;
-        const objCenterX = obj.x + baseWidth / 2;
-        const objCenterY = obj.y + baseHeight / 2;
-        
-        this.startRotations.set(id, {
-          rotation: obj.rotation || 0,
-          x: obj.x,
-          y: obj.y,
-          centerX: objCenterX,
-          centerY: objCenterY
-        });
-      }
-    }
+    // Start state (positions, angles, pivot) before the first rotation of this selection
+    if (!this._initRotationState()) return;
 
     // Apply absolute rotation from start positions (all objects = ONE undo step)
     this._inUndoStep(() => {
@@ -13755,6 +13915,21 @@ class InteractionManager {
       this._endEditText(this.editingId);
     }
     this.mode = mode;
+    // wbe-toolbar-orientation-select: text mode counts as "a tool is on" for the arrow button.
+    window.WBEToolbar?.refreshSelectIndicator?.();
+  }
+  /**
+   * Turn off whatever tool is on: text mode, the toolbar's exclusive tool (shapes, freehand,
+   * connector). Shared by the V key and the toolbar's arrow (Select) button; a no-op when no
+   * tool is on.
+   */
+  resetTools() {
+    if (this.mode === 'text') {
+      this._exitTextMode();
+    }
+    window.WBEToolbar?.deactivateAllTools?.();
+    // Also disable shapes module directly (in case toolbar is not synced)
+    window.WBE_Shapes?.disableTool?.();
   }
   _enterTextMode() {
     if (this.mode === 'text') return;
@@ -13953,22 +14128,7 @@ class InteractionManager {
       }
       
       e.preventDefault();
-      
-      // Exit text mode if active
-      if (this.mode === 'text') {
-        this._exitTextMode();
-      }
-      
-      // Deactivate all WBE toolbar tools (shapes, etc.)
-      if (window.WBEToolbar?.deactivateAllTools) {
-        window.WBEToolbar.deactivateAllTools();
-      }
-      
-      // Also disable shapes module directly (in case toolbar is not synced)
-      if (window.WBE_Shapes?.disableTool) {
-        window.WBE_Shapes.disableTool();
-      }
-      
+      this.resetTools();
       return;
     }
 
@@ -15677,7 +15837,8 @@ class InteractionManager {
     // Update Registry once with final width
     if (currentWidth !== undefined) {
       this.registry.update(id, {
-        textWidth: currentWidth
+        textWidth: currentWidth,
+        textWidthMode: 'fixed' // a width set by hand is kept; content wraps inside it
       }, 'local');
     }
 
@@ -15914,6 +16075,7 @@ class InteractionManager {
     if (currentWidth !== undefined) {
       if (isText) {
         updates.textWidth = currentWidth;
+        updates.textWidthMode = 'fixed'; // a width set by hand is kept; content wraps inside it
       } else {
         updates.width = currentWidth;
       }
@@ -16523,6 +16685,8 @@ class InteractionManager {
 
     // Enable editing
     textSpan.contentEditable = "true";
+    // An auto-width text grows with what is typed; a fixed one keeps its width and wraps.
+    applyTextWidthStyles(textElement, this.registry.get(id), true);
 
     // Disable click-target during editing (so clicks go to textSpan)
     const clickTarget = container.querySelector('.wbe-text-click-target');
@@ -16621,6 +16785,9 @@ class InteractionManager {
       }
       const obj = this.registry.get(id);
       if (obj) {
+        obj._savedSelection = null; // remembered for panel trips during this edit only
+        // Back to view-mode sizing; the update below then stores the refitted width if any.
+        applyTextWidthStyles(textElement, obj, false);
         // Delete empty text objects (user didn't type anything)
         if (!newText || newText.trim() === '') {
           console.log(`${MODULE_ID} | Deleting empty text: ${id}`);
@@ -16646,16 +16813,11 @@ class InteractionManager {
           return; // Exit early - no need to update deleted object
         }
         
-        // CRITICAL: Save textWidth when finishing edit to prevent width "jumping"
-        // Without this, textWidth remains null and width is reset to auto on socket updates
-        // Auto-calculated width may differ slightly from the current DOM width
-        const currentWidth = textElement.offsetWidth;
-        const updateData = { text: newText };
-        
-        // Only save textWidth if it wasn't set before (preserve user-resized width)
-        if (!obj.textWidth || obj.textWidth <= 0) {
-          updateData.textWidth = currentWidth;
-        }
+        // CRITICAL: Save textWidth when finishing edit to prevent width "jumping" on other
+        // clients. An auto-width text stores its fitted width for the new content; a
+        // fixed-width text (set with a handle) keeps its width. A text saved before width
+        // modes existed gets its mode here (text-width.mjs, resolveTextWidthMode).
+        const updateData = { text: newText, ...widthUpdateFor(obj, textElement) };
         
         // UNDO-REDO: Clear editingId BEFORE update so UndoRedoManager records this change
         if (this.editingId === id) {
@@ -17328,11 +17490,14 @@ class InteractionManager {
       requestAnimationFrame(() => {
         const textElement = this.layer?.getTextElement(obj.id);
         if (textElement && (!obj.textWidth || obj.textWidth <= 0)) {
-          const width = textElement.offsetWidth;
-          if (width > 0) {
-            // Use registry.update() for proper lifecycle (DB save, socket, etc.)
-            this.registry.update(obj.id, { textWidth: width }, 'local');
-          }
+          // Short pastes start auto (fit their content). A paste wider than the 400px
+          // paste cap starts fixed at that cap and wraps, as pasted paragraphs always did.
+          const fitted = measureAutoTextWidth(textElement);
+          const changes = fitted > PASTED_TEXT_MAX_AUTO_WIDTH
+            ? { textWidth: PASTED_TEXT_MAX_AUTO_WIDTH, textWidthMode: 'fixed' }
+            : { textWidth: fitted, textWidthMode: 'auto' };
+          // Use registry.update() for proper lifecycle (DB save, socket, etc.)
+          this.registry.update(obj.id, changes, 'local');
         }
       });
     }
@@ -17844,6 +18009,27 @@ class InteractionManager {
 // ==========================================
 // 6. Foundry Persistence Adapter (Save/Load)
 // ==========================================
+/**
+ * Whether this client writes the WBE data of the scene it is viewing to the database: one writer
+ * per scene. Foundry's activeGM if they view this scene; otherwise the first active GM (by id) who
+ * views it. With every GM on one scene this is the activeGM, as before. A GM on another scene (a
+ * co-GM preparing the next scene, or parallel e2e workers on their own scenes) used to have
+ * nobody saving their changes, because only the activeGM saved, and only its own scene.
+ * @returns {boolean}
+ */
+function isSceneWriter() {
+  const me = game.user;
+  const sceneId = canvas?.scene?.id;
+  if (!me?.isGM || !sceneId) return false;
+  // Our own canvas is the truth for us; others' viewedScene arrives with their User update.
+  const viewing = (u) => (u === me ? sceneId : u.viewedScene);
+  const active = game.users?.activeGM;
+  if (active && viewing(active) === sceneId) return active === me;
+  const here = game.users.filter(u => u.active && u.isGM && viewing(u) === sceneId)
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return here.length ? here[0] === me : active === me;
+}
+
 class FoundryPersistenceAdapter {
   constructor() {
     this.FLAG_SCOPE = MODULE_ID;
@@ -17887,8 +18073,8 @@ class FoundryPersistenceAdapter {
    * @param {Object} data - Data to save
    */
   async saveByType(serializationKey, data) {
-    // SSOT: Only activeGM saves (prevents duplicate writes with multiple GMs)
-    if (game.user !== game.users?.activeGM) return;
+    // SSOT: one writer per scene (prevents duplicate writes with multiple GMs)
+    if (!isSceneWriter()) return;
     const flagKey = this._storageTypes.get(serializationKey);
     if (!flagKey) {
       console.warn(`[Persistence] Unknown storage type: ${serializationKey}`);
@@ -17945,8 +18131,8 @@ class FoundryPersistenceAdapter {
    * For example: unsetFlag(scope, "images.objectId") will remove objectId from images: unsetFlag(scope, "images.objectId") unsetFlag(scope, "images.objectId") will remove objectId from images images
    */
   async deleteObjectFromFlag(objectId, flagKey) {
-    // SSOT: Only activeGM deletes (prevents duplicate operations with multiple GMs)
-    if (game.user !== game.users?.activeGM) return;
+    // SSOT: one writer per scene (prevents duplicate operations with multiple GMs)
+    if (!isSceneWriter()) return;
     if (!canvas?.scene) {
       console.warn(`[Persistence] No scene available, skipping deleteObjectFromFlag`);
       return;
@@ -18015,15 +18201,15 @@ class PersistenceController {
     // If we become the new activeGM, trigger a catch-up save to persist any unsaved data
     Hooks.on('userConnected', (user, connected) => {
       if (!connected && user.isGM) {
-        // A GM disconnected - check if we're now the activeGM
-        if (game.user === game.users?.activeGM) {
-          console.log('[Persistence] Became activeGM after GM disconnect, scheduling catch-up save');
+        // A GM disconnected - check if we now write this scene
+        if (isSceneWriter()) {
+          console.log('[Persistence] Became the writer of this scene after GM disconnect, scheduling catch-up save');
           this._scheduleSave();
         }
       }
     });
     
-    console.log(`[Persistence] Initialized (SSOT: activeGM writes only)`);
+    console.log(`[Persistence] Initialized (SSOT: one writer per scene)`);
   }
 
   /**
@@ -18031,7 +18217,7 @@ class PersistenceController {
    * 
    * ARCHITECTURE (SSOT - Single Source of Truth):
    * - Players: only send socket messages, DO NOT trigger saving
-   * - activeGM: the ONE designated GM who saves all changes to database
+   * - Scene writer (isSceneWriter): the ONE GM per scene who saves its changes to the database
    * - Other GMs: receive socket updates but do NOT save (prevents duplicate writes)
    */
   _handleRegistryChange({ id, type, source }) {
@@ -18040,9 +18226,9 @@ class PersistenceController {
     
     // For deletion - do not check _isLoading (deletion is not blocked by loading)
     if (type === 'deleted') {
-      // SSOT: Only activeGM deletes from the database
-      if (game.user === game.users?.activeGM) {
-        console.log(`[Persistence] Delete request: id=${id}, source=${source}, isActiveGM=true`);
+      // SSOT: only this scene's writer deletes from the database
+      if (isSceneWriter()) {
+        console.log(`[Persistence] Delete request: id=${id}, source=${source}, sceneWriter=true`);
         this._deleteFromDB(id);
       }
       return;
@@ -18051,9 +18237,9 @@ class PersistenceController {
     // For created/updated - check _isLoading
     if (this._isLoading) return;
 
-    // SSOT: Only activeGM saves to database
+    // SSOT: only this scene's writer saves to the database
     // This ensures single writer even with multiple GM users connected
-    if (game.user !== game.users?.activeGM) return;
+    if (!isSceneWriter()) return;
 
     // ActiveGM saves all changes:
     // - source='local': own actions (creation, editing)
@@ -18200,8 +18386,8 @@ class PersistenceController {
    * Uses toJSON() from objects (SSOT: Registry) toJSON() from objects (SSOT: Registry)
    */
   async _saveAll() {
-    // SSOT: Only activeGM saves (single writer architecture)
-    if (game.user !== game.users?.activeGM) return;
+    // SSOT: one writer per scene (single writer architecture)
+    if (!isSceneWriter()) return;
 
     // Protection against parallel saves
     if (this._isSaving) {
@@ -18918,6 +19104,8 @@ function injectGMWarningIndicatorCSS() {
       display: none;
       border: 1px solid rgba(255, 100, 100, 0.8);  /* Red border */
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      /* Information only: clicks pass through, e.g. to the WBE toolbar's handle under it */
+      pointer-events: none;
     }
   `;
   document.head.appendChild(style);
@@ -19556,6 +19744,31 @@ class Whiteboard {
         console.warn(`${MODULE_ID} | Failed to apply collapseToolbar setting:`, err);
       }
 
+      // wbe-toolbar-orientation-select: this user's orientation, and double-clicking the drag
+      // handle flips the same collapseToolbar setting as the ⚙ checkbox (its onChange collapses).
+      try {
+        window.WBEToolbar?.setOrientation?.(game.settings.get(MODULE_ID, 'toolbarOrientation'));
+      } catch (err) {
+        console.warn(`${MODULE_ID} | Failed to apply toolbarOrientation setting:`, err);
+      }
+      window.WBEToolbar?.setHeaderDoubleClickHandler?.(() => {
+        game.settings.set(MODULE_ID, 'collapseToolbar', !game.settings.get(MODULE_ID, 'collapseToolbar'));
+      });
+
+      // Arrow (Select): first on the toolbar, highlighted while no tool is on (wbe-toolbar.mjs
+      // refreshSelectIndicator); clicking it turns the current tool off, same as V.
+      registerTool({
+        id: 'wbe-select',
+        title: 'Select',
+        hotkey: 'V',
+        icon: 'fa-solid fa-arrow-pointer',
+        group: 'select',
+        type: 'button',
+        onClick: () => {
+          this.interaction.resetTools();
+        }
+      });
+
       // Register mass selection in WBE Toolbar
       const massSelCtrl = this.interaction.massSelection;
       const MASS_SEL_STORAGE_KEY = 'wbe-mass-selection-toggle';
@@ -19588,6 +19801,7 @@ class Whiteboard {
       registerTool({
         id: 'wbe-create-text',
         title: 'Create Text',
+        hotkey: 'T',
         icon: 'fa-solid fa-font',
         group: 'create',
         type: 'button',
@@ -19648,7 +19862,26 @@ class Whiteboard {
           showWBESettingsPopup();
         }
       });
-      
+
+      // wbe-toolbar-orientation-select: next to ⚙ and, like it, kept while collapsed. Icon and
+      // title name the orientation a click switches to (setOrientation re-reads both getters).
+      registerTool({
+        id: 'wbe-orientation',
+        get title() {
+          return window.WBEToolbar?.getOrientation?.() === 'horizontal' ? 'Vertical Toolbar' : 'Horizontal Toolbar';
+        },
+        get icon() {
+          return window.WBEToolbar?.getOrientation?.() === 'horizontal' ? 'fa-solid fa-arrows-up-down' : 'fa-solid fa-arrows-left-right';
+        },
+        group: 'settings',
+        type: 'button',
+        showWhenCollapsed: true,
+        onClick: () => {
+          const next = window.WBEToolbar?.getOrientation?.() === 'horizontal' ? 'vertical' : 'horizontal';
+          game.settings.set(MODULE_ID, 'toolbarOrientation', next);
+        }
+      });
+
       // Register "Debug Snapshot" button in toolbar
       registerTool({
         id: 'wbe-snapshot',
@@ -19802,6 +20035,7 @@ class Whiteboard {
       zIndex: o.zIndex,
       selected: o.selected,
       textWidth: o.textWidth || '-',
+      textWidthMode: o.textWidthMode ?? '-',
       x: Math.round(o.x),
       y: Math.round(o.y)
     })));

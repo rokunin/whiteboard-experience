@@ -306,15 +306,16 @@ class ShapesManager {
     }
 
     const tools = [
-      { id: 'wbe-shape-rect', type: SHAPE_TYPES.RECT, icon: 'fa-solid fa-square', title: 'Rectangle (R)' },
-      { id: 'wbe-shape-circle', type: SHAPE_TYPES.CIRCLE, icon: 'fa-solid fa-circle', title: 'Circle (C)' },
-      { id: 'wbe-shape-freehand', type: SHAPE_TYPES.FREEHAND, icon: 'fa-solid fa-pen', title: 'Freehand (F)' }
+      { id: 'wbe-shape-rect', type: SHAPE_TYPES.RECT, icon: 'fa-solid fa-square', title: 'Rectangle', hotkey: 'S' },
+      { id: 'wbe-shape-circle', type: SHAPE_TYPES.CIRCLE, icon: 'fa-solid fa-circle', title: 'Circle', hotkey: 'C' },
+      { id: 'wbe-shape-freehand', type: SHAPE_TYPES.FREEHAND, icon: 'fa-solid fa-pen', title: 'Freehand', hotkey: 'F' }
     ];
 
     tools.forEach(tool => {
       window.WBEToolbar.registerTool({
         id: tool.id,
         title: tool.title,
+        hotkey: tool.hotkey,
         icon: tool.icon,
         group: 'shapes',
         type: 'tool', // exclusive - только один активен
